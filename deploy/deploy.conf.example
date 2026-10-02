@@ -1,0 +1,11 @@
+# Ziel für ./dev.sh deploy – kopieren nach deploy/deploy.conf (steht in .gitignore).
+
+# SSH-Alias aus ~/.ssh/config oder benutzer@host. Hostname, Benutzer und Schlüssel stehen dort.
+HOST=server
+# Nur setzen, wenn der Port nicht in ~/.ssh/config steht
+SSH_PORT=
+
+# Nur für die Erstinstallation (./dev.sh deploy --install)
+DOMAIN=app.example.org
+# Nur auf HestiaCP-Servern: Benutzer, dem die Web-Domain gehört
+HESTIA_USER=

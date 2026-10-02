@@ -1,0 +1,5 @@
+# Betrieb hinter nginx: nur auf localhost lauschen, Proxy-Header auswerten.
+server:
+  address: 127.0.0.1
+  forward-headers-strategy: framework
+  shutdown: graceful

@@ -1,0 +1,29 @@
+# Alle Werte, die sich je Umgebung unterscheiden, kommen aus der Umgebung: lokal setzt sie
+# dev.project.sh, auf dem Server die Env-Datei /etc/projecttemplate/projecttemplate.env.
+# Die Vorgaben hier passen zu ./dev.sh start, damit auch ein Start aus der IDE funktioniert.
+spring:
+  application:
+    name: projecttemplate
+  datasource:
+    url: ${DB_URL:jdbc:mariadb://127.0.0.1:3310/projecttemplate}
+    username: ${DB_USER:projecttemplate}
+    password: ${DB_PASSWORD:projecttemplate}
+  jpa:
+    open-in-view: false
+    hibernate:
+      # Das Schema gehört Flyway (db/migration); Hibernate prüft nur, ob es passt.
+      ddl-auto: validate
+  flyway:
+    enabled: true
+
+server:
+  port: ${SERVER_PORT:8100}
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health
+  endpoint:
+    health:
+      show-details: never

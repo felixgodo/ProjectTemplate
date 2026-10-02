@@ -1,0 +1,22 @@
+# Builds
+target/
+node_modules/
+dist/
+*.tsbuildinfo
+pom.xml.versionsBackup
+
+# Laufzeitdaten von dev.sh (Logs, PIDs)
+.dev/
+
+# Release-Pakete
+/releases/
+
+# Geheimnisse und lokale Ziele: gehören niemals in die Versionierung
+.env
+.env.*
+deploy/deploy.conf
+
+# Betriebssystem und IDE
+.DS_Store
+.idea/
+*.iml

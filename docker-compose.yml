@@ -1,0 +1,25 @@
+# Lokale Entwicklungsumgebung: MariaDB. Eigener Host-Port, damit andere Projekte parallel laufen
+# können; ./dev.sh start gibt ihn über PTPL_DB_PORT vor.
+name: projecttemplate
+
+services:
+  mariadb:
+    image: mariadb:11
+    environment:
+      MARIADB_DATABASE: projecttemplate
+      MARIADB_USER: projecttemplate
+      MARIADB_PASSWORD: projecttemplate
+      MARIADB_ROOT_PASSWORD: root
+    ports:
+      - "127.0.0.1:${PTPL_DB_PORT:-3310}:3306"
+    volumes:
+      - db-data:/var/lib/mysql
+    healthcheck:
+      # ./dev.sh start wartet hierauf (docker compose up --wait)
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 3s
+      timeout: 5s
+      retries: 20
+
+volumes:
+  db-data:

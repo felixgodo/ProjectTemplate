@@ -1,0 +1,24 @@
+# /etc/systemd/system/projecttemplate.service
+[Unit]
+Description=ProjectTemplate (Spring Boot)
+After=network.target mariadb.service
+
+[Service]
+Type=simple
+User=projecttemplate
+WorkingDirectory=/opt/projecttemplate/data
+# Standard für kleine Installationen; JAVA_OPTS in der Env-Datei hat Vorrang
+Environment="JAVA_OPTS=-Xmx384m"
+EnvironmentFile=/etc/projecttemplate/projecttemplate.env
+ExecStart=/usr/bin/java $JAVA_OPTS -jar /opt/projecttemplate/current/projecttemplate.jar --spring.profiles.active=prod
+Restart=on-failure
+RestartSec=3
+# 143 = SIGTERM: ein normales Ende der JVM, kein Fehlschlag
+SuccessExitStatus=143
+# Härtung
+NoNewPrivileges=true
+ProtectSystem=full
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,9 @@
+# Projekte, die den devkit aus diesem Template beziehen (./devkit-sync.sh).
+# Ein Pfad je Zeile, relativ zu diesem Verzeichnis. new-project.sh trägt neue Projekte ein.
+../ScriptPress
+../BrightHub
+../LicenseHub
+../DocHub
+../spot-mm
+../felixgo
+../KompassRuhr
