@@ -27,6 +27,16 @@ dk_ssh_prime() {
   done < <(ssh -G "$host" 2>/dev/null | awk '$1 == "identityfile" { print $2 }')
 }
 
+# Meldet sich einmal an und lässt die Verbindung (ControlMaster) für alle weiteren Aufrufe offen.
+# Klappt es ohne Rückfrage nicht – kein Schlüssel hinterlegt, Schlüssel mit Passphrase –, fragt ssh
+# hier nach dem Passwort bzw. der Passphrase. Ohne Terminal gibt es niemanden, der antworten könnte.
+dk_ssh_login() {
+  ssh "${DK_SSH_OPTS[@]}" -o BatchMode=yes "$DK_SSH_HOST" true 2>/dev/null && return 0
+  [ -t 0 ] || { warn "Anmeldung an '$DK_SSH_HOST' braucht eine Eingabe, es gibt aber kein Terminal."; return 1; }
+  info "Anmeldung an $DK_SSH_HOST – ssh fragt einmal nach Passwort oder Passphrase"
+  ssh "${DK_SSH_OPTS[@]}" "$DK_SSH_HOST" true
+}
+
 # dk_remote_open <host> [port] – öffnet die Verbindung (ControlMaster) und klärt, ob sudo nötig ist
 dk_remote_open() {
   local uid
@@ -34,7 +44,9 @@ dk_remote_open() {
   DK_SSH_HOST="$1"
   # Kurzer Pfad unter /tmp: macOS-$TMPDIR ist für SSH-Control-Sockets zu lang (max. 104 Zeichen)
   DK_SSH_CTL="$(mktemp -d /tmp/dk-ssh.XXXXXX)"
-  DK_SSH_OPTS=(-o ControlMaster=auto -o "ControlPath=$DK_SSH_CTL/%C" -o ControlPersist=120 -o ConnectTimeout=10)
+  DK_SSH_OPTS=(-o ControlMaster=auto -o "ControlPath=$DK_SSH_CTL/%C" -o ControlPersist=1800 -o ConnectTimeout=10)
+  # ControlPersist: Zwischen Anmeldung und Upload liegt oft ein Build – solange bleibt die
+  # Verbindung offen, damit das Passwort nur einmal nötig ist. dk_remote_close beendet sie.
   DK_SCP_OPTS=(-o "ControlPath=$DK_SSH_CTL/%C")
   # Port nur mitgeben, wenn gesetzt – sonst gilt ~/.ssh/config (Host-Alias, Port, Schlüssel)
   if [ -n "${2:-}" ]; then
@@ -42,7 +54,9 @@ dk_remote_open() {
     DK_SCP_OPTS+=(-P "$2")
   fi
   dk_ssh_prime "$DK_SSH_HOST"
-  uid="$(dk_remote 'id -u')" || die "SSH-Verbindung zu '$DK_SSH_HOST' fehlgeschlagen. Prüfen:  ssh $DK_SSH_HOST true"
+  # Der EXIT-Trap des Aufrufers steht erst nach dem Öffnen – hier selbst aufräumen
+  dk_ssh_login || { dk_remote_close; die "SSH-Anmeldung an '$1' fehlgeschlagen. Prüfen:  ssh $1 true"; }
+  uid="$(dk_remote 'id -u')" || { dk_remote_close; die "SSH-Verbindung zu '$1' fehlgeschlagen. Prüfen:  ssh $1 true"; }
   DK_SUDO=""
   [ "$uid" = 0 ] || DK_SUDO="sudo "
 }
