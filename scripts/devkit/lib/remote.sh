@@ -3,7 +3,10 @@
 # generische Deploy für Projekte nach dem Template.
 
 DK_SSH_HOST=""
-DK_SSH_CTL=""
+# Exportiert: ein von hier gestartetes Skript (z. B. deploy.sh eines Nachbarprojekts) übernimmt die
+# offene Verbindung, statt sich neu anzumelden.
+DK_SSH_CTL="${DK_SSH_CTL:-}"
+DK_SSH_OWN=0
 DK_SSH_OPTS=()
 DK_SCP_OPTS=()
 DK_SUDO=""
@@ -12,19 +15,24 @@ DK_SUDO=""
 dk_q() { printf '%q ' "$@"; }
 
 # Ein Schlüssel mit Passphrase scheitert im BatchMode, obwohl ssh von Hand klappt – dort fragt
-# ssh nach, hier darf es nicht. Deshalb den Schlüssel einmal in den Agent laden.
+# ssh nach, hier darf es nicht. Deshalb den Schlüssel einmal in den Agent laden – auch wenn dort
+# schon andere Schlüssel liegen.
 dk_ssh_prime() {
-  local host="$1" rc=0 key
+  local host="$1" rc=0 key loaded fp
   ssh -o BatchMode=yes -o ConnectTimeout=10 "$host" true 2>/dev/null && return 0
   [ -t 0 ] && command -v ssh-add >/dev/null 2>&1 || return 0
-  ssh-add -l >/dev/null 2>&1 || rc=$?
-  [ "$rc" -eq 1 ] || return 0      # 1 = Agent läuft, ist aber leer; 2 = kein Agent
+  loaded="$(ssh-add -l 2>/dev/null)" || rc=$?
+  [ "$rc" -le 1 ] || return 0      # 0 = Agent mit Schlüsseln, 1 = Agent leer, 2 = kein Agent
   while read -r key; do
     key="${key/#\~/$HOME}"
     [ -f "$key" ] || continue
+    fp="$(ssh-keygen -lf "$key" 2>/dev/null | awk '{ print $2 }')"
+    [ -n "$fp" ] || continue
+    case "$loaded" in *"$fp"*) continue ;; esac
     info "Schlüssel $key in den SSH-Agent laden"
     ssh-add "$key" </dev/tty && break
   done < <(ssh -G "$host" 2>/dev/null | awk '$1 == "identityfile" { print $2 }')
+  return 0
 }
 
 # Meldet sich einmal an und lässt die Verbindung (ControlMaster) für alle weiteren Aufrufe offen.
@@ -37,13 +45,22 @@ dk_ssh_login() {
   ssh "${DK_SSH_OPTS[@]}" "$DK_SSH_HOST" true
 }
 
-# dk_remote_open <host> [port] – öffnet die Verbindung (ControlMaster) und klärt, ob sudo nötig ist
+# dk_remote_open <host> [port] – öffnet die Verbindung (ControlMaster) und klärt, ob sudo nötig ist.
+# Hält der aufrufende Prozess schon eine Verbindung zu diesem Server offen (DK_SSH_CTL geerbt), wird
+# sie mitbenutzt; schließen darf sie dann nur er.
 dk_remote_open() {
   local uid
   need ssh scp
   DK_SSH_HOST="$1"
-  # Kurzer Pfad unter /tmp: macOS-$TMPDIR ist für SSH-Control-Sockets zu lang (max. 104 Zeichen)
-  DK_SSH_CTL="$(mktemp -d /tmp/dk-ssh.XXXXXX)"
+  if [ -n "$DK_SSH_CTL" ] && [ -d "$DK_SSH_CTL" ] \
+    && ssh -o "ControlPath=$DK_SSH_CTL/%C" ${2:+-p "$2"} -O check "$1" 2>/dev/null; then
+    DK_SSH_OWN=0
+  else
+    # Kurzer Pfad unter /tmp: macOS-$TMPDIR ist für SSH-Control-Sockets zu lang (max. 104 Zeichen)
+    DK_SSH_CTL="$(mktemp -d /tmp/dk-ssh.XXXXXX)"
+    DK_SSH_OWN=1
+  fi
+  export DK_SSH_CTL
   DK_SSH_OPTS=(-o ControlMaster=auto -o "ControlPath=$DK_SSH_CTL/%C" -o ControlPersist=1800 -o ConnectTimeout=10)
   # ControlPersist: Zwischen Anmeldung und Upload liegt oft ein Build – solange bleibt die
   # Verbindung offen, damit das Passwort nur einmal nötig ist. dk_remote_close beendet sie.
@@ -53,7 +70,7 @@ dk_remote_open() {
     DK_SSH_OPTS+=(-p "$2")
     DK_SCP_OPTS+=(-P "$2")
   fi
-  dk_ssh_prime "$DK_SSH_HOST"
+  [ "$DK_SSH_OWN" = 0 ] || dk_ssh_prime "$DK_SSH_HOST"
   # Der EXIT-Trap des Aufrufers steht erst nach dem Öffnen – hier selbst aufräumen
   dk_ssh_login || { dk_remote_close; die "SSH-Anmeldung an '$1' fehlgeschlagen. Prüfen:  ssh $1 true"; }
   uid="$(dk_remote 'id -u')" || { dk_remote_close; die "SSH-Verbindung zu '$1' fehlgeschlagen. Prüfen:  ssh $1 true"; }
@@ -63,6 +80,7 @@ dk_remote_open() {
 
 dk_remote_close() {
   [ -n "$DK_SSH_CTL" ] || return 0
+  [ "$DK_SSH_OWN" = 1 ] || return 0
   ssh "${DK_SSH_OPTS[@]}" -O exit "$DK_SSH_HOST" 2>/dev/null || true
   rm -rf "$DK_SSH_CTL"
   DK_SSH_CTL=""

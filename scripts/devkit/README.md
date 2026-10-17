@@ -17,7 +17,8 @@ scripts/devkit/
   lib/version.sh    Version lesen, prüfen, hochzählen, überall setzen
   lib/infra.sh      Java wählen, npm-Abhängigkeiten, lokale Maven-Artefakte, docker compose
   lib/pack.sh       Prüfsummen, VERSION-Datei, Zip · generisches Release
-  lib/remote.sh     SSH (eine Verbindung, Anmeldung per Schlüssel oder einmal per Passwort),
+  lib/remote.sh     SSH (eine Verbindung, Anmeldung per Schlüssel oder einmal per Passwort;
+                    DK_SSH_CTL ist exportiert, aufgerufene Skripte benutzen sie mit),
                     Upload mit Prüfsumme · generisches Deploy
 ```
 
