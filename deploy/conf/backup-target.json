@@ -1,0 +1,8 @@
+{
+  "name": "projecttemplate",
+  "description": "Angemeldet von setup.sh",
+  "databases": ["env:/etc/projecttemplate/projecttemplate.env:DB_URL"],
+  "paths": ["/opt/projecttemplate/data", "/etc/projecttemplate"],
+  "excludes": [],
+  "serviceName": "projecttemplate"
+}
