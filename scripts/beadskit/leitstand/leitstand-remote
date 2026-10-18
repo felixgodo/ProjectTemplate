@@ -1,0 +1,275 @@
+#!/bin/sh
+# Fernzugang zum beads-Leitstand: Der Mac (auf dem die Claude-Worker laufen) hält einen
+# SSH-Rückkanal zum Server offen; nginx auf dem Server nimmt HTTPS mit Basic-Auth an und
+# reicht durch den Tunnel an den Leitstand auf dem Mac weiter, der zusätzlich ein Token-Login
+# verlangt. caffeinate hält den Mac wach. Alle Befehle (start, add, drain, stop) laufen auf dem Mac.
+#
+#   leitstand-remote token [--new]   Login-Token anzeigen bzw. neu erzeugen
+#   leitstand-remote install         launchd-Dienste anlegen und starten (Leitstand, Tunnel, caffeinate)
+#   leitstand-remote uninstall       Dienste stoppen und entfernen
+#   leitstand-remote status          Dienste, lokaler Leitstand, Tunnel-Ende auf dem Server
+#   leitstand-remote logs            letzte Zeilen der Dienst-Logs
+#   leitstand-remote server-setup    nginx-Vorlage, Basic-Auth, Domain + Let's Encrypt auf dem Server
+#   leitstand-remote basic-auth      Basic-Auth-Zugang anzeigen
+#
+# Einstellungen per Umgebung (Standard in Klammern): LEITSTAND_SSH_HOST (server),
+# LEITSTAND_PUBLIC_URL (https://leitstand.felix-go.de), LEITSTAND_REMOTE_PORT (13738),
+# PORT (3738), LEITSTAND_HESTIA_USER (felixoben).
+#
+# Token und Basic-Auth liegen in ~/.config/beadskit (nur auf dem Mac). Der Leitstand ist einer für
+# alle Projekte (Liste in ~/.config/beadskit/projects.txt) und läuft aus dem Haupt-Checkout ($ROOT)
+# des Projekts, aus dem install aufgerufen wurde.
+set -eu
+
+ROOT=$(git -C "$(dirname "$0")" rev-parse --path-format=absolute --git-common-dir)
+ROOT=$(dirname "$ROOT")
+SSH_HOST=${LEITSTAND_SSH_HOST:-server}
+PUBLIC_URL=${LEITSTAND_PUBLIC_URL:-https://leitstand.felix-go.de}
+DOMAIN=$(printf '%s' "$PUBLIC_URL" | sed -E 's#^https?://##; s#/.*$##')
+REMOTE_PORT=${LEITSTAND_REMOTE_PORT:-13738}
+LOCAL_PORT=${PORT:-3738}
+HESTIA_USER=${LEITSTAND_HESTIA_USER:-felixoben}
+CONF=${BEADSKIT_HOME:-$HOME/.config/beadskit}
+mkdir -p "$CONF"
+TOKEN_FILE=${LEITSTAND_TOKEN_FILE:-$CONF/leitstand-token}
+AUTH_FILE=$CONF/leitstand-basicauth
+AGENTS=$HOME/Library/LaunchAgents
+LOGS=$HOME/Library/Logs/beads-leitstand
+LABEL=eu.beadskit.leitstand
+SERVICES="server tunnel awake"
+
+usage() {
+  sed -n '7,14s/^# \{0,1\}//p' "$0" >&2
+  exit 2
+}
+
+random() {
+  # URL- und shell-sichere Zeichen
+  openssl rand -base64 48 | tr -d '/+=\n' | cut -c1-"$1"
+}
+
+xml() {
+  printf '%s' "$1" | sed 's/&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g'
+}
+
+cmd_token() {
+  if [ "${1-}" = --new ]; then
+    umask 077
+    random 48 >"$TOKEN_FILE"
+    echo "Neues Token in $TOKEN_FILE (alte Sitzungen sind damit abgemeldet)."
+    echo "Anzeigen: scripts/beadskit/leitstand/leitstand-remote token; danach Leitstand neu starten (install)."
+    return
+  fi
+  [ -s "$TOKEN_FILE" ] || { echo "kein Token, erst: $0 token --new" >&2; exit 1; }
+  cat "$TOKEN_FILE"; echo
+}
+
+# Schreibt ein LaunchAgent-plist: $1 Name, $2 Arbeitsverzeichnis, danach das Programm mit Argumenten
+plist() {
+  name=$1 dir=$2
+  shift 2
+  file="$AGENTS/$LABEL.$name.plist"
+  {
+    cat <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>$LABEL.$name</string>
+  <key>ProgramArguments</key><array>
+EOF
+    for a in "$@"; do printf '    <string>%s</string>\n' "$(xml "$a")"; done
+    cat <<EOF
+  </array>
+  <key>WorkingDirectory</key><string>$(xml "$dir")</string>
+  <key>EnvironmentVariables</key><dict>
+    <key>PATH</key><string>$(xml "$PATH")</string>
+    <key>HOME</key><string>$(xml "$HOME")</string>
+    <key>PORT</key><string>$LOCAL_PORT</string>
+    <key>LEITSTAND_PUBLIC_URL</key><string>$(xml "$PUBLIC_URL")</string>
+    <key>LEITSTAND_TOKEN_FILE</key><string>$(xml "$TOKEN_FILE")</string>
+  </dict>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>ThrottleInterval</key><integer>15</integer>
+  <key>StandardOutPath</key><string>$(xml "$LOGS/$name.log")</string>
+  <key>StandardErrorPath</key><string>$(xml "$LOGS/$name.log")</string>
+</dict></plist>
+EOF
+  } >"$file"
+  plutil -lint "$file" >/dev/null
+}
+
+cmd_install() {
+  [ -s "$TOKEN_FILE" ] || { echo "kein Token, erst: $0 token --new" >&2; exit 1; }
+  for bin in node claude gh bd jq; do
+    command -v "$bin" >/dev/null || { echo "$bin nicht im PATH; die Worker brauchen es" >&2; exit 1; }
+  done
+  mkdir -p "$AGENTS" "$LOGS"
+  plist server "$ROOT" "$(command -v node)" "$ROOT/scripts/beadskit/leitstand/inbox.mjs"
+  # -R nur auf dem Loopback des Servers; nginx dort ist der einzige Weg von außen
+  plist tunnel "$HOME" /usr/bin/ssh -N -o BatchMode=yes -o ExitOnForwardFailure=yes \
+    -o ServerAliveInterval=30 -o ServerAliveCountMax=3 \
+    -R "127.0.0.1:$REMOTE_PORT:127.0.0.1:$LOCAL_PORT" "$SSH_HOST"
+  # -i: kein Leerlauf-Schlaf, -s: kein System-Schlaf am Netzteil. Zugeklappt schläft ein
+  # MacBook ohne externen Monitor trotzdem.
+  plist awake "$HOME" /usr/bin/caffeinate -i -s
+  for s in $SERVICES; do
+    launchctl bootout "gui/$(id -u)/$LABEL.$s" 2>/dev/null || true
+    launchctl bootstrap "gui/$(id -u)" "$AGENTS/$LABEL.$s.plist"
+  done
+  echo "Dienste gestartet. Lokal: http://127.0.0.1:$LOCAL_PORT  ·  von außen: $PUBLIC_URL"
+  echo "Prüfen: $0 status"
+}
+
+cmd_uninstall() {
+  for s in $SERVICES; do
+    launchctl bootout "gui/$(id -u)/$LABEL.$s" 2>/dev/null || true
+    rm -f "$AGENTS/$LABEL.$s.plist"
+  done
+  echo "Dienste entfernt (Token und Logs bleiben)."
+}
+
+cmd_status() {
+  for s in $SERVICES; do
+    if out=$(launchctl print "gui/$(id -u)/$LABEL.$s" 2>/dev/null); then
+      state=$(printf '%s\n' "$out" | awk -F'= ' '/^\tstate = /{print $2; exit}')
+      pid=$(printf '%s\n' "$out" | awk -F'= ' '/^\tpid = /{print $2; exit}')
+      printf '%-7s %s%s\n' "$s" "${state:-?}" "${pid:+ (pid $pid)}"
+    else
+      printf '%-7s nicht installiert\n' "$s"
+    fi
+  done
+  code=$(curl -s -o /dev/null -w '%{http_code}' -m 5 "http://127.0.0.1:$LOCAL_PORT/login" || true)
+  echo "Leitstand lokal: HTTP ${code:-keine Antwort} (200 = Login-Seite)"
+  code=$(ssh -o BatchMode=yes -o ConnectTimeout=8 "$SSH_HOST" \
+    "curl -s -o /dev/null -w '%{http_code}' -m 5 -H 'Host: $DOMAIN' http://127.0.0.1:$REMOTE_PORT/login" 2>/dev/null || true)
+  echo "Tunnel-Ende auf $SSH_HOST: HTTP ${code:-keine Antwort}"
+  code=$(curl -s -o /dev/null -w '%{http_code}' -m 8 "$PUBLIC_URL/login" || true)
+  echo "Öffentlich $PUBLIC_URL: HTTP ${code:-keine Antwort} (401 = Basic-Auth davor, richtig)"
+  pmset -g assertions 2>/dev/null | grep -q 'caffeinate' && echo "caffeinate: hält wach" || echo "caffeinate: aus"
+}
+
+cmd_logs() {
+  for s in $SERVICES; do
+    echo "== $s"
+    tail -n 15 "$LOGS/$s.log" 2>/dev/null || echo "(leer)"
+  done
+}
+
+cmd_basic_auth() {
+  [ -s "$AUTH_FILE" ] || { echo "noch kein Basic-Auth-Zugang (server-setup legt ihn an)" >&2; exit 1; }
+  cat "$AUTH_FILE"; echo
+}
+
+# Richtet den Server ein: Hestia-Proxy-Vorlage, Rate-Limit, Basic-Auth, Domain mit Let's Encrypt.
+# Nur mit Freigabe ausführen; ändert nginx auf dem Produktivserver.
+cmd_server_setup() {
+  if [ "${1-}" = --dry-run ]; then
+    # Zeigt nur das Skript, das auf dem Server liefe (mit Platzhalter statt Hash)
+    hash='<hash>'
+    run() { echo "# ssh $SSH_HOST bash -s -- $DOMAIN $HESTIA_USER $REMOTE_PORT"; cat; }
+  else
+    if [ ! -s "$AUTH_FILE" ]; then
+      umask 077
+      printf 'leitstand:%s' "$(random 32)" >"$AUTH_FILE"
+    fi
+    # Nur der Hash geht auf den Server
+    hash=$(cut -d: -f2- "$AUTH_FILE" | tr -d '\n' | openssl passwd -apr1 -stdin)
+    run() { ssh -o BatchMode=yes "$SSH_HOST" "bash -s -- '$DOMAIN' '$HESTIA_USER' '$REMOTE_PORT'"; }
+  fi
+  # shellcheck disable=SC2087 # Absicht: $hash lokal einsetzen, \$… erst auf dem Server
+  run <<REMOTE
+set -euo pipefail
+DOMAIN=\$1 HUSER=\$2 RPORT=\$3
+export PATH=\$PATH:/usr/local/hestia/bin
+TPL=/usr/local/hestia/data/templates/web/nginx
+
+printf '%s\n' 'leitstand:$hash' > /etc/nginx/leitstand.htpasswd
+chown root:www-data /etc/nginx/leitstand.htpasswd
+chmod 640 /etc/nginx/leitstand.htpasswd
+
+cat > /etc/nginx/conf.d/leitstand-ratelimit.conf <<'EOF'
+# Leitstand (beadskit leitstand-remote): Anfragen je IP begrenzen
+limit_req_zone \$binary_remote_addr zone=leitstand:10m rate=5r/s;
+EOF
+
+cat > \$TPL/leitstand.tpl <<'EOF'
+# Leitstand: nur HTTPS (Weiterleitung), siehe leitstand.stpl
+server {
+	listen      %ip%:%proxy_port%;
+	server_name %domain_idn% %alias_idn%;
+	error_log   /var/log/%web_system%/domains/%domain%.error.log error;
+	include %home%/%user%/conf/web/%domain%/nginx.forcessl.conf*;
+	location / { return 301 https://\$host\$request_uri; }
+	include %home%/%user%/conf/web/%domain%/nginx.conf_*;
+}
+EOF
+
+cat > \$TPL/leitstand.stpl <<EOF
+# Leitstand (beadskit leitstand-remote): Basic-Auth, Rate-Limit, Proxy in den
+# SSH-Rückkanal 127.0.0.1:\$RPORT zum Mac. Der Leitstand verlangt dahinter ein Token-Login.
+server {
+	listen      %ip%:%proxy_ssl_port% ssl;
+	server_name %domain_idn% %alias_idn%;
+	error_log   /var/log/%web_system%/domains/%domain%.error.log error;
+	access_log  /var/log/%web_system%/domains/%domain%.log combined;
+
+	ssl_certificate     %ssl_pem%;
+	ssl_certificate_key %ssl_key%;
+	if (\\\$anti_replay = 307) { return 307 https://\\\$host\\\$request_uri; }
+	if (\\\$anti_replay = 425) { return 425; }
+	include %home%/%user%/conf/web/%domain%/nginx.hsts.conf*;
+
+	location ~ /\.(?!well-known\/) { deny all; return 404; }
+
+	location / {
+		auth_basic           "Leitstand";
+		auth_basic_user_file /etc/nginx/leitstand.htpasswd;
+		limit_req            zone=leitstand burst=40 nodelay;
+		limit_req_status     429;
+		client_max_body_size 128k;
+
+		proxy_pass http://127.0.0.1:\$RPORT;
+		proxy_http_version 1.1;
+		# Fester Host: der Leitstand akzeptiert nur seinen eigenen
+		proxy_set_header Host %domain_idn%;
+		proxy_set_header X-Forwarded-For \\\$proxy_add_x_forwarded_for;
+		proxy_set_header X-Forwarded-Proto https;
+		proxy_set_header Authorization "";
+		proxy_read_timeout 150s;
+		proxy_redirect off;
+		add_header X-Robots-Tag "noindex, nofollow" always;
+	}
+
+	include %home%/%user%/conf/web/%domain%/nginx.ssl.conf_*;
+}
+EOF
+
+nginx -t
+if ! v-list-web-domain "\$HUSER" "\$DOMAIN" >/dev/null 2>&1; then
+  v-add-web-domain "\$HUSER" "\$DOMAIN"
+fi
+if ! v-list-web-domain "\$HUSER" "\$DOMAIN" json | grep -q '"LETSENCRYPT": "yes"'; then
+  v-add-letsencrypt-domain "\$HUSER" "\$DOMAIN"
+fi
+v-change-web-domain-proxy-tpl "\$HUSER" "\$DOMAIN" leitstand
+v-add-web-domain-ssl-force "\$HUSER" "\$DOMAIN" 2>/dev/null || true
+nginx -t && systemctl reload nginx
+echo "Server eingerichtet: https://\$DOMAIN -> 127.0.0.1:\$RPORT"
+REMOTE
+  [ "${1-}" = --dry-run ] || echo "Basic-Auth-Zugang: $0 basic-auth (liegt in $AUTH_FILE)"
+}
+
+[ $# -ge 1 ] || usage
+sub=$1
+shift
+case $sub in
+  token) cmd_token "$@" ;;
+  install) cmd_install ;;
+  uninstall) cmd_uninstall ;;
+  status) cmd_status ;;
+  logs) cmd_logs ;;
+  basic-auth) cmd_basic_auth ;;
+  server-setup) cmd_server_setup "$@" ;;
+  *) usage ;;
+esac

@@ -1,0 +1,429 @@
+#!/bin/sh
+# Startet und verwaltet die Worker der beads-Pipeline (Regeln: .claude/skills/worker-regeln.md).
+# Jeder Worker heißt wie sein Worktree (<rolle>-<n>); das ist zugleich der beads-Actor (bdw).
+#
+#   workers start [rolle=N …] [--iterm] [--dry-run]   N = Gesamtzahl je Rolle
+#   workers add <rolle>[=N] … [--iterm] [--dry-run]   N weitere Worker (Standard 1) dazu
+#   workers ls                  Worker dieses Repos mit Rolle und Status
+#   workers attach <name>       Hintergrund-Worker in diesem Terminal öffnen
+#   workers logs <name>         letzte Ausgabe eines Hintergrund-Workers
+#   workers drain [rolle…] [--off]   Worker (alle oder nur diese Rollen) auslaufen lassen
+#   workers stop <name>|--all [--force]   Hintergrund-Worker sofort stoppen
+#   workers config              Projekt-Konfiguration als JSON (für den Leitstand)
+#
+# Teil des beadskit aus dem ProjectTemplate – nicht im Projekt ändern. Was projektspezifisch
+# ist (Name, Ziel-Branch, Rollen, Skills, Module), steht in beads.project.sh im Repo-Wurzelordner.
+#
+# `start` versteht N als Gesamtzahl je Rolle (fix-1..fix-N, laufende werden übersprungen),
+# `add` startet N zusätzliche Worker mit den nächsten freien Nummern; mit --iterm hängt es
+# die Tabs ins vorderste iTerm-Fenster statt ein neues zu öffnen.
+#
+# Ohne --iterm laufen die Worker als Hintergrund-Sessions (claude --bg), mit --iterm
+# in einem iTerm-Fenster, ein Tab je Worker, Farbe je Rolle.
+#
+# Sauber beenden: erst `drain` (Worker claimen nichts Neues und hören nach dem laufenden
+# Issue auf, siehe worker-regeln.md „Auslaufen“), warten bis `ls` alle als idle zeigt,
+# dann `stop --all`. `stop` allein bricht mitten in der Arbeit ab. `drain fix` lässt nur
+# die Fix-Worker auslaufen, `drain fix --off` hebt das wieder auf, `drain --off` alles.
+set -eu
+
+ROOT=$(git -C "$(dirname "$0")" rev-parse --path-format=absolute --git-common-dir)
+ROOT=$(dirname "$ROOT")
+WT_DIR="$ROOT/.claude/worktrees"
+
+# ---- Projekt-Konfiguration (beads.project.sh) mit Vorgaben ----
+BK_NAME=$(basename "$ROOT")
+BK_SLUG=""
+BK_BASE=main
+BK_ROLES="fix search verify regress"
+BK_SKILL_PREFIX=""
+BK_MODULES=""
+BK_START="fix=2 search=1 verify=1 regress=0"
+if [ ! -f "$ROOT/beads.project.sh" ]; then
+  echo "beads.project.sh fehlt in $ROOT (Einrichtung: ProjectTemplate/beadskit-sync.sh --adopt)" >&2
+  exit 1
+fi
+# shellcheck source=/dev/null
+. "$ROOT/beads.project.sh"
+[ -n "$BK_SLUG" ] || BK_SLUG=$(printf '%s' "$BK_NAME" | tr '[:upper:]' '[:lower:]' | tr -cs 'a-z0-9' '-')
+[ -n "$BK_SKILL_PREFIX" ] || BK_SKILL_PREFIX=$BK_SLUG
+ROLES=$BK_ROLES
+for r in $ROLES; do
+  case $r in *[!a-z]*) echo "Rollenname nur a-z: $r (BK_ROLES in beads.project.sh)" >&2; exit 1 ;; esac
+done
+
+# Gemeinsam für alle Worktrees, nicht im Repo; die Skills prüfen sie vor jedem Claim.
+# $DRAIN gilt für alle Worker, $DRAIN-<rolle> nur für eine Rolle.
+DRAIN=$(git -C "$ROOT" rev-parse --path-format=absolute --git-common-dir)/$BK_SLUG-workers-drain
+
+# Der Leitstand (ein Prozess für alle Projekte) liest diese Liste.
+register() {
+  conf=${BEADSKIT_HOME:-$HOME/.config/beadskit}
+  mkdir -p "$conf" 2>/dev/null || return 0
+  grep -qxF "$ROOT" "$conf/projects.txt" 2>/dev/null || echo "$ROOT" >>"$conf/projects.txt"
+}
+register
+
+# Rollen mit Drain-Markierung ("alle" bei der globalen), leer ohne Drain
+drained() {
+  if [ -e "$DRAIN" ]; then echo alle; return; fi
+  out=""
+  for r in $ROLES; do [ ! -e "$DRAIN-$r" ] || out="$out${out:+ }$r"; done
+  [ -z "$out" ] || echo "$out"
+}
+
+usage() {
+  sed -n '4,12s/^# \{0,1\}//p' "$0" >&2
+  exit 2
+}
+
+is_role() {
+  for r in $ROLES; do [ "$r" = "$1" ] && return 0; done
+  return 1
+}
+
+# Startbefehl je Rolle. beads.project.sh kann bk_prompt <rolle> selbst definieren.
+prompt_for() {
+  if command -v bk_prompt >/dev/null 2>&1; then
+    p=$(bk_prompt "$1")
+    if [ -n "$p" ]; then echo "$p"; return; fi
+  fi
+  case $1 in
+    # /loop: leere Warteschlange beendet nur die Runde, Rückläufer werden später aufgenommen
+    fix) echo "/loop 10m /$BK_SKILL_PREFIX-fix" ;;
+    verify) echo "/loop 5m /$BK_SKILL_PREFIX-verify" ;;
+    regress) echo "/loop 30m /$BK_SKILL_PREFIX-regress" ;;
+    *) echo "/$BK_SKILL_PREFIX-$1" ;;
+  esac
+}
+
+# iTerm-Tabfarbe als "r g b"
+color_for() {
+  case $1 in
+    fix) echo "200 60 60" ;;
+    search) echo "60 110 210" ;;
+    verify) echo "50 160 80" ;;
+    regress) echo "210 170 40" ;;
+    *) echo "120 120 120" ;;
+  esac
+}
+
+# Laufende Sessions dieses Repos als "<worktree> <kind> <status> <name>"
+running() {
+  claude agents --json 2>/dev/null | jq -r --arg wt "$WT_DIR/" '
+    .[] | select(.cwd | startswith($wt))
+    | "\(.cwd | ltrimstr($wt) | split("/")[0]) \(.kind) \(.status) \(.name)"' 2>/dev/null || true
+}
+
+# Session-Name eines laufenden Hintergrund-Workers (gesucht nach Worktree- oder
+# Session-Name). Terminal-Worker (iTerm-Tab) erreichen attach/logs/stop nicht: Abbruch
+# mit Hinweis statt der Meldung "No job matching" von claude.
+session_of() {
+  line=$(running | awk -v n="$1" '$1 == n || $4 == n { print; exit }')
+  if [ -z "$line" ]; then
+    echo "kein laufender Worker $1 (workers ls)" >&2
+    exit 1
+  fi
+  # shellcheck disable=SC2086 # Absicht: "<worktree> <kind> <status> <name>" zerlegen
+  set -- $line
+  if [ "$2" != background ]; then
+    echo "$1 läuft in einem Terminal (iTerm-Tab $1), dort öffnen bzw. beenden" >&2
+    exit 1
+  fi
+  echo "$4"
+}
+
+# Halter des Merge-Slots für ls; leer, wenn bd nicht antwortet
+merge_slot() {
+  (cd "$ROOT" && "$ROOT/scripts/beadskit/bdw" merge-slot check --json 2>/dev/null) |
+    jq -r 'if .available then "frei" else "gehalten von \(.holder)" end' 2>/dev/null || true
+}
+
+# Namen der laufenden Worker (Worktrees), einmal je Aufruf gelesen
+active=""
+is_taken() {
+  printf '%s\n' "$active" | grep -qx "$1"
+}
+
+# Anzahlen je Rolle in cnt_<rolle>; Rollennamen sind geprüft [a-z]+, eval ist damit sicher
+reset_counts() {
+  for r in $ROLES; do eval "cnt_$r=0"; done
+}
+
+set_count() {
+  is_role "$1" || { echo "unbekannte Rolle: $1 (Rollen: $ROLES)" >&2; usage; }
+  case $2 in ''|*[!0-9]*) echo "$1=$2 ist keine Zahl" >&2; exit 2 ;; esac
+  eval "cnt_$1=$2"
+}
+
+count_of() {
+  eval "echo \"\$cnt_$1\""
+}
+
+# Setzt Anzahlen, iterm und dry; mit bare=1 steht "fix" für fix=1.
+# `npm run workers add fix --iterm` (ohne --) gibt npm die Option nicht weiter, sondern setzt
+# npm_config_iterm=true; das zählt wie --iterm, ebenso npm_config_dry_run.
+parse_args() {
+  [ "${npm_config_iterm-}" = true ] && iterm=1
+  [ "${npm_config_dry_run-}" = true ] && dry=1
+  for arg in "$@"; do
+    case $arg in
+      --iterm) iterm=1 ;;
+      --dry-run) dry=1 ;;
+      *=*) set_count "${arg%%=*}" "${arg#*=}" ;;
+      *)
+        [ "$bare" = 1 ] || { echo "unbekanntes Argument: $arg" >&2; usage; }
+        set_count "$arg" 1
+        ;;
+    esac
+  done
+}
+
+# Startet einen Worker im Hintergrund oder hängt seinen iTerm-Tab an $tabs an
+launch() {
+  role=$1 name=$2
+  prompt=$(prompt_for "$role")
+  if [ "$iterm" = 1 ]; then
+    # shellcheck disable=SC2046 # Absicht: "r g b" in $1..$3 zerlegen
+    set -- $(color_for "$role")
+    # Tabfarbe per iTerm-Escape, dann claude im Repo-Wurzelordner
+    tab="printf '\\033]6;1;bg;red;brightness;$1\\a\\033]6;1;bg;green;brightness;$2\\a\\033]6;1;bg;blue;brightness;$3\\a'; cd '$ROOT' && claude -w $name -n $name '$prompt'"
+    tabs="$tabs$tab
+"
+    [ "$dry" = 1 ] && echo "iTerm-Tab $name: claude -w $name -n $name '$prompt'"
+  elif [ "$dry" = 1 ]; then
+    echo "(cd '$ROOT' && claude --bg -w $name -n $name '$prompt')"
+  else
+    echo "starte $name ($prompt)"
+    (cd "$ROOT" && claude --bg -w "$name" -n "$name" "$prompt")
+  fi
+  return 0
+}
+
+# Öffnet die gesammelten iTerm-Tabs bzw. gibt den Hinweis für Hintergrund-Worker aus.
+# $1 = reuse: Tabs ins vorderste iTerm-Fenster hängen (neues Fenster nur, wenn keins offen ist)
+finish() {
+  if [ "$iterm" = 1 ] && [ -n "$tabs" ] && [ "$dry" = 0 ]; then
+    list=$(mktemp)
+    trap 'rm -f "$list"' EXIT
+    printf '%s' "$tabs" >"$list"
+    osascript - "$list" "${1-new}" <<'APPLESCRIPT'
+      on run argv
+        set cmds to paragraphs of (read POSIX file (item 1 of argv) as «class utf8»)
+        tell application "iTerm"
+          activate
+          if item 2 of argv is "reuse" and (count of windows) > 0 then
+            set w to current window
+            set first_tab to false
+          else
+            set w to (create window with default profile)
+            set first_tab to true
+          end if
+          repeat with c in cmds
+            if length of c > 0 then
+              if first_tab then
+                set first_tab to false
+              else
+                tell w to create tab with default profile
+              end if
+              tell current session of current tab of w to write text c
+            end if
+          end repeat
+        end tell
+      end run
+APPLESCRIPT
+  fi
+  if [ "$iterm" = 0 ] && [ "$dry" = 0 ]; then
+    echo "Übersicht: scripts/beadskit/workers ls · öffnen: scripts/beadskit/workers attach <name>"
+  fi
+}
+
+cmd_start() {
+  reset_counts
+  iterm=0 dry=0 bare=0
+  # shellcheck disable=SC2086 # Absicht: Vorgabe "fix=2 search=1 …" in Wörter zerlegen
+  parse_args $BK_START
+  parse_args "$@"
+
+  d=$(drained)
+  if [ -n "$d" ]; then
+    if [ "$dry" = 1 ]; then
+      echo "(Drain-Markierung würde entfernt: $d)"
+    else
+      rm -f "$DRAIN"
+      for r in $ROLES; do rm -f "$DRAIN-$r"; done
+      echo "Drain-Markierung entfernt: $d"
+    fi
+  fi
+
+  active=$(running | awk '{ print $1 }')
+  tabs=""
+  for role in $ROLES; do
+    count=$(count_of "$role")
+    n=1
+    while [ "$n" -le "$count" ]; do
+      name="$role-$n"
+      n=$((n + 1))
+      if is_taken "$name"; then
+        echo "$name läuft schon, übersprungen"
+        continue
+      fi
+      launch "$role" "$name"
+    done
+  done
+  finish
+}
+
+# Startet N weitere Worker je Rolle mit der jeweils niedrigsten freien Nummer.
+# Bei aktivem Drain nicht: neue Worker würden sofort aufhören, und die Markierung zu
+# entfernen würde auch die auslaufenden Worker wieder claimen lassen.
+cmd_add() {
+  reset_counts
+  iterm=0 dry=0 bare=1
+  parse_args "$@"
+  total=0
+  for role in $ROLES; do total=$((total + $(count_of "$role"))); done
+  [ "$total" -gt 0 ] || usage
+  for role in $ROLES; do
+    [ "$(count_of "$role")" -gt 0 ] || continue
+    if [ -e "$DRAIN" ] || [ -e "$DRAIN-$role" ]; then
+      echo "Drain aktiv für $role: neue Worker würden sofort wieder aufhören." >&2
+      echo "Erst workers drain $role --off (bzw. drain --off), dann add." >&2
+      exit 1
+    fi
+  done
+
+  active=$(running | awk '{ print $1 }')
+  tabs=""
+  for role in $ROLES; do
+    count=$(count_of "$role")
+    n=1
+    while [ "$count" -gt 0 ]; do
+      name="$role-$n"
+      n=$((n + 1))
+      is_taken "$name" && continue
+      active="$active
+$name"
+      launch "$role" "$name"
+      count=$((count - 1))
+    done
+  done
+  finish reuse
+}
+
+cmd_ls() {
+  d=$(drained)
+  [ -z "$d" ] || echo "Drain aktiv ($d): diese Worker hören nach dem aktuellen Schritt auf"
+  slot=$(merge_slot)
+  [ -z "$slot" ] || echo "Merge-Slot: $slot"
+  out=$(running)
+  if [ -z "$out" ]; then
+    echo "keine Worker aktiv"
+    return
+  fi
+  printf '%-10s %-12s %-6s %s\n' WORKER ART STATUS SESSION
+  echo "$out" | sort | while read -r wt kind status name; do
+    [ "$kind" = background ] || kind="terminal"
+    printf '%-10s %-12s %-6s %s\n' "$wt" "$kind" "$status" "$name"
+  done
+}
+
+cmd_drain() {
+  off=0 roles=""
+  for arg in "$@"; do
+    case $arg in
+      --off) off=1 ;;
+      *) is_role "$arg" || { echo "unbekannte Rolle: $arg" >&2; usage; }; roles="$roles $arg" ;;
+    esac
+  done
+  if [ "$off" = 1 ]; then
+    if [ -z "$roles" ]; then
+      rm -f "$DRAIN"
+      for r in $ROLES; do rm -f "$DRAIN-$r"; done
+      echo "Drain aufgehoben, alle Worker claimen wieder"
+    else
+      for r in $roles; do rm -f "$DRAIN-$r"; done
+      echo "Drain aufgehoben für:$roles"
+      [ ! -e "$DRAIN" ] || echo "Achtung: globaler Drain bleibt aktiv (drain --off hebt ihn auf)"
+    fi
+    return
+  fi
+  if [ -z "$roles" ]; then
+    : >"$DRAIN"
+    echo "Drain aktiv: Worker machen ihren laufenden Schritt fertig, claimen nichts Neues"
+    echo "und hören auf. Fortschritt: workers ls, danach stop --all."
+  else
+    for r in $roles; do : >"$DRAIN-$r"; done
+    echo "Drain aktiv für:$roles. Diese Worker machen ihren laufenden Schritt fertig und"
+    echo "hören auf, die übrigen arbeiten weiter. Fortschritt: workers ls."
+  fi
+}
+
+# Bricht ab, solange ein Hintergrund-Worker nicht idle ist, mit Hinweis auf drain.
+# Terminal-Worker beendet stop ohnehin nicht. --force übergeht die Prüfung.
+guard_busy() {
+  busy=$(running | awk ${1:+-v only="$1"} '$2 == "background" && (only == "" || $1 == only) && $3 != "idle" { print $1 }')
+  [ -z "$busy" ] && return 0
+  echo "noch aktiv: $(echo "$busy" | tr '\n' ' ')" >&2
+  if [ -n "$(drained)" ]; then
+    echo "Drain läuft, warten bis idle (workers ls) oder --force" >&2
+  else
+    echo "Stopp jetzt bricht mitten in der Arbeit ab (Claim, Branch, Merge-Slot)." >&2
+    echo "Besser: workers drain, dann warten; sonst --force" >&2
+  fi
+  exit 1
+}
+
+cmd_stop() {
+  force=0 target=""
+  for arg in "$@"; do
+    case $arg in
+      --force) force=1 ;;
+      *) [ -z "$target" ] || usage; target=$arg ;;
+    esac
+  done
+  [ -n "$target" ] || usage
+  if [ "$force" = 0 ]; then
+    if [ "$target" = --all ]; then guard_busy; else guard_busy "$target"; fi
+  fi
+  if [ "$target" = --all ]; then
+    running | while read -r wt kind _ name; do
+      if [ "$kind" = background ]; then
+        echo "stoppe $wt"
+        claude stop "$name"
+      else
+        echo "$wt läuft in einem Terminal, dort beenden"
+      fi
+    done
+  else
+    session=$(session_of "$target")
+    claude stop "$session"
+  fi
+}
+
+# Was der Leitstand über das Projekt wissen muss
+cmd_config() {
+  for r in $ROLES; do echo "$r=$(prompt_for "$r")"; done | jq -Rn \
+    --arg root "$ROOT" --arg name "$BK_NAME" --arg slug "$BK_SLUG" --arg base "$BK_BASE" \
+    --arg roles "$ROLES" --arg modules "$BK_MODULES" --arg drain "$DRAIN" --arg start "$BK_START" '
+    def words: split(" ") | map(select(length > 0));
+    { root: $root, name: $name, slug: $slug, base: $base, roles: ($roles | words),
+      modules: ($modules | words), drain: $drain,
+      start: ($start | words | map(split("=") | { key: .[0], value: (.[1] | tonumber) }) | from_entries),
+      prompts: ([inputs | select(length > 0) | capture("^(?<key>[^=]+)=(?<value>.*)$")] | from_entries) }'
+}
+
+[ $# -ge 1 ] || usage
+sub=$1
+shift
+case $sub in
+  start) cmd_start "$@" ;;
+  add) cmd_add "$@" ;;
+  ls) cmd_ls ;;
+  attach) [ $# = 1 ] || usage; session=$(session_of "$1"); exec claude attach "$session" ;;
+  logs) [ $# = 1 ] || usage; session=$(session_of "$1"); exec claude logs "$session" ;;
+  drain) cmd_drain "$@" ;;
+  stop) cmd_stop "$@" ;;
+  config) cmd_config ;;
+  *) usage ;;
+esac

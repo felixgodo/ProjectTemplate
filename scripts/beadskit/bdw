@@ -1,0 +1,6 @@
+#!/bin/sh
+# bd mit eigenem Actor je Worktree: Claims, Notizen und Leases der parallelen
+# Sessions bleiben unterscheidbar (sonst alle unter git user.name).
+: "${BEADS_ACTOR:=$(basename "$(git rev-parse --show-toplevel 2>/dev/null || pwd)")}"
+export BEADS_ACTOR
+exec bd "$@"
