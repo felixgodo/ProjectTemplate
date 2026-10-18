@@ -1,0 +1,175 @@
+#!/bin/sh
+# Eigene GitHub-Actions-Runner für die CI, als Docker-Container auf dem Server. Die Jobs laufen
+# im Container, ohne Docker-Socket und ohne Host-Verzeichnisse, mit CPU- und Speichergrenze,
+# damit PR-Code die Produktion auf demselben Server nicht stört. ci.yml wählt sie per Label
+# (Standard: BK_SLUG aus beads.project.sh), z. B. `runs-on: [self-hosted, regiehub]`.
+# Teil des beadskit aus dem ProjectTemplate – nicht im Projekt ändern.
+#
+#   runner-server setup [--dry-run]   Image bauen, Runner registrieren (kurzlebiges Token), starten
+#   runner-server status              Container auf dem Server und Status bei GitHub
+#   runner-server logs                letzte Zeilen der Runner-Logs
+#   runner-server remove              Runner bei GitHub abmelden, Container und Volumes löschen
+#
+# Einstellungen per Umgebung (Standard in Klammern): RUNNER_SSH_HOST (server),
+# RUNNER_REPO (GitHub-Repo dieses Checkouts), RUNNER_LABEL (BK_SLUG), RUNNER_COUNT (3),
+# RUNNER_CPUS (2), RUNNER_MEM (6g), RUNNER_APT (zusätzliche apt-Pakete im Image).
+# Ablage auf dem Server: /opt/<label>-runner (Dockerfile, compose.yml). Das Token zum Registrieren
+# gilt eine Stunde und wird nicht gespeichert; die Runner-Zugangsdaten liegen in den Volumes.
+set -eu
+
+ROOT=$(git -C "$(dirname "$0")" rev-parse --path-format=absolute --git-common-dir)
+ROOT=$(dirname "$ROOT")
+BK_SLUG=""
+# shellcheck source=/dev/null
+[ ! -f "$ROOT/beads.project.sh" ] || . "$ROOT/beads.project.sh"
+SSH_HOST=${RUNNER_SSH_HOST:-server}
+REPO=${RUNNER_REPO:-$(cd "$ROOT" && gh repo view --json nameWithOwner --jq .nameWithOwner 2>/dev/null || true)}
+LABEL=${RUNNER_LABEL:-$BK_SLUG}
+EXTRA_APT=${RUNNER_APT:-}
+[ -n "$REPO" ] || { echo "GitHub-Repo unbekannt: RUNNER_REPO=owner/name setzen" >&2; exit 1; }
+case $LABEL in ''|*[!a-z0-9-]*) echo "Runner-Label ungültig: '$LABEL' (RUNNER_LABEL oder BK_SLUG)" >&2; exit 1 ;; esac
+COUNT=${RUNNER_COUNT:-3}
+CPUS=${RUNNER_CPUS:-2}
+MEM=${RUNNER_MEM:-6g}
+VERSION=2.337.0
+DIR=/opt/$LABEL-runner
+
+usage() {
+  sed -n '6,9s/^# \{0,1\}//p' "$0" >&2
+  exit 2
+}
+
+remote() {
+  ssh -o BatchMode=yes "$SSH_HOST" "$@"
+}
+
+runners() {
+  i=1
+  while [ "$i" -le "$COUNT" ]; do
+    echo "$i"
+    i=$((i + 1))
+  done
+}
+
+compose_file() {
+  cat <<EOF
+# Erzeugt von beadskit ci/runner-server – nicht von Hand ändern.
+name: $LABEL-runner
+x-runner: &runner
+  build: .
+  image: $LABEL-runner:$VERSION
+  command: ./run.sh
+  restart: unless-stopped
+  cpus: $CPUS
+  mem_limit: $MEM
+  pids_limit: 4096
+  security_opt: ["no-new-privileges:true"]
+  networks: [ci]
+services:
+EOF
+  for i in $(runners); do
+    printf '  runner-%s:\n    <<: *runner\n    volumes: ["runner-%s:/home/runner"]\n' "$i" "$i"
+  done
+  printf 'networks:\n  ci: {}\nvolumes:\n'
+  for i in $(runners); do
+    printf '  runner-%s: {}\n' "$i"
+  done
+}
+
+dockerfile() {
+  cat <<EOF
+# Erzeugt von beadskit ci/runner-server – nicht von Hand ändern.
+FROM ghcr.io/actions/actions-runner:$VERSION
+USER root
+# Was ubuntu-latest vorinstalliert hat und CIs meist brauchen: maven, rsync + shellcheck,
+# unzip/xz/jq, fontconfig + eine Systemschrift (AWT-Textrasterung; ohne sie wirft der
+# JDK-FontManager "Fontconfig head is null"); dazu RUNNER_APT des Projekts
+RUN apt-get update \\
+ && apt-get install -y --no-install-recommends maven rsync shellcheck unzip zip xz-utils jq \\
+    fontconfig fonts-dejavu-core $EXTRA_APT \\
+ && rm -rf /var/lib/apt/lists/* \\
+ && rm -f /etc/sudoers.d/*
+USER runner
+EOF
+}
+
+# Skript für den Server; $1 = Registrierungs-Token
+setup_script() {
+  cat <<EOF
+set -euo pipefail
+T='$1'
+mkdir -p $DIR && cd $DIR
+cat >Dockerfile <<'DOCKERFILE'
+$(dockerfile)
+DOCKERFILE
+cat >compose.yml <<'COMPOSE'
+$(compose_file)
+COMPOSE
+docker compose build -q
+EOF
+  for i in $(runners); do
+    cat <<EOF
+if docker compose run --rm --no-deps -T runner-$i test -f .runner </dev/null; then
+  echo "runner-$i: schon registriert"
+else
+  docker compose run --rm --no-deps -T -e T="\$T" runner-$i bash -c \\
+    './config.sh --unattended --url https://github.com/$REPO --token "\$T" --name $LABEL-runner-$i --labels $LABEL --work _work --replace' </dev/null
+fi
+EOF
+  done
+  echo "docker compose up -d"
+  echo "docker compose ps"
+}
+
+remove_script() {
+  cat <<EOF
+set -euo pipefail
+T='$1'
+cd $DIR
+EOF
+  for i in $(runners); do
+    echo "docker compose run --rm --no-deps -T -e T=\"\$T\" runner-$i bash -c './config.sh remove --token \"\$T\"' </dev/null || true"
+  done
+  echo "docker compose down -v --rmi local"
+  echo "cd / && rm -rf $DIR"
+}
+
+token() {
+  gh api -X POST "repos/$REPO/actions/runners/$1" --jq .token
+}
+
+cmd_setup() {
+  if [ "${1-}" = --dry-run ]; then
+    echo "# ssh $SSH_HOST bash -s"
+    setup_script '<token>'
+    return
+  fi
+  setup_script "$(token registration-token)" | remote bash -s
+  cmd_status
+}
+
+cmd_status() {
+  remote "cd $DIR 2>/dev/null && docker compose ps --format 'table {{.Service}}\t{{.Status}}' || echo 'keine Runner auf $SSH_HOST'"
+  echo
+  gh api "repos/$REPO/actions/runners" --jq '.runners[] | "\(.name)\t\(.status)\t\(if .busy then "busy" else "idle" end)\t\([.labels[].name] | join(","))"'
+}
+
+cmd_logs() {
+  remote "cd $DIR && docker compose logs --tail 40"
+}
+
+cmd_remove() {
+  remove_script "$(token remove-token)" | remote bash -s
+  echo "Runner entfernt."
+}
+
+[ $# -ge 1 ] || usage
+cmd=$1
+shift
+case $cmd in
+  setup) cmd_setup "$@" ;;
+  status) cmd_status ;;
+  logs) cmd_logs ;;
+  remove) cmd_remove ;;
+  *) usage ;;
+esac

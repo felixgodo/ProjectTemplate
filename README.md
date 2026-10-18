@@ -55,6 +55,21 @@ Ein bestehendes Projekt mit eigenem `dev.sh` erstmals umstellen:
 
 Schnittstelle (Variablen, Hooks, Versions-Regeln): [scripts/devkit/README.md](scripts/devkit/README.md)
 
+## Parallele Worker (beadskit)
+
+Mehrere Claude-Sessions prüfen und verbessern ein Projekt über eine gemeinsame
+[beads](https://github.com/gastownhall/beads)-Warteschlange (`bd`): Such-Worker legen Funde an,
+Fix-Worker öffnen PRs, Verify-Worker prüfen und mergen, Regress-Worker prüfen den Ziel-Branch.
+Ein Leitstand im Browser zeigt alle eingerichteten Projekte. Details: [scripts/beadskit/README.md](scripts/beadskit/README.md)
+
+```bash
+./beadskit-sync.sh --adopt MeinProjekt --base main --modules "backend frontend"
+cd ../MeinProjekt && bd init --prefix meinprojekt     # einmalig, .beads/ bleibt lokal
+scripts/beadskit/workers start fix=1 search=1 verify=1
+node scripts/beadskit/leitstand/inbox.mjs            # http://127.0.0.1:3738, alle Projekte
+./beadskit-sync.sh --apply                           # Kit-Änderungen verteilen (VERSION hochzählen)
+```
+
 ## Aufbau
 
 ```
@@ -64,7 +79,8 @@ backend/                                      Spring Boot – /api/ping, /api/ve
 frontend/                                     React + Vite, Proxy /api → Backend
 docker-compose.yml                            MariaDB für die Entwicklung
 deploy/                                       setup.sh und Vorlagen fürs Release-Paket
-new-project.sh · devkit-sync.sh               nur im Template
+scripts/beadskit/                             parallele Claude-Worker + Leitstand (optional je Projekt)
+new-project.sh · devkit-sync.sh · beadskit-sync.sh   nur im Template
 ```
 
 Die Template-App selbst läuft mit `./dev.sh start` auf http://localhost:5200 (Backend 8100, MariaDB 3310).
