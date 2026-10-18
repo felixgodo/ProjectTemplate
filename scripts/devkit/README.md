@@ -73,6 +73,7 @@ Ein Dienst gilt als bereit, wenn `health` antwortet (sonst: wenn der Port lausch
 | `project_version_extra show` | weitere Stellen melden: `dk_version_row <stelle> <version> [erwartet]` |
 | `project_version_extra set <version>` | weitere Stellen schreiben |
 | `project_release [args]`, `project_deploy [args]` | eigenes Release bzw. Deploy |
+| `project_backup <run\|list\|status> [args]` | eigener Weg für `./dev.sh backup` (Standard: `backup-agent` auf dem Server, Ziel `BACKUP_TARGET` oder der Projektname) |
 
 `release` und `deploy` lesen die einheitlichen Optionen vorab in `DK_OPT_SKIP_TESTS`,
 `DK_OPT_NO_BUILD`, `DK_OPT_FORCE`, `DK_OPT_HOST`, `DK_OPT_DOMAIN`, `DK_OPT_DRY_RUN`, `DK_OPT_YES`,

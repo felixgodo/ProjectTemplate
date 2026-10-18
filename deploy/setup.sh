@@ -8,6 +8,7 @@
 #   setup.sh status                    Version, Dienst, Health
 #   setup.sh logs                      Log des Dienstes mitlesen
 #   setup.sh restart                   Dienst neu starten
+#   setup.sh backup [--tag <tag>]      sofort auf die Storage Box sichern (braucht den backup-agent)
 #
 # Aufbau auf dem Server:
 #   /opt/projecttemplate/releases/<version>/   Jar und public_html je Release
@@ -18,6 +19,9 @@
 # Mit HestiaCP wird die Oberfläche ins public_html der Domain gelegt und ein Nginx-Template
 # aktiviert; ohne HestiaCP eine eigene nginx-Site angelegt (nur HTTP – TLS z. B. mit certbot).
 # Schlägt der Health-Check nach dem Neustart fehl, wird auf das vorherige Release zurückgestellt.
+#
+# Ist auf dem Server der Backup-Agent von LicenseHub eingerichtet, meldet install das Projekt
+# dort als Ziel an (conf/backup-target.json), und update sichert vor dem Einspielen.
 #
 # Exit-Codes: 0 ok, 1 Fehler, 2 Env-Datei muss noch ausgefüllt werden.
 set -euo pipefail
@@ -300,6 +304,40 @@ setup_nginx_plain() {
   rm -f "$new"
 }
 
+# ---------------------------------------------------------------- Backup
+
+backup_agent_ready() { command -v backup-agent >/dev/null 2>&1 && [ -r /etc/backup-agent/agent.env ]; }
+
+# Meldet das Projekt als Ziel an; ein bestehendes Ziel bleibt, wie es in LicenseHub gepflegt ist.
+register_backup() {
+  backup_agent_ready || return 0
+  local target="${1:-$BUNDLE}/conf/backup-target.json"
+  [ -r "$target" ] || return 0
+  backup-agent register "$target" >/dev/null || warn "Anmeldung beim Backup-Agenten fehlgeschlagen – Ziel in LicenseHub von Hand anlegen."
+}
+
+# Sicherung vor einem Update. Scheitert sie, geht das Update trotzdem weiter: lieber ein
+# eingespieltes Release ohne frische Sicherung als ein liegengebliebenes Deploy.
+pre_deploy_backup() {
+  backup_agent_ready || return 0
+  register_backup
+  step "Sichere $APP vor dem Update (backup-agent)"
+  backup-agent run "$APP" --tag pre-deploy >/dev/null || warn "Sicherung vor dem Update fehlgeschlagen – Details in LicenseHub unter Backup."
+}
+
+cmd_backup() {
+  local tag=manual
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --tag) tag="${2:?--tag braucht einen Wert}"; shift 2 ;;
+      *) die "Unbekannte Option für backup: $1" ;;
+    esac
+  done
+  backup_agent_ready || die "Kein backup-agent eingerichtet (LicenseHub: /opt/licensehub/backup-agent/install.sh)."
+  register_backup "$BIN"
+  exec backup-agent run "$APP" --tag "$tag"
+}
+
 cmd_install() {
   DOMAIN=""; HESTIA_USER=""
   while [ $# -gt 0 ]; do
@@ -330,6 +368,7 @@ cmd_install() {
   mkdir -p "$BASE/data" "$RELEASES" "$BIN" "$CONF_DIR"
   chown "$APP:$APP" "$BASE/data"
   install -m 750 "$BUNDLE/setup.sh" "$BIN/setup.sh"
+  install -d "$BIN/conf" && install -m 644 "$BUNDLE/conf/backup-target.json" "$BIN/conf/" 2>/dev/null || true
   ln -sfn "$BIN/setup.sh" "/usr/local/bin/$APP"
   printf 'DOMAIN=%q\nHESTIA_USER=%q\n' "$DOMAIN" "$HESTIA_USER" >"$INSTALL_CONF"
 
@@ -355,6 +394,7 @@ cmd_install() {
   systemctl is-enabled --quiet "$SERVICE" 2>/dev/null || systemctl enable --quiet "$SERVICE"
 
   place_and_activate "$BUNDLE" "$VERSION"
+  register_backup
   echo "✓   $APP $VERSION läuft für $DOMAIN (Port $APP_PORT). Verwaltung: $APP status | logs | restart | rollback"
 }
 
@@ -367,6 +407,8 @@ cmd_update() {
   step "Aktualisiere $APP $(current_version) → $VERSION"
   # Skript und Vorlagen mitziehen, Konfiguration und Daten bleiben unangetastet
   install -m 750 "$BUNDLE/setup.sh" "$BIN/setup.sh"
+  install -d "$BIN/conf" && install -m 644 "$BUNDLE/conf/backup-target.json" "$BIN/conf/" 2>/dev/null || true
+  pre_deploy_backup
   if [ -n "$HESTIA_USER" ]; then setup_nginx_hestia; fi
   if ! cmp -s "$BUNDLE/conf/$APP.service" "/etc/systemd/system/$SERVICE.service"; then
     install -m 644 "$BUNDLE/conf/$APP.service" "/etc/systemd/system/$SERVICE.service"
@@ -407,5 +449,6 @@ case "$cmd" in
   status)   require_installed; load_install_conf; load_port; print_status ;;
   logs)     exec journalctl -u "$SERVICE" -f -n 100 ;;
   restart)  require_installed; systemctl restart "$SERVICE"; echo "✓   $SERVICE neu gestartet." ;;
+  backup)   require_installed; cmd_backup "$@" ;;
   *) usage >&2; die "Unbekannter Befehl: $cmd" ;;
 esac

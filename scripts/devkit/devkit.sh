@@ -160,6 +160,7 @@ dk_usage() {
   echo "Ausliefern"
   dk_help_line "release [--skip-tests] [--no-build] [--force]" "Paket bauen"
   dk_help_line "deploy [--host H] [--dry-run] [--yes] [--install]" "Paket auf den Server bringen"
+  dk_help_line "backup [run|list|status] [--host H]" "auf die Storage Box sichern (backup-agent)"
 
   if [ "${#DK_CMD_NAMES[@]}" -gt 0 ]; then
     echo
@@ -205,6 +206,7 @@ dk_main() {
                  shift; dk_cmd_version "$@" ;;
     release)     dk_cmd_release "$@" ;;
     deploy)      dk_cmd_deploy "$@" ;;
+    backup)      dk_cmd_backup "$@" ;;
     self-update) dk_cmd_self_update "$@" ;;
     help|-h|--help) dk_usage ;;
     *)

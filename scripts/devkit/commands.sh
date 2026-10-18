@@ -317,6 +317,44 @@ dk_cmd_deploy() {
   fi
 }
 
+# ---------------------------------------------------------------- backup
+
+# ./dev.sh backup [run|list|status] [--host H] [--target T] [--tag T]
+# Spricht den backup-agent auf dem Server an (eingerichtet von LicenseHub). Das Ziel heisst wie das
+# Projekt, sonst BACKUP_TARGET in dev.project.sh; der Server kommt aus --host, deploy/deploy.conf
+# oder BACKUP_HOST.
+dk_cmd_backup() {
+  local action=run host="" target="${BACKUP_TARGET:-$PROJECT_SLUG}" tag=manual
+  local conf="$ROOT/deploy/deploy.conf" HOST="" SSH_PORT=""
+  DK_REST=()
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      run|list|status) action="$1" ;;
+      --host)   shift; [ $# -gt 0 ] || die "--host erwartet einen Wert"; host="$1" ;;
+      --target) shift; [ $# -gt 0 ] || die "--target erwartet einen Wert"; target="$1" ;;
+      --tag)    shift; [ $# -gt 0 ] || die "--tag erwartet einen Wert"; tag="$1" ;;
+      *)        DK_REST[${#DK_REST[@]}]="$1" ;;
+    esac
+    shift
+  done
+  if dk_has project_backup; then project_backup "$action" ${DK_REST[@]+"${DK_REST[@]}"}; return; fi
+  [ "${#DK_REST[@]}" -eq 0 ] || die "Unbekanntes Argument für backup: ${DK_REST[0]}"
+  # shellcheck source=/dev/null
+  [ ! -f "$conf" ] || . "$conf"
+  host="${host:-${HOST:-${BACKUP_HOST:-}}}"
+  [ -n "$host" ] || die "Kein Server: --host <alias>, HOST in deploy/deploy.conf oder BACKUP_HOST in dev.project.sh."
+
+  dk_remote_open "$host" "$SSH_PORT"
+  trap dk_remote_close EXIT
+  dk_remote 'command -v backup-agent >/dev/null' \
+    || die "Auf '$host' ist kein backup-agent eingerichtet (LicenseHub: /opt/licensehub/backup-agent/install.sh)."
+  case "$action" in
+    run)    dk_remote_tty "${DK_SUDO}backup-agent run $(printf %q "$target") --tag $(printf %q "$tag")" ;;
+    list)   dk_remote_tty "${DK_SUDO}backup-agent snapshots $(printf %q "$target")" ;;
+    status) dk_remote_tty "${DK_SUDO}backup-agent status" ;;
+  esac
+}
+
 # ---------------------------------------------------------------- self-update
 
 # Stimmt dieses Projekt mit der Quelle überein?
