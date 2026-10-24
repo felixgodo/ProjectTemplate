@@ -175,7 +175,8 @@ step_firewall() {
   head1 "Firewall"
   # Tailnet ganz, ssh zusätzlich aus dem Heimnetz (Einrichtung, Notfall); alles andere zu
   sudo ufw allow in on tailscale0 >/dev/null
-  for net in 192.168.0.0/16 10.0.0.0/8 172.16.0.0/12; do sudo ufw allow from "$net" to any port 22 proto tcp >/dev/null; done
+  # IPv6: Link-Local und Unique Local (manche Router geben im Heimnetz nur IPv6 per SLAAC)
+  for net in 192.168.0.0/16 10.0.0.0/8 172.16.0.0/12 fe80::/10 fc00::/7; do sudo ufw allow from "$net" to any port 22 proto tcp >/dev/null; done
   sudo ufw default deny incoming >/dev/null
   sudo ufw default allow outgoing >/dev/null
   sudo ufw --force enable >/dev/null
