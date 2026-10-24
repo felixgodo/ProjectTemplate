@@ -6,8 +6,9 @@ import {
   normalizeConfig, normalizeExt, parseCookies, parseProjectList, parseRunners, parseWorkers, planCreate, planDecision,
   planIssueAction, planRestarts, planRunnerAction, planWorkerAction, prSummary, publicConfig, readBody, repoOfIssue,
   RESTART_COOLDOWN_MS, safeEqual, signSession, today, verifySession, hashPassword, parsePasswordLine, verifyPassword,
-  workerRe, wsOfIssue,
+  workerRe, wsOfIssue, parseHostsConf, mapRoot, shQuote, remoteCommand, mergeHostWorkers, parseMarkers, routeWorkerAction,
 } from './inbox.mjs';
+import { execFileSync } from 'node:child_process';
 import { chatTranscript, summarizeTranscript, toolSummary, transcriptPath } from './sessions.mjs';
 
 // Projekt wie aus `workers config`: code plus ein zweiter Workspace clubs, zwei Repos
@@ -668,4 +669,107 @@ test('repoOfIssue: modul:<repo> eines weiteren Repos, sonst das Projekt selbst',
   assert.equal(repoOfIssue({ labels: ['modul:cli'] }, CFG.repos), '.');
   assert.equal(repoOfIssue({ labels: ['modul:.'] }, CFG.repos), '.');
   assert.equal(repoOfIssue(null, CFG.repos), '.');
+});
+
+// ---- Zwei Rechner ----
+const HOSTS_CONF = `# Kommentar
+LEADER=pc
+HOSTS="mac pc"
+SELF=pc
+BK_HOST_BASE=100
+HOST_mac_SSH=felix@mac.tail1234.ts.net
+HOST_mac_ROOT=/Users/felix/IdeaProjects/
+HOST_pc_ROOT=/home/felix/IdeaProjects
+HOST_pc_SSH=-oProxyCommand=evil
+`;
+
+test('parseHostsConf: Rechner, ssh-Ziele und Ordner; ohne LEADER/SELF ein Rechner', () => {
+  const c = parseHostsConf(HOSTS_CONF);
+  assert.equal(c.leader, 'pc');
+  assert.equal(c.self, 'pc');
+  assert.deepEqual(c.hosts, [
+    { name: 'mac', ssh: 'felix@mac.tail1234.ts.net', root: '/Users/felix/IdeaProjects' },
+    // eine ssh-Option als Ziel fällt auf den Namen zurück
+    { name: 'pc', ssh: 'pc', root: '/home/felix/IdeaProjects' },
+  ]);
+  assert.equal(parseHostsConf(''), null);
+  assert.equal(parseHostsConf('SELF=mac\n'), null);
+  assert.equal(parseHostsConf('LEADER=PC\nSELF=mac\n'), null);
+  // LEADER und SELF zählen auch ohne HOSTS, ungültige Namen fallen weg
+  assert.deepEqual(parseHostsConf('LEADER=pc\nSELF=mac\nHOSTS="NAS n_s"\n').hosts.map((h) => h.name), ['pc', 'mac']);
+});
+
+test('mapRoot: Präfix tauschen, fremde Pfade null', () => {
+  assert.equal(mapRoot('/home/felix/IdeaProjects/spot-mm', '/home/felix/IdeaProjects', '/Users/felix/IdeaProjects'), '/Users/felix/IdeaProjects/spot-mm');
+  assert.equal(mapRoot('/home/felix/IdeaProjects', '/home/felix/IdeaProjects', '/x'), '/x');
+  assert.equal(mapRoot('/home/felix/IdeaProjectsX/a', '/home/felix/IdeaProjects', '/x'), null);
+  assert.equal(mapRoot('/opt/a', '/home/felix/IdeaProjects', '/x'), null);
+  assert.equal(mapRoot('/a', null, '/x'), null);
+});
+
+test('shQuote/remoteCommand: jedes Argument bleibt auf der Gegenseite ein einziges Wort', () => {
+  const nasty = ["'; rm -rf ~; '", '$(touch /tmp/x)', '`id`', 'a b', 'zwei\nZeilen', '"', ''];
+  for (const s of nasty) assert.equal(execFileSync('sh', ['-c', `printf %s ${shQuote(s)}`], { encoding: 'utf8' }), s);
+  const line = remoteCommand('/home/f/P/spot', 'scripts/beadskit/workers', ['send', 'fix-1', '--', "it's $HOME"]);
+  assert.equal(line, "'/home/f/P/spot/scripts/beadskit/on-host' '/home/f/P/spot' 'scripts/beadskit/workers' 'send' 'fix-1' '--' 'it'\\''s $HOME'");
+  const words = execFileSync('sh', ['-c', `set -- ${line}; printf '%s|' "$@"`], { encoding: 'utf8' });
+  assert.equal(words, "/home/f/P/spot/scripts/beadskit/on-host|/home/f/P/spot|scripts/beadskit/workers|send|fix-1|--|it's $HOME|");
+});
+
+test('mergeHostWorkers: Rechner an jedem Worker, Workspace aus der Rolle, ein Rechner offline', () => {
+  const { workers, hosts } = mergeHostWorkers([
+    { host: 'mac', ok: true, self: false, leader: false, workers: [{ name: 'fix-2', role: 'fix', ws: 'x' }, { name: 'club-add-1', role: 'club-add' }] },
+    { host: 'pc', ok: true, self: true, leader: true, workers: [{ name: 'fix-101', role: 'fix' }, null, { name: 7 }] },
+    { host: 'nas', ok: false, error: 'ssh: connect to host nas port 22: Connection refused' },
+  ], WS);
+  assert.deepEqual(workers.map((w) => [w.name, w.host, w.ws]), [['club-add-1', 'mac', 'clubs'], ['fix-2', 'mac', 'code'], ['fix-101', 'pc', 'code']]);
+  assert.deepEqual(hosts.map((h) => [h.name, h.ok, h.leader, h.self]), [['mac', true, false, false], ['pc', true, true, true], ['nas', false, false, false]]);
+  assert.match(hosts[2].error, /Connection refused/);
+  // ok ohne Liste zählt als Fehler
+  assert.equal(mergeHostWorkers([{ host: 'mac', ok: true }], WS).hosts[0].ok, false);
+});
+
+test('parseMarkers: Drain global, je Rolle, je Rechner, Schwelle des Auto-Neustarts', () => {
+  const m = parseMarkers({ 'beadskit.drain-fix': '1', 'beadskit.drain@mac': '1', 'beadskit.autorestart': '300000', schema_version: 1 },
+    ['fix', 'verify'], ['mac', 'pc']);
+  assert.deepEqual(m, { drain: { all: false, roles: { fix: true, verify: false }, hosts: { mac: true, pc: false } }, threshold: 300000 });
+  const all = parseMarkers({ 'beadskit.drain': '1', 'beadskit.autorestart': 'kaputt' }, ['fix'], []);
+  assert.deepEqual(all, { drain: { all: true, roles: { fix: true }, hosts: {} }, threshold: null });
+  // beads antwortet nicht: nichts markiert
+  assert.deepEqual(parseMarkers(null, ['fix']).drain.roles, { fix: false });
+});
+
+test('planWorkerAction drain role host / routeWorkerAction: wo die Aktion läuft', () => {
+  assert.deepEqual(planWorkerAction({ action: 'drain', role: 'host', host: 'mac' }, WS, ['mac', 'pc']), ['drain', '--host', 'mac']);
+  assert.deepEqual(planWorkerAction({ action: 'drain', role: 'host', host: 'mac', off: true }, WS, ['mac', 'pc']), ['drain', '--host', 'mac', '--off']);
+  assert.throws(() => planWorkerAction({ action: 'drain', role: 'host', host: 'nas' }, WS, ['mac', 'pc']), /Rechner/);
+  assert.throws(() => planWorkerAction({ action: 'drain', role: 'host', host: 'mac' }, WS), /Rechner/);
+
+  const hosts = [{ name: 'mac', ok: true }, { name: 'pc', ok: true }, { name: 'nas', ok: false }];
+  const workers = [{ name: 'fix-1', host: 'mac' }, { name: 'fix-101', host: 'pc' }];
+  const route = (body) => routeWorkerAction(body, { hosts, self: 'pc', workers });
+  assert.deepEqual(route({ action: 'start' }), ['pc']);
+  assert.deepEqual(route({ action: 'add', host: 'mac' }), ['mac']);
+  assert.throws(() => route({ action: 'start', host: 'x' }), /Rechner/);
+  assert.deepEqual(route({ action: 'restart', name: 'fix-1' }), ['mac']);
+  assert.deepEqual(route({ action: 'send', name: 'fix-101' }), ['pc']);
+  assert.throws(() => route({ action: 'stop', name: 'fix-7' }), /keinem Rechner/);
+  assert.deepEqual(route({ action: 'stop', name: 'all' }), ['mac', 'pc']);
+  assert.deepEqual(route({ action: 'drain', role: 'all' }), ['pc']);
+  assert.deepEqual(route({ action: 'autorestart' }), ['pc']);
+  // ein Rechner: immer hier
+  assert.deepEqual(routeWorkerAction({ action: 'restart', name: 'fix-1' }), [null]);
+});
+
+test('planRestarts über zwei Rechner: Namen sind über die Nummernbereiche eindeutig', () => {
+  const now = Date.parse('2026-10-25T12:00:00Z');
+  const idle = (name, host) => ({ name, host, status: 'idle', issues: [], activity: { contextTokens: 400_000, lastAt: '2026-10-25T11:50:00Z', pending: [] } });
+  const workers = [idle('fix-1', 'mac'), idle('fix-101', 'pc'), { ...idle('verify-101', 'pc'), drained: true }];
+  assert.deepEqual(planRestarts(workers, { threshold: 200_000, now }), ['fix-1', 'fix-101']);
+});
+
+test('normalizeConfig: markers kv nur ausdrücklich, publicConfig ohne markers', () => {
+  assert.equal(normalizeConfig({ root: '/r', slug: 's', markers: 'kv' }).markers, 'kv');
+  assert.equal(normalizeConfig({ root: '/r', slug: 's', markers: 'x' }).markers, 'file');
+  assert.equal('markers' in publicConfig(normalizeConfig({ root: '/r', slug: 's', markers: 'kv' })), false);
 });

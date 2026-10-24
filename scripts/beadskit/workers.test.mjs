@@ -57,14 +57,22 @@ function testRepo() {
   mkdirSync(join(r, 'scripts/beadskit'), { recursive: true });
   copyFileSync(script, join(r, 'scripts/beadskit/workers'));
   writeFileSync(join(r, 'beads.project.sh'), PROJECT);
-  // bdw-Ersatz: show liefert Labels aus FAKE_LABELS, list und merge-slot FAKE_LIST/FAKE_SLOT;
-  // FAKE_BDW_FAIL lässt jeden Aufruf scheitern (beads antwortet nicht)
+  // bdw-Ersatz: show liefert Labels aus FAKE_LABELS, list und merge-slot FAKE_LIST/FAKE_SLOT,
+  // kv einen Speicher in der JSON-Datei FAKE_KV; FAKE_BDW_FAIL lässt jeden Aufruf scheitern
+  // (beads antwortet nicht)
   writeFileSync(join(r, 'scripts/beadskit/bdw'), `#!/bin/sh
 [ -z "$FAKE_BDW_FAIL" ] || exit 1
 case $1 in
   show) printf '[{"id":"%s","labels":%s}]' "$2" "\${FAKE_LABELS:-[]}" ;;
   list) printf '%s' "\${FAKE_LIST:-[]}" ;;
   merge-slot) [ -n "$FAKE_SLOT" ] && printf '%s' "$FAKE_SLOT" || printf '{"available":true}' ;;
+  kv)
+    [ -f "$FAKE_KV" ] || echo '{}' >"$FAKE_KV"
+    case $2 in
+      list) cat "$FAKE_KV" ;;
+      set) jq --arg k "$3" --arg v "$4" '.[$k] = $v' "$FAKE_KV" >"$FAKE_KV.tmp" && mv "$FAKE_KV.tmp" "$FAKE_KV" ;;
+      clear) jq --arg k "$3" 'del(.[$k])' "$FAKE_KV" >"$FAKE_KV.tmp" && mv "$FAKE_KV.tmp" "$FAKE_KV" ;;
+    esac ;;
 esac
 `);
   chmodSync(join(r, 'scripts/beadskit/bdw'), 0o755);
@@ -80,7 +88,7 @@ esac
     writeFileSync(agentsFile, JSON.stringify(agents));
     writeFileSync(log, '');
     const env = { ...process.env, PATH: `${dir}:${process.env.PATH}`, FAKE_AGENTS: agentsFile, FAKE_LOG: log,
-      BEADSKIT_HOME: join(dir, 'home'), ...extra };
+      BEADSKIT_HOME: join(dir, 'home'), BK_TERM: 'iterm', ...extra };
     delete env.npm_config_bg;
     delete env.npm_config_dry_run;
     const res = spawnSync(join(cwd, 'scripts/beadskit/workers'), args, { cwd, encoding: 'utf8', env });
@@ -319,4 +327,176 @@ test('beads.project.sh: ungültige Rollen und Workspaces brechen ab', () => {
   assert.match(tryCfg('BK_WORKSPACES="clubs"\n').stderr, /ohne Rollen/);
   assert.match(tryCfg('BK_WORKSPACES="clubs"\nBK_WS_clubs_ROLES="fix"\n').stderr, /doppelt/);
   assert.equal(tryCfg('BK_ROLES="fix verify"\n').status, 0);
+});
+
+// ---- Terminal tmux (Linux) ----
+// Fakes für tmux und ps: tmux protokolliert jeden Aufruf in FAKE_LOG; has-session gelingt nur
+// mit FAKE_TMUX_UP, new-window -P gibt %9 aus, list-panes liefert das Pane %3 mit /dev/pts/7.
+// ps -o tty= gibt FAKE_TTY aus.
+const fakeBin = join(dir, 'fakebin');
+mkdirSync(fakeBin);
+writeFileSync(join(fakeBin, 'tmux'), `#!/bin/sh
+echo "tmux $*" >>"$FAKE_LOG"
+case $1 in
+  has-session) [ -n "$FAKE_TMUX_UP" ] ;;
+  new-window) echo %9 ;;
+  list-panes) echo "/dev/pts/7 %3" ;;
+esac
+`);
+writeFileSync(join(fakeBin, 'ps'), '#!/bin/sh\nprintf \'%s\\n\' "$FAKE_TTY"\n');
+chmodSync(join(fakeBin, 'tmux'), 0o755);
+chmodSync(join(fakeBin, 'ps'), 0o755);
+const tmuxEnv = (extra = {}) => ({ PATH: `${fakeBin}:${dir}:${process.env.PATH}`, BK_TERM: 'tmux', BK_UNAME: 'Linux', ...extra });
+const tmuxCalls = (calls) => calls.filter((c) => c.startsWith('tmux ')).map((c) => c.slice(5));
+
+test('tmux: start legt die Session an und öffnet je Worker ein Fenster mit Farbe und Startbefehl', () => {
+  const { root, workers } = testRepo();
+  clearMarkers(testRepo());
+  const dry = workers(root, ['start', 'fix=1', 'search=0', 'verify=0', '--dry-run'], [], tmuxEnv());
+  assert.match(dry.stdout, /^tmux-Fenster fix-1: claude -w fix-1 -n fix-1 '\/loop 10m \/spot-fix'$/m);
+
+  const r = workers(root, ['start', 'fix=1', 'search=0', 'verify=0'], [], tmuxEnv());
+  assert.equal(r.status, 0, r.stderr);
+  const calls = tmuxCalls(r.calls);
+  assert.deepEqual(calls.slice(0, 3), [
+    'has-session -t =bk-spot',
+    `new-session -d -s bk-spot -n shell -c ${root}`,
+    `new-window -d -P -F #{pane_id} -t =bk-spot: -n fix-1 -c ${root}`,
+  ]);
+  assert.ok(calls.includes('set-option -w -t %9 window-status-style bg=#c83c3c'), calls.join('\n'));
+  assert.ok(calls.includes(`send-keys -t %9 -l -- cd '${root}' && claude -w fix-1 -n fix-1 '/loop 10m /spot-fix'`), calls.join('\n'));
+  assert.equal(calls.at(-1), 'send-keys -t %9 Enter');
+  assert.match(r.stdout, /starte fix-1 \(tmux-Fenster\)/);
+
+  // laufende Session wird weiterverwendet
+  const again = workers(root, ['add', 'search'], [], tmuxEnv({ FAKE_TMUX_UP: '1' }));
+  assert.equal(again.status, 0, again.stderr);
+  assert.equal(tmuxCalls(again.calls).some((c) => c.startsWith('new-session')), false);
+  assert.ok(tmuxCalls(again.calls).includes(`new-window -d -P -F #{pane_id} -t =bk-spot: -n search-1 -c ${root}`));
+});
+
+test('tmux: send tippt in das Pane mit dem TTY des Workers, ohne Terminal Abbruch', () => {
+  const { root, workers } = testRepo();
+  const term = [{ id: 's1', pid: 4242, kind: 'interactive', name: 'fix-3', status: 'busy', cwd: testRepo().wt('fix-3') }];
+  const r = workers(root, ['send', 'fix-3', '--', '/compact'], term, tmuxEnv({ FAKE_TTY: 'pts/7' }));
+  assert.equal(r.status, 0, r.stderr);
+  assert.deepEqual(tmuxCalls(r.calls), ['list-panes -a -F #{pane_tty} #{pane_id}', 'send-keys -t %3 -l -- /compact', 'send-keys -t %3 Enter']);
+  // procps zeigt ? für Prozesse ohne Terminal
+  const none = workers(root, ['send', 'fix-3', '--', 'hallo'], term, tmuxEnv({ FAKE_TTY: '?' }));
+  assert.equal(none.status, 1);
+  assert.match(none.stderr, /kein Terminal zur PID 4242/);
+  // TTY ohne passendes Pane (und kein iTerm unter Linux)
+  const other = workers(root, ['send', 'fix-3', '--', 'hallo'], term, tmuxEnv({ FAKE_TTY: 'pts/8' }));
+  assert.equal(other.status, 1);
+  assert.match(other.stderr, /kein Terminal mit \/dev\/pts\/8/);
+});
+
+test('tmux: restart beendet die Session und tippt den Startbefehl ins selbe Fenster', () => {
+  const { root, workers } = testRepo();
+  clearMarkers(testRepo());
+  // eigener Elternprozess (sh endet sofort), damit der beendete sleep kein Zombie von node bleibt
+  const pid = Number(execFileSync('sh', ['-c', 'sleep 60 >/dev/null 2>&1 & echo $!'], { encoding: 'utf8' }).trim());
+  const term = [{ id: 's1', pid, kind: 'interactive', name: 'fix-3', status: 'idle', cwd: testRepo().wt('fix-3') }];
+  const r = workers(root, ['restart', 'fix-3'], term, tmuxEnv({ FAKE_TTY: 'pts/7' }));
+  assert.equal(r.status, 0, r.stderr);
+  assert.throws(() => process.kill(pid, 0));
+  assert.deepEqual(tmuxCalls(r.calls).filter((c) => c.startsWith('send-keys')), [
+    `send-keys -t %3 -l -- cd '${root}' && claude -w fix-3 -n fix-3 '/loop 10m /spot-fix'`, 'send-keys -t %3 Enter',
+  ]);
+  assert.match(r.stdout, /fix-3 im Terminal \/dev\/pts\/7 neu gestartet/);
+});
+
+// ---- Zwei Rechner (hosts.conf) ----
+const pcHome = join(dir, 'home-pc');
+mkdirSync(pcHome);
+writeFileSync(join(pcHome, 'hosts.conf'), `LEADER=pc
+HOSTS="mac pc"
+SELF=pc
+BK_HOST_BASE=100
+HOST_mac_ROLES="fix search"
+`);
+const macHome = join(dir, 'home-mac');
+mkdirSync(macHome);
+writeFileSync(join(macHome, 'hosts.conf'), readFileSync(join(pcHome, 'hosts.conf'), 'utf8').replace('SELF=pc', 'SELF=mac').replace('BK_HOST_BASE=100', 'BK_HOST_BASE=0'));
+const kvFile = join(dir, 'kv.json');
+const pc = (extra = {}) => ({ BEADSKIT_HOME: pcHome, FAKE_KV: kvFile, ...extra });
+const mac = (extra = {}) => ({ BEADSKIT_HOME: macHome, FAKE_KV: kvFile, ...extra });
+const kv = () => JSON.parse(readFileSync(kvFile, 'utf8'));
+
+test('zwei Rechner: Nummern ab BK_HOST_BASE, HOST_<h>_ROLES begrenzt die Vorgabe', () => {
+  const { root, workers } = testRepo();
+  rmSync(kvFile, { force: true });
+  const r = workers(root, ['start', '--dry-run'], [], pc());
+  assert.equal(r.status, 0, r.stderr);
+  assert.deepEqual(launches(r.stdout).map((l) => l.split(':')[0]), [
+    'iTerm-Tab fix-101', 'iTerm-Tab fix-102', 'iTerm-Tab search-101', 'iTerm-Tab verify-101',
+  ]);
+  // Mac: verify gehört nicht zu HOST_mac_ROLES, startet ohne Angabe also nicht
+  const m = workers(root, ['start', '--dry-run'], [], mac());
+  assert.deepEqual(launches(m.stdout).map((l) => l.split(':')[0]), ['iTerm-Tab fix-1', 'iTerm-Tab fix-2', 'iTerm-Tab search-1']);
+  // ausdrücklich genannt: startet, mit Hinweis
+  const v = workers(root, ['start', 'verify=1', 'fix=0', 'search=0', '--dry-run'], [], mac());
+  assert.deepEqual(launches(v.stdout).map((l) => l.split(':')[0]), ['iTerm-Tab verify-1']);
+  assert.match(v.stderr, /verify soll laut hosts.conf nicht auf mac laufen/);
+  // add nimmt die nächste freie Nummer des Rechners
+  const add = workers(root, ['add', 'fix', '--dry-run'], [live('a1', 'fix-101')], pc());
+  assert.deepEqual(launches(add.stdout), ["iTerm-Tab fix-102: claude -w fix-102 -n fix-102 '/loop 10m /spot-fix'"]);
+});
+
+test('zwei Rechner: Drain in bd kv, global, je Rolle und je Rechner', () => {
+  const { root, workers, wt } = testRepo();
+  clearMarkers(testRepo());
+  rmSync(kvFile, { force: true });
+  const check = (env) => workers(wt('fix-3'), ['drain-check'], [], env).stdout.trim();
+  assert.equal(check(pc()), 'kein Drain');
+
+  assert.equal(workers(root, ['drain', '--host', 'mac'], [], pc()).status, 0);
+  assert.deepEqual(kv(), { 'beadskit.drain@mac': '1' });
+  assert.equal(check(mac()), 'DRAIN (Rechner mac)');
+  assert.equal(check(pc()), 'kein Drain');
+
+  assert.equal(workers(root, ['drain', 'fix'], [], mac()).status, 0);
+  assert.equal(check(pc()), 'DRAIN (Rolle fix)');
+  assert.equal(workers(root, ['add', 'fix', '--dry-run'], [], pc()).status, 1);
+
+  assert.equal(workers(root, ['drain'], [], pc()).status, 0);
+  assert.equal(check(pc()), 'DRAIN (alle Worker)');
+  // keine Dateien im Git-Verzeichnis
+  assert.equal(existsSync(testRepo().marker), false);
+  const ls = workers(root, ['ls'], [], pc());
+  assert.match(ls.stdout, /Rechner: pc \(Leitrechner pc, Worker ab <rolle>-101\)/);
+  assert.match(ls.stdout, /Drain aktiv für Rechner mac/);
+
+  assert.equal(workers(root, ['drain', '--off'], [], mac()).status, 0);
+  assert.deepEqual(kv(), {});
+  assert.equal(check(mac()), 'kein Drain');
+
+  // start hebt den Drain dieses Rechners auf
+  workers(root, ['drain', '--host', 'pc'], [], mac());
+  const st = workers(root, ['start', 'fix=0', 'search=0', 'verify=0'], [], pc());
+  assert.equal(st.status, 0, st.stderr);
+  assert.deepEqual(kv(), {});
+
+  // beads antwortet nicht: drain-check sagt kein Drain (Exit 0), drain selbst scheitert
+  const down = workers(wt('fix-3'), ['drain-check'], [], pc({ FAKE_BDW_FAIL: '1' }));
+  assert.equal(down.status, 0);
+  assert.equal(down.stdout.trim(), 'kein Drain');
+  assert.equal(workers(root, ['drain'], [], pc({ FAKE_BDW_FAIL: '1' })).status, 1);
+  // --host nur mit hosts.conf und bekanntem Rechner
+  assert.equal(workers(root, ['drain', '--host', 'pc']).status, 2);
+  assert.equal(workers(root, ['drain', '--host', 'nas'], [], pc()).status, 2);
+});
+
+test('zwei Rechner: autorestart in bd kv, config mit Rechner-Angaben', () => {
+  const { root, workers } = testRepo();
+  rmSync(kvFile, { force: true });
+  assert.equal(workers(root, ['autorestart', '--over', '300k'], [], pc()).status, 0);
+  assert.deepEqual(kv(), { 'beadskit.autorestart': '300000' });
+  assert.match(workers(root, ['ls'], [], mac()).stdout, /Auto-Neustart ab 300k/);
+  const c = JSON.parse(workers(root, ['config'], [], pc()).stdout);
+  assert.deepEqual([c.host, c.leader, c.hosts, c.hostBase, c.markers, c.tmuxSession], ['pc', 'pc', ['mac', 'pc'], 100, 'kv', 'bk-spot']);
+  assert.equal(workers(root, ['autorestart', '--off'], [], pc()).status, 0);
+  assert.deepEqual(kv(), {});
+  const single = JSON.parse(workers(root, ['config']).stdout);
+  assert.deepEqual([single.leader, single.markers, single.hostBase], [null, 'file', 0]);
 });

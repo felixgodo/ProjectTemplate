@@ -84,6 +84,7 @@
   .controls { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: 10px; }
   .slot.free .dot { background: var(--ok); }
   .slot.held .dot { background: var(--merge); }
+  .host.off { color: var(--bad); border-color: color-mix(in srgb, var(--bad) 40%, var(--line)); }
 
   /* Worker */
   .roles { display: grid; gap: 14px; }
@@ -402,13 +403,22 @@ function renderHead() {
   const s = st.slot;
   const slot = !s ? '<span class="chip">Merge-Slot ?</span>'
     : s.available ? '<span class="chip slot free"><span class="dot"></span>Merge-Slot frei</span>'
-      : `<span class="chip slot held busy"><span class="dot"></span>Merge-Slot: ${esc(s.holder)}</span>`;
+      : `<span class="chip slot held busy"><span class="dot"></span>Merge-Slot: ${esc(s.holder)}${s.host && hosts().length ? ` (${esc(s.host)}${hosts().find((h) => h.name === s.host && !h.ok) ? ', offline' : ''})` : ''}</span>`;
   const d = st.drain;
+  // zwei Rechner: je Rechner erreichbar?, eigener Drain, Auswahl, wo neue Worker starten
+  const hostHtml = hosts().length ? `${hosts().map((h) => {
+    const dr = !!d.hosts?.[h.name];
+    return `<span class="chip host ${h.ok ? '' : 'off'}" title="${esc(h.ok ? `${h.name}${h.leader ? ': Leitrechner (beads, Leitstand)' : ''}` : `nicht erreichbar: ${h.error}`)}">${esc(h.name)}${h.leader ? ' ★' : ''}${h.ok ? '' : ' offline'}</span>
+      <button class="small ${dr ? 'on' : ''}" data-wa="drain" data-role="host" data-host="${esc(h.name)}" data-off="${dr ? 1 : ''}"
+        title="${dr ? `Drain für ${esc(h.name)} aufheben` : `Nur die Worker auf ${esc(h.name)} auslaufen lassen (z. B. bevor der Rechner zugeklappt wird)`}">${dr ? 'Drain · aufheben' : 'auslaufen'}</button>`;
+  }).join('')}
+    <label class="small muted" style="font-size:12.5px" title="Rechner für „starten“ und +1">Neue auf
+      <select id="start-host">${hosts().map((h) => `<option value="${esc(h.name)}" ${h.name === startHost() ? 'selected' : ''} ${h.ok ? '' : 'disabled'}>${esc(h.name)}</option>`).join('')}</select></label>` : '';
   const ar = st.autorestart || {};
   const recent = (ar.recent || []).map((x) => `${clock(x.at)} ${x.name} (${ktok(x.tokens)}): ${x.ok ? 'neu gestartet' : 'verweigert'}`).join('\n');
   const opts = [0, 150_000, 200_000, 300_000, 400_000, 600_000];
   if (ar.threshold && !opts.includes(ar.threshold)) opts.push(ar.threshold);
-  const html = `${slot}
+  const html = `${slot}${hostHtml}
     <button class="small ${d.all ? 'on' : ''}" data-wa="drain" data-role="all" data-off="${d.all ? 1 : ''}"
       title="${d.all ? 'Drain für alle aufheben' : 'Alle Worker auslaufen lassen: laufenden Schritt fertig, nichts Neues claimen'}">
       ${d.all ? 'Drain aktiv · aufheben' : 'Alle auslaufen lassen'}</button>
@@ -416,7 +426,7 @@ function renderHead() {
     <label class="small muted" style="font-size:12.5px" title="${esc(`Startet idle Worker ohne Claim neu, sobald ihr Kontext über der Schwelle liegt (Prüfung jede Minute).${recent ? `\n\nZuletzt:\n${recent}` : ''}`)}">Auto-Neustart
       <select id="autorestart">${opts.map((n) => `<option value="${n}" ${n === (ar.threshold || 0) ? 'selected' : ''}>${n ? `ab ${ktok(n)}` : 'aus'}</option>`).join('')}</select></label>
     ${st.workers.length ? `<button class="small danger" data-stop="all"
-      title="Alle Hintergrund-Worker stoppen; verweigert, solange einer arbeitet (besser erst auslaufen lassen)">Alle stoppen</button>` : ''}
+      title="Alle Hintergrund-Worker${hosts().length ? ' aller Rechner' : ''} stoppen; verweigert, solange einer arbeitet (besser erst auslaufen lassen)">Alle stoppen</button>` : ''}
     <span class="muted" style="font-size:12.5px">${st.workers.length} Worker, ${st.workers.filter((w) => w.status !== 'idle').length} aktiv</span>`;
   // nur bei Änderung neu zeichnen, sonst schließt das Auto-Refresh eine offene Auswahl;
   // nicht, solange „Alle stoppen“ scharf ist oder auf --force wartet
@@ -425,15 +435,27 @@ function renderHead() {
   $('logout').hidden = !st.auth;
 }
 
+// Rechner (zwei Rechner) und der gewählte für neue Worker; Standard der Leitrechner
+const hosts = () => st?.hosts || [];
+function startHost() {
+  let h = null;
+  try { h = localStorage.getItem('leitstand-host'); } catch { /* nur Komfort */ }
+  const ok = hosts().filter((x) => x.ok);
+  return ok.find((x) => x.name === h)?.name ?? ok.find((x) => x.leader)?.name ?? ok[0]?.name ?? null;
+}
+
 function openStart() {
-  const have = (r) => st?.workers.filter((w) => w.role === r).length || 0;
+  const sh = startHost();
+  // Anzahl je Rechner: start zählt die Worker des Rechners, auf dem er läuft
+  const have = (r) => st?.workers.filter((w) => w.role === r && (!sh || w.host === sh)).length || 0;
   const def = meta().defaults;
   const r0 = ROLES[0];
   openDrawer('start', null, st.workspace === 'code' ? 'Pipeline starten' : `${esc(meta().label)} starten`, `
     <form class="form" id="start">
       <p class="muted" style="margin:0;font-size:13px">Anzahl ist die <b>Gesamtzahl</b> je Rolle (${esc(r0)}-1 … ${esc(r0)}-N);
         laufende Worker werden übersprungen. <code>start</code> hebt einen aktiven Drain auf${st.workspace === 'code' ? '' : ` (nur für ${esc(meta().label)})`}.
-        Die Worker öffnen sich als Tabs in iTerm auf dem Mac (ohne iTerm-Freigabe im Hintergrund).</p>
+        ${sh ? `Startet auf <b>${esc(sh)}</b> (oben unter „Neue auf“ wählbar), als Terminal-Fenster (Mac: iTerm-Tab, Linux: tmux-Fenster).`
+    : 'Die Worker öffnen sich als Tabs in iTerm auf dem Mac (ohne iTerm-Freigabe im Hintergrund).'}</p>
       <div class="inline">${ROLES.map((r) => `<label>${esc(ROLE_LABEL[r])} <span class="muted">(läuft: ${have(r)})</span>
         <input type="number" name="${esc(r)}" min="0" max="8" value="${Math.max(have(r), def[r] ?? 0)}"></label>`).join('')}</div>
       <div class="actions"><button class="primary" type="submit">Starten</button><span class="msg" id="s-msg"></span></div>
@@ -459,6 +481,7 @@ function workerCard(w) {
       <span class="dot" style="background:${busy ? roleVar(w.name) : 'var(--line)'}"></span>
       <span class="name">${esc(w.name)}</span>
       <span class="badge">${w.kind === 'background' ? 'bg' : 'Terminal'}</span>
+      ${hosts().length ? `<span class="badge" title="Rechner">${esc(w.host)}</span>` : ''}
       ${w.drained ? '<span class="badge warn">Drain</span>' : ''}
       ${a.pending?.length ? `<span class="badge warn" title="Nachrichten in der Warteschlange">✉ ${a.pending.length}</span>` : ''}
       <span class="right"><span class="${busy ? '' : 'muted'}">${esc(busy ? w.status : 'idle')}</span></span>
@@ -477,7 +500,7 @@ function workerCard(w) {
 const overLimit = (a) => !!st?.autorestart?.threshold && a?.contextTokens > st.autorestart.threshold;
 
 function renderWorkers() {
-  const key = JSON.stringify([P, st.workspace, st.workers, st.drain, st.autorestart?.threshold, st.prs.map((p) => [p.repo, p.number, p.ci, p.mergeable])]);
+  const key = JSON.stringify([P, st.workspace, st.workers, st.drain, st.hosts, st.autorestart?.threshold, st.prs.map((p) => [p.repo, p.number, p.ci, p.mergeable])]);
   if (keys.workers === key) return;
   keys.workers = key;
   const mine = st.workers.filter((w) => ROLES.includes(w.role));
@@ -493,7 +516,7 @@ function renderWorkers() {
     return `<section style="--c:${roleVar(r)}">
       <div class="role-head"><span class="sw"></span><b>${esc(ROLE_LABEL[r])}</b>
         <span class="muted">${ws.length} Worker, ${ws.filter((w) => w.status !== 'idle').length} aktiv</span>
-        <button class="small" data-wa="add" data-role="${esc(r)}" title="Einen weiteren ${esc(r)}-Worker als iTerm-Tab starten">+1</button>
+        <button class="small" data-wa="add" data-role="${esc(r)}" title="Einen weiteren ${esc(r)}-Worker im Terminal starten${hosts().length ? ' (auf dem Rechner unter „Neue auf“)' : ''}">+1</button>
         <button class="small ${drained ? 'on' : ''}" data-wa="drain" data-role="${esc(r)}" data-off="${drained ? 1 : ''}"
           ${st.drain.all ? 'disabled title="globaler Drain aktiv"' : ''}>${drained ? 'Drain aktiv · aufheben' : 'auslaufen lassen'}</button>
       </div>
@@ -872,7 +895,7 @@ function workerHtml(w) {
   const a = w.activity || {};
   return `
     <dl class="kv">
-      <dt>Status</dt><dd>${esc(w.status)} · ${w.kind === 'background' ? 'Hintergrund' : 'Terminal (iTerm)'}${w.drained ? ' · <span class="warn-t">Drain</span>' : ''}</dd>
+      <dt>Status</dt><dd>${esc(w.status)} · ${w.kind === 'background' ? 'Hintergrund' : 'Terminal'}${w.host && hosts().length ? ` · auf ${esc(w.host)}` : ''}${w.drained ? ' · <span class="warn-t">Drain</span>' : ''}</dd>
       <dt>Session</dt><dd class="mono">${esc(w.session || '–')} · pid ${esc(w.pid)}</dd>
       <dt>Gestartet</dt><dd>${esc(stamp(w.startedAt))} (läuft ${esc(dur(ms(w.startedAt)))})</dd>
       <dt>Letzte Aktivität</dt><dd>${esc(ago(a.lastAt))}</dd>
@@ -884,13 +907,13 @@ function workerHtml(w) {
         const x = prFor(p.number);
         return `${ciDot(x)} <a href="${esc(p.url || x?.url || '#')}" target="_blank" rel="noopener">#${esc(p.number)}</a>`;
       }).join(' ') || '–'}</dd>
-      <dt>Öffnen</dt><dd class="mono">${w.kind === 'background' ? `scripts/beadskit/workers attach ${esc(w.name)}` : `iTerm-Tab ${esc(w.name)}`}</dd>
+      <dt>Öffnen</dt><dd class="mono">${w.kind === 'background' ? `scripts/beadskit/workers attach ${esc(w.name)}` : `Terminal ${esc(w.name)} (iTerm-Tab bzw. tmux-Fenster)`}${w.host && hosts().length ? ` auf ${esc(w.host)}` : ''}</dd>
     </dl>
     <div class="actions" style="margin-top:12px">
-      <button data-restart="${esc(w.name)}" title="Mit frischem Kontext neu starten: nur idle, ohne Claim und Merge-Slot${w.kind === 'background' ? '' : ' (im iTerm-Tab per /exit)'}">Neu starten</button>
+      <button data-restart="${esc(w.name)}" title="Mit frischem Kontext neu starten: nur idle, ohne Claim und Merge-Slot${w.kind === 'background' ? '' : ' (im selben Terminal)'}">Neu starten</button>
       ${w.kind === 'background'
         ? `<button class="danger" data-stop="${esc(w.name)}">Stoppen</button>`
-        : '<span class="muted" style="font-size:13px">Stoppen nur im iTerm-Tab.</span>'}
+        : '<span class="muted" style="font-size:13px">Stoppen nur im Terminal (iTerm-Tab bzw. tmux-Fenster).</span>'}
       <span class="msg" id="w-msg"></span>
     </div>
     ${a.pending?.length ? `<h4>Wartende Nachrichten</h4>${a.pending.map((p) => `<div class="text">${esc(p.text)}<div class="muted">${esc(ago(p.at))}</div></div>`).join('')}` : ''}
@@ -900,7 +923,7 @@ function workerHtml(w) {
     ${w.logs != null ? `<h4>Terminal-Ausgabe (claude logs)</h4><pre class="logs">${esc(w.logs)}</pre>` : ''}`;
 }
 
-// Worker-Detail: Reiter Chat (Verlauf + Eingabe, nur iTerm-Worker) und Details. Beide Teile
+// Worker-Detail: Reiter Chat (Verlauf + Eingabe, nur Terminal-Worker) und Details. Beide Teile
 // werden getrennt aktualisiert, damit ein angefangener Text im Eingabefeld stehen bleibt.
 async function openWorker(name) {
   const w = st?.workers.find((x) => x.name === name);
@@ -910,7 +933,7 @@ async function openWorker(name) {
     <div id="w-chat">
       <div class="chat" id="chat-log"><p class="muted">lädt …</p></div>
       ${w?.kind === 'background'
-        ? `<div class="chatbar muted" style="font-size:12.5px">Hintergrund-Worker: schreiben nur über <code>scripts/beadskit/workers attach ${esc(name)}</code>, oder unter Details „Neu starten“ (öffnet ihn als iTerm-Tab).</div>`
+        ? `<div class="chatbar muted" style="font-size:12.5px">Hintergrund-Worker: schreiben nur über <code>scripts/beadskit/workers attach ${esc(name)}</code>, oder unter Details „Neu starten“ (öffnet ihn im Terminal).</div>`
         : `<form class="chatbar" id="chat-form" autocomplete="off">
             <input id="chat-text" maxlength="4000" placeholder="Nachricht oder /befehl an ${esc(name)} …" aria-label="Nachricht an ${esc(name)}">
             <button class="primary" type="submit">Senden</button><span class="msg" id="c-msg"></span></form>`}
@@ -1033,6 +1056,8 @@ document.addEventListener('click', async (e) => {
   const wa = e.target.closest('button[data-wa]');
   if (wa) {
     const body = { action: wa.dataset.wa, role: wa.dataset.role, off: !!wa.dataset.off, ws: st?.workspace };
+    if (wa.dataset.host) body.host = wa.dataset.host;
+    else if (body.action === 'add' && startHost()) body.host = startHost();
     if (body.action === 'add' && !armed(wa, `${body.role} starten?`)) return;
     wa.disabled = true;
     try {
@@ -1152,6 +1177,11 @@ document.addEventListener('change', (e) => {
   if (e.target.id === 'i-prio' && drawer?.kind === 'issue') {
     issueAction(drawer.id, { action: 'priority', value: Number(e.target.value) }, `${drawer.id}: Priorität P${e.target.value}`);
   }
+  if (e.target.id === 'start-host') {
+    try { localStorage.setItem('leitstand-host', e.target.value); } catch { /* nur Komfort */ }
+    keys.controls = '';
+    renderHead();
+  }
   if (e.target.id === 'autorestart') {
     const n = Number(e.target.value);
     post('/api/workers', n ? { action: 'autorestart', threshold: n } : { action: 'autorestart', off: true })
@@ -1187,7 +1217,7 @@ document.addEventListener('submit', async (e) => {
     const msg = $('s-msg');
     msg.className = 'msg'; msg.textContent = 'startet …';
     try {
-      const r = await post('/api/workers', { action: 'start', ws: st.workspace, counts });
+      const r = await post('/api/workers', { action: 'start', ws: st.workspace, counts, ...(startHost() ? { host: startHost() } : {}) });
       toast(r.output || 'gestartet'); closeDrawer(); await reload();
     } catch (err) { msg.className = 'msg bad'; msg.textContent = err.message; }
     return;

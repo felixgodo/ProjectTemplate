@@ -4,17 +4,17 @@
 # der beads-Actor (bdw). Rollen gehören zu einem Workspace: code (BK_ROLES) und die weiteren
 # aus BK_WORKSPACES in beads.project.sh.
 #
-#   workers start [--ws <ws>] [<rolle>=N …] [--bg] [--dry-run]   Workspace starten
-#   workers add <rolle>[=N] … [--ws <ws>] [--bg] [--dry-run]   N weitere Worker (Standard 1)
+#   workers start [--ws <ws>] [<rolle>=N …] [--term iterm|tmux|bg] [--dry-run]   Workspace starten
+#   workers add <rolle>[=N] … [--ws <ws>] [--term …] [--dry-run]   N weitere Worker (Standard 1)
 #   workers ls [--ws <ws>]      Worker dieses Repos mit Rolle und Status
-#   workers attach <name>       Hintergrund-Worker in diesem Terminal öffnen
+#   workers attach <name>       Worker in diesem Terminal öffnen (Hintergrund oder tmux-Fenster)
 #   workers logs <name>         letzte Ausgabe eines Hintergrund-Workers
-#   workers drain [rolle…] [--ws <ws>] [--off]   Worker (alle, Rollen, Workspace) auslaufen lassen
+#   workers drain [rolle…] [--ws <ws>] [--host <h>] [--off]   Worker (alle, Rollen, Workspace, Rechner) auslaufen lassen
 #   workers drain-check [rolle]   DRAIN, wenn dieser Worker auslaufen soll (Rolle sonst aus dem Worktree)
 #   workers stop <name>|--all [--force]   Hintergrund-Worker sofort stoppen
-#   workers restart <name> [--force] [--bg] [--dry-run]   Worker mit frischem Kontext neu starten
+#   workers restart <name> [--force] [--term …] [--dry-run]   Worker mit frischem Kontext neu starten
 #   workers autorestart [--over 200k] [--off]   Leitstand startet große Kontexte selbst neu
-#   workers send <name> [--] <text>   Nachricht oder /befehl in den iTerm-Tab eines Workers tippen
+#   workers send <name> [--] <text>   Nachricht oder /befehl in das Terminal eines Workers tippen
 #   workers repo-for <issue-id>   Repo-Pfad, in dem das Issue bearbeitet wird (BK_REPOS)
 #   workers config              Projekt-Konfiguration als JSON (für den Leitstand)
 #
@@ -28,11 +28,18 @@
 # zusätzliche Worker mit den nächsten freien Nummern und hängt die Tabs ins vorderste
 # iTerm-Fenster statt ein neues zu öffnen.
 #
-# Worker laufen standardmäßig in iTerm, ein Tab je Worker, Farbe je Rolle (dort lassen sie sich
-# aus dem Leitstand per `send` ansprechen). Mit --bg als Hintergrund-Sessions (claude --bg).
-# Lässt sich iTerm nicht steuern (kein iTerm, keine Automation-Freigabe), starten die Worker
-# im Hintergrund. `restart` startet auch Hintergrund-Worker in einem iTerm-Tab neu.
-# --dry-run zeigt nur, was gestartet bzw. an Markierungen geändert würde.
+# Worker laufen in einem Terminal, eines je Worker, Farbe je Rolle (dort lassen sie sich aus dem
+# Leitstand per `send` ansprechen): auf macOS als iTerm-Tab, unter Linux als Fenster der
+# tmux-Session bk-<slug>. Mit --bg (--term bg) als Hintergrund-Sessions (claude --bg); BK_TERM
+# setzt die Vorgabe. Lässt sich das Terminal nicht steuern (kein iTerm, keine Automation-Freigabe,
+# kein tmux), starten die Worker im Hintergrund. `restart` startet auch Hintergrund-Worker in
+# einem Terminal neu. --dry-run zeigt nur, was gestartet bzw. an Markierungen geändert würde.
+#
+# Zwei Rechner (ProjectTemplate/scripts/remote): Steht in ~/.config/beadskit/hosts.conf ein
+# LEADER, teilen sich die Rechner die beads-Datenbank auf dem Leitrechner. Worker heißen dann
+# <rolle>-<BK_HOST_BASE + n> (Mac fix-1, PC fix-101), die Markierungen (Drain, Auto-Neustart)
+# liegen in `bd kv` statt im Git-Verzeichnis, und `drain --host <h>` lässt nur einen Rechner
+# auslaufen. HOST_<h>_ROLES begrenzt, welche Rollen `start` dort ohne Angabe startet.
 #
 # Sauber beenden: erst `drain` (Worker claimen nichts Neues und hören nach dem laufenden
 # Issue auf, siehe worker-regeln.md „Auslaufen“), warten bis `ls` alle als idle zeigt,
@@ -44,8 +51,8 @@
 # damit deren Worker weiter auslaufen.
 #
 # Kontext: ein Worker unter /loop sammelt alle Runden in einer Session. `restart` startet ihn
-# zwischen zwei Runden neu (idle, ohne Claim, ohne Merge-Slot), auch im iTerm-Tab (dort SIGTERM
-# an die Session und per AppleScript der Startbefehl in die Shell desselben Tabs). `autorestart`
+# zwischen zwei Runden neu (idle, ohne Claim, ohne Merge-Slot), auch im Terminal (dort SIGTERM
+# an die Session und der Startbefehl in die Shell desselben Tabs bzw. tmux-Fensters). `autorestart`
 # legt eine Markierung mit der Schwelle an; der Leitstand prüft jede Minute und ruft `restart` auf.
 # Ohne laufenden Leitstand passiert nichts automatisch.
 set -eu
@@ -133,20 +140,109 @@ $r|"*) echo "Rolle $r doppelt (beads.project.sh)" >&2; exit 1 ;; esac
   done
 done
 
-# Gemeinsam für alle Worktrees, nicht im Repo; die Skills prüfen sie vor jedem Claim.
-# $DRAIN gilt für alle Worker, $DRAIN-<rolle> nur für eine Rolle.
-GIT_COMMON=$(git -C "$ROOT" rev-parse --path-format=absolute --git-common-dir)
-DRAIN=$GIT_COMMON/$BK_SLUG-workers-drain
-# Schwelle in Tokens für den Auto-Neustart durch den Leitstand; fehlt die Datei, ist er aus
-AUTO=$GIT_COMMON/$BK_SLUG-workers-autorestart
+CONF=${BEADSKIT_HOME:-$HOME/.config/beadskit}
 
 # Der Leitstand (ein Prozess für alle Projekte) liest diese Liste.
 register() {
-  conf=${BEADSKIT_HOME:-$HOME/.config/beadskit}
-  mkdir -p "$conf" 2>/dev/null || return 0
-  grep -qxF "$ROOT" "$conf/projects.txt" 2>/dev/null || echo "$ROOT" >>"$conf/projects.txt"
+  mkdir -p "$CONF" 2>/dev/null || return 0
+  grep -qxF "$ROOT" "$CONF/projects.txt" 2>/dev/null || echo "$ROOT" >>"$CONF/projects.txt"
 }
 register
+
+# ---- Rechner (hosts.conf: Zeilen NAME=wert, Werte mit Leerzeichen in Anführungszeichen) ----
+LEADER="" HOSTS="" SELF="" BK_HOST_BASE=0
+if [ -f "$CONF/hosts.conf" ]; then
+  while IFS='=' read -r key val; do
+    val=${val%\"} val=${val#\"}
+    case $key in
+      LEADER|HOSTS|SELF|BK_HOST_BASE) eval "$key=\$val" ;;
+      HOST_[a-z]*_ROLES) case $key in *[!A-Za-z0-9_]*) ;; *) eval "$key=\$val" ;; esac ;;
+    esac
+  done <"$CONF/hosts.conf"
+fi
+case $BK_HOST_BASE in ''|*[!0-9]*) echo "BK_HOST_BASE in $CONF/hosts.conf ist keine Zahl" >&2; exit 1 ;; esac
+for h in $HOSTS $SELF $LEADER; do
+  case $h in *[!a-z0-9]*) echo "Rechnername nur a-z und 0-9: $h ($CONF/hosts.conf)" >&2; exit 1 ;; esac
+done
+MULTI=0
+[ -z "$LEADER" ] || MULTI=1
+[ -n "$SELF" ] || SELF=$(hostname -s 2>/dev/null | tr '[:upper:]' '[:lower:]' | tr -cd 'a-z0-9')
+
+# Rollen, die `start` auf diesem Rechner ohne Angabe startet (leer = alle)
+host_roles() { eval "printf '%s' \"\${HOST_$SELF""_ROLES-}\""; }
+
+# ---- Markierungen: drain, drain-<rolle>, drain@<rechner>, autorestart ----
+# Ein Rechner: Dateien im Git-Common-Dir, gemeinsam für alle Worktrees, nicht im Repo. Zwei
+# Rechner: Schlüssel beadskit.<name> in `bd kv` der gemeinsamen Datenbank. Die Skills prüfen den
+# Drain vor jedem Claim (drain-check); autorestart enthält die Schwelle in Tokens.
+GIT_COMMON=$(git -C "$ROOT" rev-parse --path-format=absolute --git-common-dir)
+DRAIN=$GIT_COMMON/$BK_SLUG-workers-drain
+AUTO=$GIT_COMMON/$BK_SLUG-workers-autorestart
+
+mark_file() {
+  case $1 in
+    autorestart) echo "$AUTO" ;;
+    drain) echo "$DRAIN" ;;
+    drain*) echo "$DRAIN${1#drain}" ;;
+  esac
+}
+
+# Alle kv-Markierungen als "name=wert" je Zeile, einmal je Aufruf gelesen; Exit 1, wenn beads
+# nicht antwortet
+marks=""
+marks_ok=""
+marks_load() {
+  [ -z "$marks_ok" ] || return "$marks_ok"
+  if out=$(cd "$ROOT" && "$KIT/bdw" kv list --json 2>/dev/null) &&
+    printf '%s' "$out" | jq -e 'type == "object"' >/dev/null 2>&1; then
+    marks=$(printf '%s' "$out" | jq -r 'to_entries[] | select(.key | startswith("beadskit.")) | "\(.key | ltrimstr("beadskit."))=\(.value)"')
+    marks_ok=0
+  else
+    marks="" marks_ok=1
+  fi
+  return "$marks_ok"
+}
+
+mark_has() {
+  if [ "$MULTI" = 0 ]; then [ -e "$(mark_file "$1")" ]; return; fi
+  marks_load || return 1
+  printf '%s\n' "$marks" | grep -q "^$1="
+}
+
+mark_get() {
+  if [ "$MULTI" = 0 ]; then cat "$(mark_file "$1")" 2>/dev/null; return 0; fi
+  marks_load || return 0
+  printf '%s\n' "$marks" | sed -n "s/^$1=//p" | head -n 1
+}
+
+mark_set() {
+  if [ "$MULTI" = 0 ]; then printf '%s' "${2-}" >"$(mark_file "$1")"; return; fi
+  marks_ok=""
+  (cd "$ROOT" && BEADS_ACTOR=${BEADS_ACTOR:-user} "$KIT/bdw" kv set "beadskit.$1" "${2:-1}" >/dev/null 2>&1) ||
+    { echo "beads antwortet nicht: Markierung $1 nicht gesetzt" >&2; exit 1; }
+}
+
+mark_rm() {
+  if [ "$MULTI" = 0 ]; then rm -f "$(mark_file "$1")"; return; fi
+  mark_has "$1" || return 0
+  marks_ok=""
+  (cd "$ROOT" && BEADS_ACTOR=${BEADS_ACTOR:-user} "$KIT/bdw" kv clear "beadskit.$1" >/dev/null 2>&1) ||
+    { echo "beads antwortet nicht: Markierung $1 nicht entfernt" >&2; exit 1; }
+}
+
+# Globaler Drain oder Drain dieses Rechners
+drain_all() { mark_has drain || { [ "$MULTI" = 1 ] && mark_has "drain@$SELF"; }; }
+
+# ---- Terminal für Worker: iterm (macOS), tmux (Linux), bg (claude --bg) ----
+TMUX_SESSION=bk-$BK_SLUG
+# BK_UNAME nur für Tests
+UNAME=${BK_UNAME:-$(uname)}
+default_term() {
+  if [ -n "${BK_TERM-}" ]; then echo "$BK_TERM"
+  elif [ "$UNAME" = Darwin ]; then echo iterm
+  elif command -v tmux >/dev/null 2>&1; then echo tmux
+  else echo bg; fi
+}
 
 # Feld $2 (1 rolle, 2 workspace, 3 prompt, 4 farbe, 5 standard) der Rolle $1, leer wenn unbekannt
 role_field() {
@@ -171,16 +267,23 @@ is_ws() {
 }
 
 prompt_for() { role_field "$1" 3; }
-# iTerm-Tabfarbe als "r g b"
+# Terminalfarbe als "r g b"
 color_for() { role_field "$1" 4; }
 
-# Rollen mit Drain-Markierung ("alle" bei der globalen), leer ohne Drain; $1 = nur dieser Workspace
+# Rollen mit Drain-Markierung ("alle" bei der globalen oder der dieses Rechners), leer ohne
+# Drain; $1 = nur dieser Workspace
 drained() {
-  if [ -e "$DRAIN" ]; then echo alle; return; fi
+  if drain_all; then echo alle; return; fi
   out=""
-  for r in $(roles_of "${1-}"); do [ ! -e "$DRAIN-$r" ] || out="$out${out:+ }$r"; done
+  for r in $(roles_of "${1-}"); do ! mark_has "drain-$r" || out="$out${out:+ }$r"; done
   [ -z "$out" ] || echo "$out"
 }
+
+# Name des n-ten Workers einer Rolle auf diesem Rechner
+worker_name() { echo "$1-$((BK_HOST_BASE + $2))"; }
+
+# Startbefehl im Terminal (Shell des Tabs bzw. tmux-Fensters)
+term_cmd() { echo "cd '$ROOT' && claude -w $2 -n $2 '$(prompt_for "$1")'"; }
 
 usage() {
   sed -n '7,19s/^# \{0,1\}//p' "$0" >&2
@@ -208,7 +311,7 @@ session_of() {
   # shellcheck disable=SC2086 # Absicht: "<worktree> <kind> <status> <name> <pid> <ref>" zerlegen
   set -- $line
   if [ "$2" != background ]; then
-    echo "$1 läuft in einem Terminal (iTerm-Tab $1), dort öffnen bzw. beenden" >&2
+    echo "$1 läuft in einem Terminal (iTerm-Tab bzw. tmux-Fenster $1), dort öffnen bzw. beenden" >&2
     exit 1
   fi
   echo "$6"
@@ -250,18 +353,26 @@ reset_counts() {
   done
 }
 
-# Setzt Anzahlen ($given = genannte Rollen), ws, iterm und dry; mit bare=1 steht "fix" für fix=1.
+# Prüft das Terminal aus --term bzw. BK_TERM
+check_term() {
+  case $term in iterm|tmux|bg) ;; *) echo "unbekanntes Terminal: $term (iterm, tmux, bg)" >&2; exit 2 ;; esac
+}
+
+# Setzt Anzahlen ($given = genannte Rollen), ws, term und dry; mit bare=1 steht "fix" für fix=1.
 # `npm run workers add fix --bg` (ohne --) gibt npm die Option nicht weiter, sondern setzt
-# npm_config_bg=true; das zählt wie --bg, ebenso npm_config_dry_run. --iterm ist der Standard
-# und bleibt als Option erlaubt.
+# npm_config_bg=true; das zählt wie --bg, ebenso npm_config_dry_run. --iterm und --tmux sind
+# Kurzformen von --term.
 parse_args() {
-  [ "${npm_config_bg-}" = true ] && iterm=0
+  [ "${npm_config_bg-}" = true ] && term='bg'
   [ "${npm_config_dry_run-}" = true ] && dry=1
   given="" ws=""
   while [ $# -gt 0 ]; do
     case $1 in
-      --iterm) iterm=1 ;;
-      --bg) iterm=0 ;;
+      --iterm) term=iterm ;;
+      --tmux) term=tmux ;;
+      --bg) term='bg' ;;
+      --term) [ $# -ge 2 ] || usage; term=$2; shift ;;
+      --term=*) term=${1#*=} ;;
       --dry-run) dry=1 ;;
       --ws) [ $# -ge 2 ] || usage; ws=$2; shift ;;
       --ws=*) ws=${1#*=} ;;
@@ -273,7 +384,17 @@ parse_args() {
     esac
     shift
   done
+  check_term
   [ -z "$ws" ] || is_ws "$ws" || { echo "unbekannter Workspace: $ws ($WORKSPACES)" >&2; exit 2; }
+}
+
+# Warnt, wenn eine Rolle auf diesem Rechner laut hosts.conf nicht laufen soll (z. B. verify auf
+# dem Mac: schläft er mit dem Merge-Slot, steht das Mergen still)
+warn_host_role() {
+  allowed=$(host_roles)
+  [ -n "$allowed" ] || return 0
+  case " $allowed " in *" $1 "*) return 0 ;; esac
+  echo "Hinweis: $1 soll laut hosts.conf nicht auf $SELF laufen (HOST_${SELF}_ROLES=\"$allowed\")" >&2
 }
 
 # Workspace aus --ws oder den genannten Rollen; Rollen eines anderen Workspaces brechen ab.
@@ -291,37 +412,51 @@ resolve_ws() {
   [ -n "$ws" ] || ws=${1-code}
 }
 
-# Startet einen Worker im Hintergrund oder hängt seinen iTerm-Tab an $tabs an
+# Startet einen Worker im Hintergrund oder merkt ihn in $queued fürs Terminal vor
 launch() {
   role=$1 name=$2
   prompt=$(prompt_for "$role")
-  if [ "$iterm" = 1 ]; then
-    # shellcheck disable=SC2046 # Absicht: "r g b" in $1..$3 zerlegen
-    set -- $(color_for "$role")
-    # Tabfarbe per iTerm-Escape, dann claude im Repo-Wurzelordner
-    tab="printf '\\033]6;1;bg;red;brightness;$1\\a\\033]6;1;bg;green;brightness;$2\\a\\033]6;1;bg;blue;brightness;$3\\a'; cd '$ROOT' && claude -w $name -n $name '$prompt'"
-    tabs="$tabs$tab
-"
+  if [ "$term" != bg ]; then
     queued="$queued$role $name
 "
-    [ "$dry" = 1 ] && echo "iTerm-Tab $name: claude -w $name -n $name '$prompt'"
+    if [ "$dry" = 1 ]; then
+      if [ "$term" = tmux ]; then echo "tmux-Fenster $name: claude -w $name -n $name '$prompt'"
+      else echo "iTerm-Tab $name: claude -w $name -n $name '$prompt'"; fi
+    fi
   elif [ "$dry" = 1 ]; then
     echo "(cd '$ROOT' && claude --bg -w $name -n $name '$prompt')"
   else
     echo "starte $name ($prompt)"
-    (cd "$ROOT" && claude --bg -w "$name" -n "$name" "$prompt")
+    bg_scope sh -c 'cd "$1" && shift && exec claude --bg "$@"' sh "$ROOT" -w "$name" -n "$name" "$prompt"
   fi
   return 0
 }
 
-# Öffnet die gesammelten iTerm-Tabs bzw. gibt den Hinweis für Hintergrund-Worker aus.
-# $1 = reuse: Tabs ins vorderste iTerm-Fenster hängen (neues Fenster nur, wenn keins offen ist)
-finish() {
-  if [ "$iterm" = 1 ] && [ -n "$tabs" ] && [ "$dry" = 0 ]; then
-    list=$(mktemp)
-    trap 'rm -f "$list"' EXIT
-    printf '%s' "$tabs" >"$list"
-    if ! osascript - "$list" "${1-new}" <<'APPLESCRIPT'
+# Führt einen Befehl, der dauerhafte Prozesse startet (tmux-Server, claude --bg), unter Linux
+# in einem eigenen systemd-Scope aus: Startet ihn der Leitstand-Dienst, würde ein Neustart des
+# Dienstes sonst alles in seiner cgroup beenden, auch die Worker.
+bg_scope() {
+  if [ "$UNAME" = Linux ] && command -v systemd-run >/dev/null 2>&1 &&
+    systemd-run --user --scope --quiet true >/dev/null 2>&1; then
+    systemd-run --user --scope --quiet --collect "$@"
+  else
+    "$@"
+  fi
+}
+
+# Öffnet die vorgemerkten Worker als iTerm-Tabs; $1 = reuse: ins vorderste Fenster hängen
+# (neues Fenster nur, wenn keins offen ist). Exit 1, wenn iTerm nicht steuerbar ist.
+term_open_iterm() {
+  list=$(mktemp)
+  trap 'rm -f "$list"' EXIT
+  printf '%s' "$queued" | while read -r role name; do
+    [ -n "$name" ] || continue
+    # shellcheck disable=SC2046 # Absicht: "r g b" in $1..$3 zerlegen
+    set -- $(color_for "$role")
+    # Tabfarbe per iTerm-Escape, dann claude im Repo-Wurzelordner
+    echo "printf '\\033]6;1;bg;red;brightness;$1\\a\\033]6;1;bg;green;brightness;$2\\a\\033]6;1;bg;blue;brightness;$3\\a'; $(term_cmd "$role" "$name")"
+  done >"$list"
+  osascript - "$list" "$1" <<'APPLESCRIPT'
       on run argv
         set cmds to paragraphs of (read POSIX file (item 1 of argv) as «class utf8»)
         tell application "iTerm"
@@ -346,34 +481,70 @@ finish() {
         end tell
       end run
 APPLESCRIPT
-    then
+}
+
+# Öffnet die vorgemerkten Worker als Fenster der tmux-Session bk-<slug> (legt sie bei Bedarf an).
+# Jedes Fenster behält seine Shell, wie ein iTerm-Tab. Exit 1 ohne tmux.
+term_open_tmux() {
+  command -v tmux >/dev/null 2>&1 || return 1
+  if ! tmux has-session -t "=$TMUX_SESSION" 2>/dev/null; then
+    bg_scope tmux new-session -d -s "$TMUX_SESSION" -n shell -c "$ROOT" || return 1
+  fi
+  printf '%s' "$queued" | while read -r role name; do
+    [ -n "$name" ] || continue
+    pane=$(tmux new-window -d -P -F '#{pane_id}' -t "=$TMUX_SESSION:" -n "$name" -c "$ROOT") || exit 1
+    # shellcheck disable=SC2046 # Absicht: "r g b" in $1..$3 zerlegen
+    set -- $(color_for "$role")
+    tmux set-option -w -t "$pane" window-status-style "bg=$(printf '#%02x%02x%02x' "$1" "$2" "$3")" 2>/dev/null || true
+    tmux send-keys -t "$pane" -l -- "$(term_cmd "$role" "$name")" && tmux send-keys -t "$pane" Enter || exit 1
+  done
+}
+
+# Öffnet die vorgemerkten Terminal-Worker bzw. gibt den Hinweis für Hintergrund-Worker aus.
+# $1 = reuse: iTerm-Tabs ins vorderste Fenster hängen
+finish() {
+  if [ "$term" != bg ] && [ -n "$queued" ] && [ "$dry" = 0 ]; then
+    if [ "$term" = tmux ]; then what=tmux-Fenster; else what=iTerm-Tab; fi
+    if ! "term_open_$term" "${1-new}"; then
       # z. B. Leitstand ohne Automation-Freigabe für iTerm: lieber im Hintergrund als gar nicht
-      echo "iTerm nicht steuerbar, starte im Hintergrund" >&2
-      iterm=0
+      echo "$what nicht steuerbar, starte im Hintergrund" >&2
+      term='bg'
       printf '%s' "$queued" | while read -r role name; do
         [ -n "$name" ] && launch "$role" "$name"
       done
     else
-      printf '%s' "$queued" | while read -r _ name; do [ -n "$name" ] && echo "starte $name (iTerm-Tab)"; done
+      printf '%s' "$queued" | while read -r _ name; do [ -n "$name" ] && echo "starte $name ($what)"; done
+      [ "$term" != tmux ] || echo "öffnen: tmux attach -t $TMUX_SESSION (bzw. scripts/beadskit/workers attach <name>)"
     fi
   fi
-  if [ "$iterm" = 0 ] && [ "$dry" = 0 ]; then
+  if [ "$term" = bg ] && [ "$dry" = 0 ]; then
     echo "Übersicht: scripts/beadskit/workers ls · öffnen: scripts/beadskit/workers attach <name>"
   fi
 }
 
 cmd_start() {
-  iterm=1 dry=0 bare=0
+  term=$(default_term) dry=0 bare=0
   reset_counts default
   parse_args "$@"
   resolve_ws code
 
+  # Ohne Angabe nur die Rollen, die laut hosts.conf auf diesem Rechner laufen sollen
+  allowed=$(host_roles)
+  if [ -n "$allowed" ]; then
+    for r in $(roles_of "$ws"); do
+      case " $given " in *" $r "*) continue ;; esac
+      case " $allowed " in *" $r "*) ;; *) eval "$(cnt_var "$r")=0" ;; esac
+    done
+  fi
+  for r in $given; do [ "$(count_of "$r")" = 0 ] || warn_host_role "$r"; done
+
   # Drain nur für diesen Workspace aufheben; ein globaler Drain bleibt für die übrigen Workspaces
-  # als Rollenmarkierung bestehen, damit deren Worker weiter auslaufen
+  # als Rollenmarkierung bestehen, damit deren Worker weiter auslaufen. Den Drain dieses Rechners
+  # hebt start ganz auf.
   d=$(drained "$ws")
   if [ -n "$d" ]; then
     others=""
-    if [ -e "$DRAIN" ]; then
+    if mark_has drain; then
       for r in $ROLES; do
         [ "$(role_field "$r" 2)" = "$ws" ] || others="$others $r"
       done
@@ -382,21 +553,22 @@ cmd_start() {
       echo "(Drain-Markierung würde für Workspace $ws entfernt: $d)"
       [ -z "$others" ] || echo "(globaler Drain bliebe für:$others)"
     else
-      for r in $others; do : >"$DRAIN-$r"; done
-      rm -f "$DRAIN"
-      for r in $(roles_of "$ws"); do rm -f "$DRAIN-$r"; done
+      for r in $others; do mark_set "drain-$r"; done
+      mark_rm drain
+      [ "$MULTI" = 0 ] || mark_rm "drain@$SELF"
+      for r in $(roles_of "$ws"); do mark_rm "drain-$r"; done
       echo "Drain-Markierung für Workspace $ws entfernt: $d"
       [ -z "$others" ] || echo "globaler Drain bleibt für:$others"
     fi
   fi
 
   active=$(running | awk '{ print $1 }')
-  tabs="" queued=""
+  queued=""
   for role in $(roles_of "$ws"); do
     count=$(count_of "$role")
     n=1
     while [ "$n" -le "$count" ]; do
-      name="$role-$n"
+      name=$(worker_name "$role" "$n")
       n=$((n + 1))
       if is_taken "$name"; then
         echo "$name läuft schon, übersprungen"
@@ -412,27 +584,28 @@ cmd_start() {
 # Bei aktivem Drain nicht: neue Worker würden sofort aufhören, und die Markierung zu
 # entfernen würde auch die auslaufenden Worker wieder claimen lassen.
 cmd_add() {
-  iterm=1 dry=0 bare=1
+  term=$(default_term) dry=0 bare=1
   reset_counts
   parse_args "$@"
   [ -n "$given" ] || usage
   # nur zur Prüfung: mit --ws müssen alle Rollen dazu gehören
   [ -z "$ws" ] || resolve_ws
   for role in $given; do
-    if [ -e "$DRAIN" ] || [ -e "$DRAIN-$role" ]; then
+    if drain_all || mark_has "drain-$role"; then
       echo "Drain aktiv für $role: neue Worker würden sofort wieder aufhören." >&2
       echo "Erst scripts/beadskit/workers drain $role --off (bzw. drain --off), dann add." >&2
       exit 1
     fi
+    warn_host_role "$role"
   done
 
   active=$(running | awk '{ print $1 }')
-  tabs="" queued=""
+  queued=""
   for role in $ROLES; do
     count=$(count_of "$role")
     n=1
     while [ "$count" -gt 0 ]; do
-      name="$role-$n"
+      name=$(worker_name "$role" "$n")
       n=$((n + 1))
       is_taken "$name" && continue
       active="$active
@@ -455,13 +628,20 @@ cmd_ls() {
     shift
   done
   [ -z "$ws" ] || is_ws "$ws" || { echo "unbekannter Workspace: $ws ($WORKSPACES)" >&2; exit 2; }
+  if [ "$MULTI" = 1 ]; then
+    echo "Rechner: $SELF (Leitrechner $LEADER, Worker ab $(worker_name "<rolle>" 1))"
+    marks_load || echo "beads auf $LEADER antwortet nicht: Markierungen und Merge-Slot unbekannt"
+    for h in $HOSTS; do
+      [ "$h" = "$SELF" ] || ! mark_has "drain@$h" || echo "Drain aktiv für Rechner $h"
+    done
+  fi
   d=$(drained "$ws")
   [ -z "$d" ] || echo "Drain aktiv ($d): diese Worker hören nach dem aktuellen Schritt auf"
   slot=$(merge_slot)
   [ -z "$slot" ] || echo "Merge-Slot: $slot"
-  if [ -e "$AUTO" ]; then
-    t=$(cat "$AUTO")
-    case $t in ''|*[!0-9]*) echo "Auto-Neustart: Schwelle in $AUTO unlesbar" ;;
+  if mark_has autorestart; then
+    t=$(mark_get autorestart)
+    case $t in ''|*[!0-9]*) echo "Auto-Neustart: Schwelle unlesbar ($t)" ;;
       *) echo "Auto-Neustart ab $((t / 1000))k Tokens (durch den Leitstand)" ;; esac
   fi
   out=$(running)
@@ -483,10 +663,14 @@ cmd_ls() {
 }
 
 cmd_drain() {
-  off=0 roles=""
+  off=0 roles="" host=""
   while [ $# -gt 0 ]; do
     case $1 in
       --off) off=1 ;;
+      --host|--host=*)
+        if [ "$1" = --host ]; then [ $# -ge 2 ] || usage; host=$2; shift; else host=${1#*=}; fi
+        [ "$MULTI" = 1 ] || { echo "--host nur mit zwei Rechnern ($CONF/hosts.conf)" >&2; exit 2; }
+        case " $HOSTS " in *" $host "*) ;; *) echo "unbekannter Rechner: $host ($HOSTS)" >&2; exit 2 ;; esac ;;
       --ws|--ws=*)
         if [ "$1" = --ws ]; then [ $# -ge 2 ] || usage; w=$2; shift; else w=${1#*=}; fi
         is_ws "$w" || { echo "unbekannter Workspace: $w ($WORKSPACES)" >&2; exit 2; }
@@ -497,24 +681,37 @@ cmd_drain() {
     esac
     shift
   done
+  if [ -n "$host" ]; then
+    [ -z "$roles" ] || { echo "--host gilt für alle Rollen eines Rechners, ohne Rollen und --ws" >&2; exit 2; }
+    if [ "$off" = 1 ]; then
+      mark_rm "drain@$host"
+      echo "Drain für Rechner $host aufgehoben"
+    else
+      mark_set "drain@$host"
+      echo "Drain aktiv für Rechner $host: dessen Worker machen ihren laufenden Schritt fertig,"
+      echo "claimen nichts Neues und hören auf; die übrigen Rechner arbeiten weiter."
+    fi
+    return
+  fi
   if [ "$off" = 1 ]; then
     if [ -z "$roles" ]; then
-      rm -f "$DRAIN"
-      for r in $ROLES; do rm -f "$DRAIN-$r"; done
+      mark_rm drain
+      for r in $ROLES; do mark_rm "drain-$r"; done
+      for h in $HOSTS; do mark_rm "drain@$h"; done
       echo "Drain aufgehoben, alle Worker claimen wieder"
     else
-      for r in $roles; do rm -f "$DRAIN-$r"; done
+      for r in $roles; do mark_rm "drain-$r"; done
       echo "Drain aufgehoben für:$roles"
-      [ ! -e "$DRAIN" ] || echo "Achtung: globaler Drain bleibt aktiv (drain --off hebt ihn auf)"
+      ! drain_all || echo "Achtung: globaler Drain bleibt aktiv (drain --off hebt ihn auf)"
     fi
     return
   fi
   if [ -z "$roles" ]; then
-    : >"$DRAIN"
+    mark_set drain
     echo "Drain aktiv: Worker machen ihren laufenden Schritt fertig, claimen nichts Neues"
     echo "und hören auf. Fortschritt: scripts/beadskit/workers ls, danach stop --all."
   else
-    for r in $roles; do : >"$DRAIN-$r"; done
+    for r in $roles; do mark_set "drain-$r"; done
     echo "Drain aktiv für:$roles. Diese Worker machen ihren laufenden Schritt fertig und"
     echo "hören auf, die übrigen arbeiten weiter. Fortschritt: scripts/beadskit/workers ls."
   fi
@@ -531,9 +728,13 @@ cmd_drain_check() {
     top=$(git rev-parse --show-toplevel 2>/dev/null) || top=""
     role=$(basename "$top" | sed 's/-[0-9]*$//')
   fi
-  if [ -e "$DRAIN" ]; then
+  # Zwei Rechner: antwortet beads nicht, gilt kein Drain (der Claim scheitert dann ohnehin, und
+  # ein kurzer Netzaussetzer soll den /loop nicht beenden)
+  if mark_has drain; then
     echo "DRAIN (alle Worker)"
-  elif [ -n "$role" ] && [ -e "$DRAIN-$role" ]; then
+  elif [ "$MULTI" = 1 ] && mark_has "drain@$SELF"; then
+    echo "DRAIN (Rechner $SELF)"
+  elif [ -n "$role" ] && mark_has "drain-$role"; then
     echo "DRAIN (Rolle $role)"
   else
     echo "kein Drain"
@@ -588,9 +789,23 @@ EOF
   fi
 }
 
-# Schreibt Text (mit Enter) in die iTerm-Session mit diesem TTY; ohne Text nur Prüfung, ob es
-# sie gibt. Exit 1 ohne passende Session.
-iterm_write() {
+# TTY eines Prozesses als /dev/…; leer ohne Terminal (BSD-ps zeigt dann ??, procps ?)
+tty_of() {
+  t=$(ps -o tty= -p "$1" 2>/dev/null | tr -d ' ') || t=""
+  case $t in ''|'?'|'??') ;; /dev/*) echo "$t" ;; *) echo "/dev/$t" ;; esac
+}
+
+# Schreibt Text (mit Enter) in das Terminal mit diesem TTY: ein tmux-Pane oder eine
+# iTerm-Session. Ohne Text nur Prüfung, ob es das gibt. Exit 1 ohne passendes Terminal.
+term_write() {
+  if command -v tmux >/dev/null 2>&1; then
+    pane=$(tmux list-panes -a -F '#{pane_tty} #{pane_id}' 2>/dev/null | awk -v t="$1" '$1 == t { print $2; exit }')
+    if [ -n "$pane" ]; then
+      [ -z "${2-}" ] || { tmux send-keys -t "$pane" -l -- "$2" && tmux send-keys -t "$pane" Enter; }
+      return
+    fi
+  fi
+  [ "$UNAME" = Darwin ] || return 1
   osascript - "$1" "${2-}" >/dev/null <<'APPLESCRIPT'
     on run argv
       tell application "iTerm"
@@ -613,16 +828,22 @@ APPLESCRIPT
 # Startet einen Worker mit frischem Kontext neu. Ohne --force nur zwischen zwei Runden: idle,
 # kein Issue in Arbeit, Merge-Slot nicht bei ihm. Bei Drain nie (er hört ohnehin auf).
 cmd_restart() {
-  force=0 dry=0 iterm=1 target=""
-  for arg in "$@"; do
-    case $arg in
+  force=0 dry=0 term=$(default_term) target=""
+  while [ $# -gt 0 ]; do
+    case $1 in
       --force) force=1 ;;
       --dry-run) dry=1 ;;
-      --bg) iterm=0 ;;
+      --bg) term='bg' ;;
+      --iterm) term=iterm ;;
+      --tmux) term=tmux ;;
+      --term) [ $# -ge 2 ] || usage; term=$2; shift ;;
+      --term=*) term=${1#*=} ;;
       -*) usage ;;
-      *) [ -z "$target" ] || usage; target=$arg ;;
+      *) [ -z "$target" ] || usage; target=$1 ;;
     esac
+    shift
   done
+  check_term
   role=${target%-*}
   is_role "$role" || role=""
   case ${target##*-} in ''|*[!0-9]*) role="" ;; esac
@@ -636,7 +857,7 @@ cmd_restart() {
   # shellcheck disable=SC2086 # Absicht: "<worktree> <kind> <status> <name> <pid> <ref>" zerlegen
   set -- $line
   kind=$2 status=$3 session=$6 pid=$5
-  if [ -e "$DRAIN" ] || [ -e "$DRAIN-$role" ]; then
+  if drain_all || mark_has "drain-$role"; then
     echo "Drain aktiv für $role: $target hört ohnehin auf, kein Neustart" >&2
     exit 1
   fi
@@ -661,35 +882,36 @@ cmd_restart() {
       echo "stoppe $target"
       claude stop "$session"
     fi
-    tabs="" queued=""
+    queued=""
     launch "$role" "$target"
     finish reuse
     return
   fi
 
-  # iTerm-Tab: Session per SIGTERM beenden (in die Claude-Oberfläche getipptes /exit wird nicht
-  # zuverlässig abgeschickt), dann den Startbefehl in die Shell des Tabs mit demselben TTY tippen
-  tty=$(ps -o tty= -p "$pid" 2>/dev/null | tr -d ' ') || tty=""
-  case $tty in ''|'??') echo "$target: kein Terminal zur PID $pid gefunden" >&2; exit 1 ;; esac
-  cmd="cd '$ROOT' && claude -w $target -n $target '$(prompt_for "$role")'"
+  # Terminal (iTerm-Tab, tmux-Fenster): Session per SIGTERM beenden (in die Claude-Oberfläche
+  # getipptes /exit wird nicht zuverlässig abgeschickt), dann den Startbefehl in die Shell mit
+  # demselben TTY tippen
+  tty=$(tty_of "$pid")
+  [ -n "$tty" ] || { echo "$target: kein Terminal zur PID $pid gefunden" >&2; exit 1; }
+  cmd=$(term_cmd "$role" "$target")
   if [ "$dry" = 1 ]; then
-    echo "kill -TERM $pid, dann im iTerm-Tab /dev/$tty: $cmd"
+    echo "kill -TERM $pid, dann im Terminal $tty: $cmd"
     return
   fi
-  # erst den Tab prüfen, damit nichts beendet wird, das sich nicht neu starten lässt
-  iterm_write "/dev/$tty" || { echo "$target: kein iTerm-Tab mit /dev/$tty" >&2; exit 1; }
+  # erst das Terminal prüfen, damit nichts beendet wird, das sich nicht neu starten lässt
+  term_write "$tty" || { echo "$target: kein Terminal mit $tty (iTerm-Tab, tmux-Fenster)" >&2; exit 1; }
   kill -TERM "$pid"
   n=0
   while kill -0 "$pid" 2>/dev/null && [ "$n" -lt 30 ]; do sleep 1; n=$((n + 1)); done
   if kill -0 "$pid" 2>/dev/null; then
-    echo "$target: Session beendet sich nicht (PID $pid), Tab /dev/$tty prüfen" >&2
+    echo "$target: Session beendet sich nicht (PID $pid), Terminal $tty prüfen" >&2
     exit 1
   fi
-  iterm_write "/dev/$tty" "$cmd"
-  echo "$target im iTerm-Tab /dev/$tty neu gestartet"
+  term_write "$tty" "$cmd"
+  echo "$target im Terminal $tty neu gestartet"
 }
 
-# Tippt eine Zeile (Nachricht oder /befehl) in den iTerm-Tab eines Terminal-Workers; Claude reiht
+# Tippt eine Zeile (Nachricht oder /befehl) ins Terminal eines Workers (iTerm-Tab, tmux-Fenster); Claude reiht
 # sie ein, wenn der Worker gerade arbeitet. Hintergrund-Worker erreicht nur `attach`.
 cmd_send() {
   [ $# -ge 1 ] || usage
@@ -708,9 +930,9 @@ cmd_send() {
     echo "$target läuft im Hintergrund: Nachrichten nur über scripts/beadskit/workers attach $target" >&2
     exit 1
   fi
-  tty=$(ps -o tty= -p "$5" 2>/dev/null | tr -d ' ') || tty=""
-  case $tty in ''|'??') echo "$target: kein Terminal zur PID $5 gefunden" >&2; exit 1 ;; esac
-  iterm_write "/dev/$tty" "$text" || { echo "$target: kein iTerm-Tab mit /dev/$tty" >&2; exit 1; }
+  tty=$(tty_of "$5")
+  [ -n "$tty" ] || { echo "$target: kein Terminal zur PID $5 gefunden" >&2; exit 1; }
+  term_write "$tty" "$text" || { echo "$target: kein Terminal mit $tty (iTerm-Tab, tmux-Fenster)" >&2; exit 1; }
   echo "an $target gesendet"
 }
 
@@ -719,7 +941,7 @@ cmd_autorestart() {
   over=200k
   while [ $# -gt 0 ]; do
     case $1 in
-      --off) rm -f "$AUTO"; echo "Auto-Neustart aus"; return ;;
+      --off) mark_rm autorestart; echo "Auto-Neustart aus"; return ;;
       --over) [ $# -ge 2 ] || usage; over=$2; shift ;;
       --over=*) over=${1#*=} ;;
       *) usage ;;
@@ -736,7 +958,7 @@ cmd_autorestart() {
     echo "Schwelle 50k–900k Tokens" >&2
     exit 2
   fi
-  echo "$tokens" >"$AUTO"
+  mark_set autorestart "$tokens"
   echo "Auto-Neustart ab $((tokens / 1000))k Tokens: der Leitstand startet idle Worker ohne Claim"
   echo "neu, solange er läuft (scripts/beadskit/leitstand/inbox.mjs)."
 }
@@ -786,7 +1008,9 @@ cmd_config() {
       jq -nc --arg k "$key" --arg p "$path" '{kind: "repo", key: $k, path: $p}'
     done
   } | jq -s --arg root "$ROOT" --arg name "$BK_NAME" --arg slug "$BK_SLUG" --arg base "$BK_BASE" \
-      --arg modules "$BK_MODULES" --arg drain "$DRAIN" --arg auto "$AUTO" --argjson runners "$runners" '
+      --arg modules "$BK_MODULES" --arg drain "$DRAIN" --arg auto "$AUTO" --argjson runners "$runners" \
+      --arg host "$SELF" --arg leader "$LEADER" --arg hosts "$HOSTS" --argjson hostBase "$BK_HOST_BASE" \
+      --arg markers "$([ "$MULTI" = 1 ] && echo kv || echo file)" --arg term "$(default_term)" --arg tmux "$TMUX_SESSION" '
     def words: split(" ") | map(select(length > 0));
     # "place:Anlegen settings" → [{key: "place", title: "Anlegen"}, {key: "settings", title: null}]
     def phases: words | map(split(":") | {key: .[0], title: (.[1:] | join(":") | if . == "" then null else . end)});
@@ -798,7 +1022,22 @@ cmd_config() {
         colors: ($roles | map({key: .role, value: .color}) | from_entries),
         workspaces: [map(select(.kind == "ws"))[] | .ws as $w
           | {key: $w, name, phases: (.phases | phases), roles: [$roles[] | select(.ws == $w) | .role]}],
-        repos: [map(select(.kind == "repo"))[] | {key, path}], runners: $runners }'
+        repos: [map(select(.kind == "repo"))[] | {key, path}], runners: $runners,
+        host: $host, leader: (if $leader == "" then null else $leader end), hosts: ($hosts | words),
+        hostBase: $hostBase, markers: $markers, term: $term, tmuxSession: $tmux }'
+}
+
+# Öffnet einen Worker: tmux-Fenster (wechselt in der laufenden tmux-Sitzung dorthin) oder
+# Hintergrund-Session
+cmd_attach() {
+  if command -v tmux >/dev/null 2>&1 &&
+    tmux list-windows -t "=$TMUX_SESSION" -F '#{window_name}' 2>/dev/null | grep -qxF "$1"; then
+    if [ -n "${TMUX-}" ]; then exec tmux switch-client -t "=$TMUX_SESSION:=$1"; fi
+    tmux select-window -t "=$TMUX_SESSION:=$1"
+    exec tmux attach-session -t "=$TMUX_SESSION"
+  fi
+  session=$(session_of "$1")
+  exec claude attach "$session"
 }
 
 [ $# -ge 1 ] || usage
@@ -808,7 +1047,7 @@ case $sub in
   start) cmd_start "$@" ;;
   add) cmd_add "$@" ;;
   ls) cmd_ls "$@" ;;
-  attach) [ $# = 1 ] || usage; session=$(session_of "$1"); exec claude attach "$session" ;;
+  attach) [ $# = 1 ] || usage; cmd_attach "$1" ;;
   logs) [ $# = 1 ] || usage; session=$(session_of "$1"); exec claude logs "$session" ;;
   drain) cmd_drain "$@" ;;
   drain-check) cmd_drain_check "$@" ;;

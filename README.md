@@ -70,6 +70,21 @@ node scripts/beadskit/leitstand/inbox.mjs            # http://127.0.0.1:3738, al
 ./beadskit-sync.sh --apply                           # Kit-Änderungen verteilen (VERSION hochzählen)
 ```
 
+## Zwei Rechner (Mac + Linux-PC)
+
+Ein Linux-PC (Ubuntu Server) übernimmt Worker, Builds und Docker. Er hält die gemeinsame
+beads-Datenbank und den Leitstand, der Mac arbeitet mit, wenn er frei ist. Einrichtung und
+Bedienung: [scripts/remote/README.md](scripts/remote/README.md).
+
+```bash
+# PC
+git clone https://github.com/felixgodo/ProjectTemplate ~/IdeaProjects/ProjectTemplate
+~/IdeaProjects/ProjectTemplate/scripts/remote/setup-linux.sh
+# Mac
+scripts/remote/setup-mac.sh && scripts/remote/migrate-beads.sh && pc leitstand install
+pc workers start · pc attach · pc dev start · pc forward 5200 · pc doctor
+```
+
 ## Aufbau
 
 ```
@@ -78,6 +93,7 @@ pom.xml                                       Parent: Version, Node-Version, Plu
 backend/                                      Spring Boot – /api/ping, /api/version, Beispiel /api/notes
 frontend/                                     React + Vite, Proxy /api → Backend
 docker-compose.yml                            MariaDB für die Entwicklung
+scripts/remote/                               zweiter Rechner (Linux-PC): Einrichtung, pc-Befehl
 deploy/                                       setup.sh und Vorlagen fürs Release-Paket
 scripts/beadskit/                             parallele Claude-Worker + Leitstand (optional je Projekt)
 new-project.sh · devkit-sync.sh · beadskit-sync.sh   nur im Template

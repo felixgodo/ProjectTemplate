@@ -207,7 +207,9 @@ dk_cmd_doctor() {
   for c in $DK_NEEDS $([ "$DK_COMPOSE" = 1 ] && echo docker) git curl lsof zip; do
     case "$seen" in *" $c "*) continue ;; esac
     seen="$seen$c "
-    if command -v "$c" >/dev/null 2>&1; then ok "$c"; else warn "$c fehlt"; rc=1; fi
+    if command -v "$c" >/dev/null 2>&1; then ok "$c"
+    elif [ "$(uname)" = Linux ]; then warn "$c fehlt (Ubuntu: sudo apt install $c, Einrichtung: ProjectTemplate/scripts/remote/setup-linux.sh)"; rc=1
+    else warn "$c fehlt"; rc=1; fi
   done
   if [ -n "$JAVA_VERSION" ]; then
     ( dk_use_java ) >/dev/null 2>&1 && { dk_use_java; ok "Java $(java_major) (gebraucht: $JAVA_VERSION)"; } \

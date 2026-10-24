@@ -1,0 +1,13 @@
+# Projekte für setup-linux.sh: <ordner> <github-repo> (owner/name), - ohne GitHub (setup-mac.sh kopiert per rsync).
+# Erzeugt aus devkit-projects.txt mit: scripts/remote/setup-mac.sh --repos
+ScriptPress felixgodo/ScriptPress
+BrightHub felixgodo/BrightHub
+LicenseHub felixgodo/LicenseHub
+DocHub felixgodo/DocHub
+spot-mm felixgodo/spot-mm
+felixgo felixgodo/felixGO
+KompassRuhr felixgodo/KompassRuhr
+ArkSurvivalAscended -
+Buonanotte felixgodo/Buonanotte
+ChickenOnTour -
+ScriptPressSite -

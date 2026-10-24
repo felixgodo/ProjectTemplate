@@ -10,9 +10,11 @@ beads.project.sh        im Projekt: Name, Slug, Ziel-Branch, Rollen, Workspaces,
 beads.leitstand.mjs     im Projekt, optional: Knöpfe, Zusatzlisten, Links und Texte für den Leitstand
 scripts/beadskit/
   bdw                   bd mit Worktree-Name als Actor
+  on-host               Einstieg für Befehle per ssh vom anderen Rechner (PATH, Projektordner)
   workers               Worker starten/hinzufügen/auslaufen/stoppen/neu starten, Chat (send),
                         drain-check, repo-for, config (JSON für den Leitstand); Tests workers.test.mjs
-  leitstand/            Web-Leitstand (inbox.mjs + inbox.html), Tests, Fernzugang (leitstand-remote)
+  leitstand/            Web-Leitstand (inbox.mjs + inbox.html), Tests, Fernzugang (leitstand-remote),
+                        host-agent.mjs (Worker dieses Rechners für den Leitstand auf dem anderen)
   ci/runner-server      eigene GitHub-Actions-Runner als Docker-Container auf dem Server
   templates/            Vorlagen für --adopt: beads.project.sh, Skills, reviews/README.md
 ```
@@ -51,11 +53,20 @@ scripts/beadskit/workers drain && scripts/beadskit/workers ls   # warten bis idl
 scripts/beadskit/workers stop --all
 scripts/beadskit/workers restart fix-2                     # frischer Kontext, nur zwischen zwei Runden
 scripts/beadskit/workers autorestart --over 200k           # macht der Leitstand dann selbst
-scripts/beadskit/workers send fix-2 -- /compact            # Zeile in den iTerm-Tab tippen
+scripts/beadskit/workers send fix-2 -- /compact            # Zeile ins Terminal tippen (iTerm-Tab, tmux-Fenster)
 ```
 
-Worker laufen als iTerm-Tabs (Farbe je Rolle, `--bg` für Hintergrund-Sessions; ohne
-steuerbares iTerm automatisch im Hintergrund).
+Worker laufen im Terminal, Farbe je Rolle: auf dem Mac als iTerm-Tabs, unter Linux als Fenster
+der tmux-Session `bk-<slug>` (`workers attach <name>`). `--term iterm|tmux|bg` bzw. `BK_TERM`
+wählt selbst, `--bg` startet Hintergrund-Sessions; ohne steuerbares Terminal automatisch im
+Hintergrund.
+
+**Zwei Rechner** (`~/.config/beadskit/hosts.conf`, Einrichtung in
+`ProjectTemplate/scripts/remote`): Worker heißen `<rolle>-<BK_HOST_BASE + n>` (Mac `fix-1`, PC
+`fix-101`), Drain und Auto-Neustart liegen in `bd kv` der gemeinsamen Datenbank,
+`workers drain --host <rechner>` lässt nur einen Rechner auslaufen, `HOST_<h>_ROLES` begrenzt, was
+`start` dort ohne Angabe startet. Der Leitstand auf dem Leitrechner zeigt die Worker beider Rechner
+(per ssh: `on-host` + `leitstand/host-agent.mjs`) und führt Aktionen auf dem Rechner des Workers aus.
 
 **Leitstand:** `node scripts/beadskit/leitstand/inbox.mjs` (aus einem beliebigen eingerichteten
 Projekt) → http://127.0.0.1:3738. Ein Prozess für alle Projekte; Umschalter oben (`#<slug>` in
@@ -65,7 +76,7 @@ Leitstand zeigt Kennzahlen, Worker-Karten mit Detail (Chat aus dem Transkript, S
 iTerm-Tab, Neu starten), „Wartet auf dich“ (Label `human`), Kanban mit Drag & Drop je Workspace,
 PRs mit CI-Stand (aller Repos aus `BK_REPOS`) und die CI-Runner, wenn das Projekt welche nutzt.
 Er steuert Issues und Worker als Actor `user` und startet mit `autorestart` Worker mit großem
-Kontext selbst neu. Tests: `node --test scripts/beadskit/leitstand/inbox.test.mjs`.
+Kontext selbst neu. Tests: `node --test scripts/beadskit/leitstand/*.test.mjs`.
 
 Fernzugang: `scripts/beadskit/leitstand/leitstand-remote` (Login mit Token oder Benutzer/Passwort
 `leitstand-remote password`, Sperre je IP; SSH-Rückkanal, nginx mit HTTPS, Basic-Auth nur mit
