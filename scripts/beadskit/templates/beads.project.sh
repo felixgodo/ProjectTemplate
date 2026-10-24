@@ -22,3 +22,28 @@ BK_START="fix=2 search=1 verify=1 regress=0"
 #     verify) echo "/loop 3m /{{SLUG}}-verify" ;;
 #   esac
 # }
+
+# Weitere Workspaces neben code (eigene Rollen, Phasen und Skills), z. B. clubs:
+# BK_WORKSPACES="clubs"
+# BK_WS_clubs_NAME="Clubs"
+# BK_WS_clubs_ROLES="club-search club-add"          # Rollen a-z und -
+# BK_WS_clubs_START="club-search=1 club-add=1"
+# BK_WS_clubs_PHASES="place:Anlegen settings test"  # erste = die, die Worker claimen; :Titel optional
+# Phasen von code (Standard fix verify merge):
+# BK_PHASES="fix verify merge"
+
+# iTerm-Tabfarbe je Rolle ("r g b"), sonst die Vorgabe
+# bk_color() { case $1 in club-add) echo "230 120 30" ;; esac; }
+
+# Weitere Repos des Projekts als <schlüssel>:<pfad> (relativ zu diesem Repo). Issues mit Label
+# modul:<schlüssel> werden dort bearbeitet; der Leitstand zeigt deren PRs mit.
+# BK_REPOS="site:../MeineSite"
+
+# Eigene CI-Runner (ci/runner-server) nutzt das Projekt, sobald ein Workflow runs-on self-hosted
+# hat; dann zeigt der Leitstand den Abschnitt CI-Runner. Zusätzliche apt-Pakete im Runner-Image,
+# MySQL für DB-Tests:
+# RUNNER_APT=${RUNNER_APT:-ffmpeg}
+# RUNNER_MYSQL=${RUNNER_MYSQL:-8.0}
+
+# Leitstand: Knöpfe, Zusatzlisten, Links an Karten und Texte je Workspace kommen aus der
+# optionalen beads.leitstand.mjs (siehe scripts/beadskit/README.md).

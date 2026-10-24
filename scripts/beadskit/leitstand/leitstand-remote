@@ -5,41 +5,57 @@
 # verlangt. caffeinate hält den Mac wach. Alle Befehle (start, add, drain, stop) laufen auf dem Mac.
 #
 #   leitstand-remote token [--new]   Login-Token anzeigen bzw. neu erzeugen
+#   leitstand-remote password [benutzer] [--off]   Login mit Benutzer (Standard admin) und Passwort
 #   leitstand-remote install         launchd-Dienste anlegen und starten (Leitstand, Tunnel, caffeinate)
 #   leitstand-remote uninstall       Dienste stoppen und entfernen
 #   leitstand-remote status          Dienste, lokaler Leitstand, Tunnel-Ende auf dem Server
 #   leitstand-remote logs            letzte Zeilen der Dienst-Logs
-#   leitstand-remote server-setup    nginx-Vorlage, Basic-Auth, Domain + Let's Encrypt auf dem Server
+#   leitstand-remote server-setup [--basic-auth]   nginx-Vorlage, Domain + Let's Encrypt auf dem Server
 #   leitstand-remote basic-auth      Basic-Auth-Zugang anzeigen
 #
 # Einstellungen per Umgebung (Standard in Klammern): LEITSTAND_SSH_HOST (server),
 # LEITSTAND_PUBLIC_URL (https://leitstand.felix-go.de), LEITSTAND_REMOTE_PORT (13738),
 # PORT (3738), LEITSTAND_HESTIA_USER (felixoben).
 #
-# Token und Basic-Auth liegen in ~/.config/beadskit (nur auf dem Mac). Der Leitstand ist einer für
-# alle Projekte (Liste in ~/.config/beadskit/projects.txt) und läuft aus dem Haupt-Checkout ($ROOT)
-# des Projekts, aus dem install aufgerufen wurde.
+# Die Einstellungen lassen sich auch dauerhaft in ~/.config/beadskit/remote.conf setzen (Shell-
+# Zuweisungen wie LEITSTAND_PUBLIC_URL=…); die Umgebung hat Vorrang.
+#
+# Token, Passwort und Basic-Auth liegen in ~/.config/beadskit (nur auf dem Mac). Der Leitstand ist
+# einer für alle Projekte (Liste in ~/.config/beadskit/projects.txt) und läuft aus dem
+# Haupt-Checkout ($ROOT) des Projekts, aus dem install aufgerufen wurde.
+# Teil des beadskit aus dem ProjectTemplate – nicht im Projekt ändern.
 set -eu
 
 ROOT=$(git -C "$(dirname "$0")" rev-parse --path-format=absolute --git-common-dir)
 ROOT=$(dirname "$ROOT")
+CONF=${BEADSKIT_HOME:-$HOME/.config/beadskit}
+mkdir -p "$CONF"
+# remote.conf: Zeilen NAME=wert (ohne Anführungszeichen); gilt nur, wo die Umgebung nichts setzt
+if [ -f "$CONF/remote.conf" ]; then
+  while IFS='=' read -r key val; do
+    case $key in
+      LEITSTAND_[A-Z_]*|PORT) eval "[ -n \"\${$key+x}\" ]" || export "$key=$val" ;;
+    esac
+  done <"$CONF/remote.conf"
+fi
 SSH_HOST=${LEITSTAND_SSH_HOST:-server}
 PUBLIC_URL=${LEITSTAND_PUBLIC_URL:-https://leitstand.felix-go.de}
 DOMAIN=$(printf '%s' "$PUBLIC_URL" | sed -E 's#^https?://##; s#/.*$##')
 REMOTE_PORT=${LEITSTAND_REMOTE_PORT:-13738}
 LOCAL_PORT=${PORT:-3738}
 HESTIA_USER=${LEITSTAND_HESTIA_USER:-felixoben}
-CONF=${BEADSKIT_HOME:-$HOME/.config/beadskit}
-mkdir -p "$CONF"
 TOKEN_FILE=${LEITSTAND_TOKEN_FILE:-$CONF/leitstand-token}
 AUTH_FILE=$CONF/leitstand-basicauth
+PASSWORD_FILE=${LEITSTAND_PASSWORD_FILE:-$CONF/leitstand-password}
 AGENTS=$HOME/Library/LaunchAgents
 LOGS=$HOME/Library/Logs/beads-leitstand
 LABEL=eu.beadskit.leitstand
+# Dienste früherer, projekteigener Leitstände; install entfernt sie
+LEGACY_LABELS=${LEITSTAND_LEGACY_LABELS:-eu.spot.leitstand}
 SERVICES="server tunnel awake"
 
 usage() {
-  sed -n '7,14s/^# \{0,1\}//p' "$0" >&2
+  sed -n '7,15s/^# \{0,1\}//p' "$0" >&2
   exit 2
 }
 
@@ -99,7 +115,73 @@ EOF
   plutil -lint "$file" >/dev/null
 }
 
+# Setzt Benutzer und Passwort für die Login-Seite (statt Token). Das Passwort wird zweimal
+# verdeckt abgefragt und nur als scrypt-Hash gespeichert; das Token bleibt als Sitzungsschlüssel.
+# Gilt sofort, ohne Neustart; alle bestehenden Sitzungen sind damit abgemeldet.
+cmd_password() {
+  user="admin"
+  for arg in "$@"; do
+    case $arg in
+      --off)
+        rm -f "$PASSWORD_FILE"
+        echo "Passwort-Login aus, Anmeldung wieder mit dem Token."
+        return ;;
+      -*) usage ;;
+      *) user=$arg ;;
+    esac
+  done
+  if [ ! -s "$TOKEN_FILE" ]; then
+    umask 077
+    random 48 >"$TOKEN_FILE"
+    echo "Token als Sitzungsschlüssel angelegt; danach $0 install (Leitstand neu starten)."
+  fi
+  [ -t 0 ] || { echo "Passwort nur im Terminal setzen (verdeckte Eingabe)" >&2; exit 1; }
+  trap 'stty echo' EXIT INT TERM
+  printf 'Neues Passwort für %s (mind. 12 Zeichen): ' "$user"
+  stty -echo; IFS= read -r pw1; stty echo; echo
+  printf 'Noch einmal: '
+  stty -echo; IFS= read -r pw2; stty echo; echo
+  trap - EXIT INT TERM
+  [ "$pw1" = "$pw2" ] || { echo "Passwörter verschieden, nichts geändert" >&2; exit 1; }
+  line=$(printf '%s' "$pw1" | node "$(dirname "$0")/inbox.mjs" --hash-password "$user") || exit 1
+  umask 077
+  printf '%s\n' "$line" >"$PASSWORD_FILE.tmp" && mv "$PASSWORD_FILE.tmp" "$PASSWORD_FILE"
+  echo "Login gesetzt: Benutzer $user. Gilt sofort, bestehende Sitzungen sind abgemeldet."
+}
+
+# Übernimmt Token, Passwort und Basic-Auth eines früheren, projekteigenen Leitstands
+# (<git-dir>/<slug>-leitstand-*) nach $CONF, wo dort noch nichts liegt. Alte Dateien bleiben.
+migrate_legacy() {
+  for p in "$ROOT" $(grep -v '^#' "$CONF/projects.txt" 2>/dev/null || true); do
+    gd=$(git -C "$p" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || continue
+    for kind in token password basicauth; do
+      for old in "$gd"/*-leitstand-"$kind"; do
+        [ -s "$old" ] || continue
+        case $kind in token) new=$TOKEN_FILE ;; password) new=$PASSWORD_FILE ;; *) new=$AUTH_FILE ;; esac
+        [ ! -e "$new" ] || continue
+        (umask 077 && cp "$old" "$new")
+        echo "übernommen: $old → $new"
+      done
+    done
+  done
+}
+
+# Stoppt und entfernt die launchd-Dienste früherer Leitstände (sie belegten sonst den Port)
+remove_legacy() {
+  for l in $LEGACY_LABELS; do
+    [ "$l" != "$LABEL" ] || continue
+    for s in $SERVICES; do
+      [ -e "$AGENTS/$l.$s.plist" ] || continue
+      launchctl bootout "gui/$(id -u)/$l.$s" 2>/dev/null || true
+      rm -f "$AGENTS/$l.$s.plist"
+      echo "alter Dienst entfernt: $l.$s"
+    done
+  done
+}
+
 cmd_install() {
+  migrate_legacy
+  remove_legacy
   [ -s "$TOKEN_FILE" ] || { echo "kein Token, erst: $0 token --new" >&2; exit 1; }
   for bin in node claude gh bd jq; do
     command -v "$bin" >/dev/null || { echo "$bin nicht im PATH; die Worker brauchen es" >&2; exit 1; }
@@ -145,7 +227,12 @@ cmd_status() {
     "curl -s -o /dev/null -w '%{http_code}' -m 5 -H 'Host: $DOMAIN' http://127.0.0.1:$REMOTE_PORT/login" 2>/dev/null || true)
   echo "Tunnel-Ende auf $SSH_HOST: HTTP ${code:-keine Antwort}"
   code=$(curl -s -o /dev/null -w '%{http_code}' -m 8 "$PUBLIC_URL/login" || true)
-  echo "Öffentlich $PUBLIC_URL: HTTP ${code:-keine Antwort} (401 = Basic-Auth davor, richtig)"
+  echo "Öffentlich $PUBLIC_URL: HTTP ${code:-keine Antwort} (200 = Login-Seite, 401 = mit Basic-Auth)"
+  if [ -s "$PASSWORD_FILE" ]; then
+    echo "Login: Benutzer $(cut -d: -f1 "$PASSWORD_FILE") mit Passwort"
+  else
+    echo "Login: Token (Passwort setzen: $0 password)"
+  fi
   pmset -g assertions 2>/dev/null | grep -q 'caffeinate' && echo "caffeinate: hält wach" || echo "caffeinate: aus"
 }
 
@@ -164,17 +251,28 @@ cmd_basic_auth() {
 # Richtet den Server ein: Hestia-Proxy-Vorlage, Rate-Limit, Basic-Auth, Domain mit Let's Encrypt.
 # Nur mit Freigabe ausführen; ändert nginx auf dem Produktivserver.
 cmd_server_setup() {
-  if [ "${1-}" = --dry-run ]; then
+  dry=0 basic=0
+  for arg in "$@"; do
+    case $arg in --dry-run) dry=1 ;; --basic-auth) basic=1 ;; *) usage ;; esac
+  done
+  # Basic-Auth nur auf Wunsch: davor schützt der Login des Leitstands (Sperre je IP)
+  auth_lines=""
+  if [ "$basic" = 1 ]; then
+    auth_lines='auth_basic           "Leitstand";
+		auth_basic_user_file /etc/nginx/leitstand.htpasswd;'
+  fi
+  if [ "$dry" = 1 ]; then
     # Zeigt nur das Skript, das auf dem Server liefe (mit Platzhalter statt Hash)
     hash='<hash>'
     run() { echo "# ssh $SSH_HOST bash -s -- $DOMAIN $HESTIA_USER $REMOTE_PORT"; cat; }
   else
-    if [ ! -s "$AUTH_FILE" ]; then
+    if [ "$basic" = 1 ] && [ ! -s "$AUTH_FILE" ]; then
       umask 077
       printf 'leitstand:%s' "$(random 32)" >"$AUTH_FILE"
     fi
     # Nur der Hash geht auf den Server
-    hash=$(cut -d: -f2- "$AUTH_FILE" | tr -d '\n' | openssl passwd -apr1 -stdin)
+    hash='-'
+    [ "$basic" = 0 ] || hash=$(cut -d: -f2- "$AUTH_FILE" | tr -d '\n' | openssl passwd -apr1 -stdin)
     run() { ssh -o BatchMode=yes "$SSH_HOST" "bash -s -- '$DOMAIN' '$HESTIA_USER' '$REMOTE_PORT'"; }
   fi
   # shellcheck disable=SC2087 # Absicht: $hash lokal einsetzen, \$… erst auf dem Server
@@ -184,13 +282,19 @@ DOMAIN=\$1 HUSER=\$2 RPORT=\$3
 export PATH=\$PATH:/usr/local/hestia/bin
 TPL=/usr/local/hestia/data/templates/web/nginx
 
-printf '%s\n' 'leitstand:$hash' > /etc/nginx/leitstand.htpasswd
-chown root:www-data /etc/nginx/leitstand.htpasswd
-chmod 640 /etc/nginx/leitstand.htpasswd
+if [ '$basic' = 1 ]; then
+  printf '%s\n' 'leitstand:$hash' > /etc/nginx/leitstand.htpasswd
+  chown root:www-data /etc/nginx/leitstand.htpasswd
+  chmod 640 /etc/nginx/leitstand.htpasswd
+else
+  rm -f /etc/nginx/leitstand.htpasswd
+fi
 
 cat > /etc/nginx/conf.d/leitstand-ratelimit.conf <<'EOF'
 # Leitstand (beadskit leitstand-remote): Anfragen je IP begrenzen
 limit_req_zone \$binary_remote_addr zone=leitstand:10m rate=5r/s;
+# Login-Versuche: 6 je Minute und IP (dahinter sperrt der Leitstand nach 5 Fehlversuchen)
+limit_req_zone \$binary_remote_addr zone=leitstand_login:10m rate=6r/m;
 EOF
 
 cat > \$TPL/leitstand.tpl <<'EOF'
@@ -206,8 +310,9 @@ server {
 EOF
 
 cat > \$TPL/leitstand.stpl <<EOF
-# Leitstand (beadskit leitstand-remote): Basic-Auth, Rate-Limit, Proxy in den
-# SSH-Rückkanal 127.0.0.1:\$RPORT zum Mac. Der Leitstand verlangt dahinter ein Token-Login.
+# Leitstand (beadskit leitstand-remote): Rate-Limit (Basic-Auth nur mit --basic-auth),
+# Proxy in den SSH-Rückkanal 127.0.0.1:\$RPORT zum Mac. Der Leitstand verlangt dahinter ein
+# Login (Token oder Benutzer/Passwort) und sperrt IPs nach Fehlversuchen (X-Real-IP).
 server {
 	listen      %ip%:%proxy_ssl_port% ssl;
 	server_name %domain_idn% %alias_idn%;
@@ -222,9 +327,23 @@ server {
 
 	location ~ /\.(?!well-known\/) { deny all; return 404; }
 
+	location = /login {
+		$auth_lines
+		limit_req            zone=leitstand_login burst=5 nodelay;
+		limit_req_status     429;
+		client_max_body_size 8k;
+		proxy_pass http://127.0.0.1:\$RPORT;
+		proxy_http_version 1.1;
+		proxy_set_header Host %domain_idn%;
+		proxy_set_header X-Real-IP \\\$remote_addr;
+		proxy_set_header X-Forwarded-Proto https;
+		proxy_set_header Authorization "";
+		proxy_redirect off;
+		add_header X-Robots-Tag "noindex, nofollow" always;
+	}
+
 	location / {
-		auth_basic           "Leitstand";
-		auth_basic_user_file /etc/nginx/leitstand.htpasswd;
+		$auth_lines
 		limit_req            zone=leitstand burst=40 nodelay;
 		limit_req_status     429;
 		client_max_body_size 128k;
@@ -233,6 +352,7 @@ server {
 		proxy_http_version 1.1;
 		# Fester Host: der Leitstand akzeptiert nur seinen eigenen
 		proxy_set_header Host %domain_idn%;
+		proxy_set_header X-Real-IP \\\$remote_addr;
 		proxy_set_header X-Forwarded-For \\\$proxy_add_x_forwarded_for;
 		proxy_set_header X-Forwarded-Proto https;
 		proxy_set_header Authorization "";
@@ -257,7 +377,7 @@ v-add-web-domain-ssl-force "\$HUSER" "\$DOMAIN" 2>/dev/null || true
 nginx -t && systemctl reload nginx
 echo "Server eingerichtet: https://\$DOMAIN -> 127.0.0.1:\$RPORT"
 REMOTE
-  [ "${1-}" = --dry-run ] || echo "Basic-Auth-Zugang: $0 basic-auth (liegt in $AUTH_FILE)"
+  [ "$dry" = 1 ] || [ "$basic" = 0 ] || echo "Basic-Auth-Zugang: $0 basic-auth (liegt in $AUTH_FILE)"
 }
 
 [ $# -ge 1 ] || usage
@@ -265,6 +385,7 @@ sub=$1
 shift
 case $sub in
   token) cmd_token "$@" ;;
+  password) cmd_password "$@" ;;
   install) cmd_install ;;
   uninstall) cmd_uninstall ;;
   status) cmd_status ;;

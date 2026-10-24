@@ -25,6 +25,8 @@ Ziel-Branch: `{{BASE}}`.
   gelöst“. Der Verify-Worker prüft die Konfliktlösung erneut.
 
 ## 2. Branch
+Gehören weitere Repos zum Projekt (`BK_REPOS`), zuerst `scripts/beadskit/workers repo-for <id>`:
+nennt es ein anderes Repo, dort arbeiten (`worker-regeln.md`, „Mehrere Repos“).
 ```bash
 git fetch origin
 git switch -c fix/<id> origin/{{BASE}}      # bei Nacharbeit: git switch fix/<id> && git rebase origin/{{BASE}}

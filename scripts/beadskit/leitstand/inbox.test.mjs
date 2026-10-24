@@ -2,14 +2,45 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import {
-  groupIssues, isOwnHost, isSameOrigin, loginLimiter, metrics, normalizeConfig, parseCookies, parseProjectList,
-  parseWorkers, planCreate, planDecision, planIssueAction, planWorkerAction, prSummary, publicConfig, safeEqual,
-  signSession, today, verifySession, workerRe,
+  buildWorkspaces, cardExtras, clientIp, groupIssues, isOwnHost, isPagePath, isSameOrigin, labelSlug, loginGuard, metrics,
+  normalizeConfig, normalizeExt, parseCookies, parseProjectList, parseRunners, parseWorkers, planCreate, planDecision,
+  planIssueAction, planRestarts, planRunnerAction, planWorkerAction, prSummary, publicConfig, readBody, repoOfIssue,
+  RESTART_COOLDOWN_MS, safeEqual, signSession, today, verifySession, hashPassword, parsePasswordLine, verifyPassword,
+  workerRe, wsOfIssue,
 } from './inbox.mjs';
-import { summarizeTranscript, toolSummary, transcriptPath } from './sessions.mjs';
+import { chatTranscript, summarizeTranscript, toolSummary, transcriptPath } from './sessions.mjs';
+
+// Projekt wie aus `workers config`: code plus ein zweiter Workspace clubs, zwei Repos
+const CFG = normalizeConfig({
+  root: '/repo', slug: 'spot', name: 'Spot', base: 'main',
+  roles: ['fix', 'search', 'verify', 'regress', 'club-search', 'club-add', 'club-settings', 'club-test'],
+  modules: ['admin', 'app', 'cli', 'side'],
+  start: { fix: 2, search: 1, verify: 1, regress: 0, 'club-search': 1, 'club-add': 1, 'club-settings': 2, 'club-test': 1 },
+  colors: { fix: [200, 60, 60], 'club-add': [230, 120, 30] },
+  workspaces: [
+    { key: 'code', name: 'Code', phases: [{ key: 'fix' }, { key: 'verify' }, { key: 'merge' }], roles: ['fix', 'search', 'verify', 'regress'] },
+    { key: 'clubs', name: 'Clubs', phases: [{ key: 'place', title: 'Anlegen' }, { key: 'settings' }, { key: 'test', title: 'Test' }],
+      roles: ['club-search', 'club-add', 'club-settings', 'club-test'] },
+  ],
+  repos: [{ key: '.', path: '/repo' }, { key: 'side', path: '/side' }],
+  runners: true,
+});
+const EXT = normalizeExt({
+  workspaces: {
+    clubs: {
+      split: [{ key: 'activate', label: 'aktivieren', title: 'zum Aktivieren' }],
+      group: { prefix: 'stadt:', all: 'alle Städte' },
+      create: { type: 'task', fields: [{ name: 'stadt', label: 'Stadt', prefix: 'stadt:' }] },
+      roleLabels: { 'club-add': 'Anlegen' },
+      cols: { settings: { color: '#1ea0aa', hint: 'SiteSetting einrichten' } },
+    },
+  },
+});
+const WS = buildWorkspaces(CFG, EXT);
+const CODE = WS.code;
+const CLUBS = WS.clubs;
 
 const D = '2026-10-16';
-const SPOT_MODULES = ['admin', 'app', 'backend', 'cli', 'ops', 'press', 'repo'];
 
 test('Freigeben entfernt human und hängt die Entscheidung an', () => {
   assert.deepEqual(planDecision({ id: 'spot-8zr', action: 'release', text: '  nur bei 0 Events ' }, D), [
@@ -51,124 +82,18 @@ test('Text mit Optionen bleibt ein einzelnes Argument', () => {
 
 const NOW = Date.parse('2026-10-16T12:00:00Z');
 
-test('groupIssues: human vor Phase (auch ohne Phase), Bereit/In Arbeit nach Status, Erledigt 24 h', () => {
-  const cols = groupIssues([
-    { id: 'a-1', status: 'open', labels: ['phase:fix', 'human'], priority: 2 },
-    { id: 'a-2', status: 'open', labels: ['phase:fix'], priority: 3 },
-    { id: 'a-3', status: 'in_progress', labels: ['phase:fix'], priority: 1, lease_expires_at: '2026-10-16T11:00:00Z' },
-    { id: 'a-4', status: 'open', labels: ['phase:verify'], priority: 2 },
-    { id: 'a-5', status: 'open', labels: ['phase:merge', 'phase:verify'], priority: 2 },
-    { id: 'a-6', status: 'open', labels: ['phase:fix', 'tests'], priority: 2 },
-    { id: 'a-7', status: 'closed', labels: ['phase:fix'], priority: 2, closed_at: '2026-10-16T08:00:00Z' },
-    { id: 'a-10', status: 'closed', labels: ['phase:fix'], priority: 2, closed_at: '2026-10-14T08:00:00Z' },
-    { id: 'a-8', status: 'deferred', labels: ['phase:fix', 'human'], priority: 2 },
-    { id: 'a-11', status: 'open', labels: ['human'], priority: 1 },
-    { id: 'a-12', status: 'in_progress', labels: ['phase:fix', 'tests'], priority: 2, lease_expires_at: '2026-10-16T13:00:00Z' },
-    { id: 'spot-merge-slot', status: 'in_progress', labels: [], priority: 0 },
-    { id: 'rh-merge-slot', status: 'open', labels: [], priority: 0 },
-    { id: 'a-13', status: 'open', labels: ['gt:slot'], priority: 0 },
-    { id: 'a-14', status: 'pinned', labels: [], priority: 0 },
-    { id: 'a-9', issue_type: 'epic', status: 'open', labels: ['phase:fix'], priority: 2 },
-  ], NOW);
-  assert.deepEqual(Object.fromEntries(Object.entries(cols).map(([k, v]) => [k, v.map((i) => i.id)])), {
-    human: ['a-11', 'a-1'], ready: ['a-6', 'a-2'], fix: ['a-3', 'a-12'], verify: ['a-4'], merge: ['a-5'],
-    done: ['a-7'], deferred: ['a-8'],
-  });
-  assert.equal(cols.fix[0].stale, true);
-  assert.equal(cols.fix[1].stale, false);
-  const m = metrics(cols, [{ mergedAt: '2026-10-16T09:00:00Z' }, { mergedAt: '2026-10-10T09:00:00Z' }], NOW);
-  assert.equal(m.stale, 1);
-  assert.equal(m.done24h, 1);
-  assert.equal(m.mergedToday, 1);
-  assert.deepEqual(groupIssues(null, NOW).ready, []);
-});
-
-test('planIssueAction: Verschieben entfernt nur vorhandene Phasen und human', () => {
-  const cur = { labels: ['phase:fix', 'human', 'modul:cli'], status: 'open' };
-  assert.deepEqual(planIssueAction({ id: 'spot-1', action: 'move', to: 'verify' }, cur, D), [
-    ['update', 'spot-1', '--remove-label', 'human', '--remove-label', 'phase:fix', '--add-label', 'phase:verify',
-      '--append-notes', `User-Entscheidung ${D}: verschoben nach phase:verify`],
-  ]);
-  assert.deepEqual(planIssueAction({ id: 'spot-1', action: 'move', to: 'ready', text: 'nochmal' }, { labels: ['phase:fix'], status: 'closed' }, D), [
-    ['reopen', 'spot-1'],
-    ['update', 'spot-1', '--append-notes', `User-Entscheidung ${D}: verschoben nach phase:fix. nochmal`],
-  ]);
-  assert.deepEqual(planIssueAction({ id: 'spot-1', action: 'move', to: 'human' }, { labels: [], status: 'deferred' }, D), [
-    ['undefer', 'spot-1'],
-    ['update', 'spot-1', '--add-label', 'human', '--append-notes', `User-Entscheidung ${D}: braucht Entscheidung`],
-  ]);
-  assert.deepEqual(planIssueAction({ id: 'spot-1', action: 'move', to: 'deferred' }, cur, D), [['defer', 'spot-1']]);
-  assert.deepEqual(planIssueAction({ id: 'spot-1', action: 'move', to: 'deferred' }, { status: 'closed' }, D), [
-    ['reopen', 'spot-1'], ['defer', 'spot-1'],
-  ]);
-  assert.deepEqual(planIssueAction({ id: 'spot-1', action: 'move', to: 'done', text: 'doppelt' }, cur, D), [
-    ['close', 'spot-1', '--reason', `User-Entscheidung ${D}: doppelt`],
-  ]);
-  assert.throws(() => planIssueAction({ id: 'spot-1', action: 'move', to: 'done' }, cur, D), /Grund/);
-  assert.throws(() => planIssueAction({ id: 'spot-1', action: 'move', to: 'fix' }, cur, D), /Ziel/);
-});
-
-test('planIssueAction: Priorität und Unclaim', () => {
-  assert.deepEqual(planIssueAction({ id: 'spot-1', action: 'priority', value: 0 }), [['update', 'spot-1', '--priority', '0']]);
-  assert.throws(() => planIssueAction({ id: 'spot-1', action: 'priority', value: '1; x' }), /Priorität/);
-  assert.throws(() => planIssueAction({ id: 'spot-1', action: 'priority', value: 5 }), /Priorität/);
-  assert.deepEqual(planIssueAction({ id: 'spot-1', action: 'unclaim' }, { status: 'in_progress', assignee: 'fix-2' }), [
-    ['unclaim', 'spot-1', '--force', '--if-assignee', 'fix-2'],
-  ]);
-  assert.throws(() => planIssueAction({ id: 'spot-1', action: 'unclaim' }, { status: 'open' }), /nicht geclaimt/);
-  assert.throws(() => planIssueAction({ id: '--force', action: 'unclaim' }, { status: 'in_progress', assignee: 'x' }), /Issue-ID/);
-});
-
-test('planCreate: Werte als --flag=wert, Labels aus Modul und human', () => {
-  assert.deepEqual(planCreate({ title: '  --force  Titel  ', description: '', priority: 1, modul: 'cli', human: true }, SPOT_MODULES), [
-    ['create', '--title=--force Titel', '--description=--force Titel', '--priority=1', '--type=bug', '--labels=phase:fix,modul:cli,human'],
-  ]);
-  assert.throws(() => planCreate({ title: 'kurz' }), /Titel/);
-  assert.throws(() => planCreate({ title: 'langer Titel', modul: 'x,human' }, SPOT_MODULES), /Modul/);
-  assert.throws(() => planCreate({ title: 'langer Titel', modul: 'cli' }), /Modul/);   // Projekt ohne Module
-  assert.throws(() => planCreate({ title: 'langer Titel', type: 'epic' }), /Typ/);
-});
-
-test('planWorkerAction: nur bekannte Rollen und Worker-Namen', () => {
-  assert.deepEqual(planWorkerAction({ action: 'add', role: 'fix' }), ['add', 'fix']);
-  assert.deepEqual(planWorkerAction({ action: 'drain', role: 'all' }), ['drain']);
-  assert.deepEqual(planWorkerAction({ action: 'drain', role: 'verify', off: true }), ['drain', 'verify', '--off']);
-  assert.deepEqual(planWorkerAction({ action: 'stop', name: 'fix-2', force: true }), ['stop', 'fix-2', '--force']);
-  assert.throws(() => planWorkerAction({ action: 'add', role: '--iterm' }), /Rolle/);
-  assert.throws(() => planWorkerAction({ action: 'stop', name: '--all' }), /Worker/);
-  assert.throws(() => planWorkerAction({ action: 'restart', role: 'fix' }), /Aktion/);
-  assert.deepEqual(planWorkerAction({ action: 'start', counts: { fix: 3, verify: 1 } }),
-    ['start', 'fix=3', 'search=0', 'verify=1', 'regress=0']);
-  assert.throws(() => planWorkerAction({ action: 'start', counts: { fix: 9 } }), /0–8/);
-  assert.throws(() => planWorkerAction({ action: 'start', counts: { fix: '1 --iterm' } }), /0–8/);
-});
-
-test('planWorkerAction: Rollen kommen aus dem Projekt', () => {
-  const roles = ['fix', 'verify'];
-  assert.deepEqual(planWorkerAction({ action: 'start', counts: { fix: 1, search: 4 } }, roles), ['start', 'fix=1', 'verify=0']);
-  assert.throws(() => planWorkerAction({ action: 'add', role: 'search' }, roles), /Rolle/);
-  assert.throws(() => planWorkerAction({ action: 'stop', name: 'search-1' }, roles), /Worker/);
-  assert.ok(workerRe(['fix', 'x|y', 'audit']).test('audit-3'));
-  assert.equal(workerRe(['fix', 'x|y']).test('y-1'), false);
-});
-
-test('parseProjectList: Pfade ohne Kommentare, Leerzeilen und Dubletten', () => {
-  assert.deepEqual(parseProjectList('/a\n\n# alt\n /b \n/a\n'), ['/a', '/b']);
-  assert.deepEqual(parseProjectList(''), []);
-});
-
-test('normalizeConfig: Vorgaben, ungültige Werte fallen weg, publicConfig ohne Pfade', () => {
-  assert.equal(normalizeConfig(null), null);
-  assert.equal(normalizeConfig({ root: '/r', slug: 'Böse Slug' }), null);
-  const c = normalizeConfig({ root: '/r', slug: 'regiehub', name: 'RegieHub', base: 'release-2.1.0',
-    roles: ['fix', 'verify', 'x;rm'], modules: ['server', 'admin', '../x'], drain: '/r/.git/regiehub-workers-drain' });
-  assert.deepEqual(c.roles, ['fix', 'verify']);
-  assert.deepEqual(c.modules, ['server', 'admin']);
-  assert.equal(c.base, 'release-2.1.0');
-  assert.deepEqual(normalizeConfig({ root: '/r', slug: 's' }).roles, ['fix', 'search', 'verify', 'regress']);
-  const pub = publicConfig(c);
-  assert.equal('root' in pub || 'drain' in pub, false);
-  assert.equal(pub.slug, 'regiehub');
+test('planRunnerAction: start/stop für Nummer oder all, --force nur bei stop', () => {
+  assert.deepEqual(planRunnerAction({ action: 'start', n: 4 }), ['start', '4']);
+  assert.deepEqual(planRunnerAction({ action: 'start', n: 'all', force: true }), ['start', 'all']);
+  assert.deepEqual(planRunnerAction({ action: 'stop', n: 2, force: true }), ['stop', '2', '--force']);
+  assert.deepEqual(planRunnerAction({ action: 'stop', n: 'all' }), ['stop', 'all']);
+  assert.throws(() => planRunnerAction({ action: 'remove', n: 1 }), /Aktion/);
+  assert.deepEqual(planRunnerAction({ action: 'add', n: '--force' }), ['add']);
+  assert.deepEqual(planRunnerAction({ action: 'delete' }), ['delete']);
+  assert.deepEqual(planRunnerAction({ action: 'delete', n: 3, force: true }), ['delete', '--force']);
+  for (const n of [0, 9, 1.5, '3', '--force', undefined]) {
+    assert.throws(() => planRunnerAction({ action: 'stop', n }), /1–8/);
+  }
 });
 
 test('prSummary: CI-Zustand aus den Checks, übersprungene ausgeblendet', () => {
@@ -180,25 +105,6 @@ test('prSummary: CI-Zustand aus den Checks, übersprungene ausgeblendet', () => 
   const s = prSummary({ number: 1, statusCheckRollup: [check('COMPLETED', 'SKIPPED', 'a'), check('COMPLETED', 'SUCCESS', 'b')] });
   assert.deepEqual(s.checks.map((c) => c.name), ['b']);
   assert.equal('statusCheckRollup' in s, false);
-});
-
-test('parseWorkers nimmt nur Sessions in den Worktrees, sortiert numerisch', () => {
-  const wt = '/repo/.claude/worktrees';
-  const ws = parseWorkers([
-    { cwd: `${wt}/fix-10`, kind: 'background', status: 'busy', sessionId: 's1', name: 'fix-10', pid: 5, startedAt: 0 },
-    { cwd: `${wt}/fix-2/spot-app`, kind: 'interactive', status: 'idle' },
-    { cwd: '/repo', kind: 'interactive', status: 'busy' },
-    { cwd: `${wt}/add-worker`, kind: 'interactive', status: 'busy' },
-  ], wt);
-  assert.deepEqual(ws.map((w) => [w.name, w.role, w.kind, w.status]), [
-    ['fix-2', 'fix', 'terminal', 'idle'],
-    ['fix-10', 'fix', 'background', 'busy'],
-  ]);
-  assert.equal(ws[1].sessionId, 's1');
-  assert.equal(ws[1].session, 'fix-10');
-  assert.deepEqual(parseWorkers(null, wt), []);
-  assert.deepEqual(parseWorkers([{ cwd: `${wt}/audit-1`, status: 'busy' }, { cwd: `${wt}/fix-1`, status: 'busy' }], wt, ['audit'])
-    .map((w) => w.name), ['audit-1']);
 });
 
 test('transcriptPath ersetzt Sonderzeichen wie Claude, lehnt fremde Session-IDs ab', () => {
@@ -273,13 +179,493 @@ test('Sitzungs-Cookie: gültig bis Ablauf, an das Token gebunden, nicht fälschb
   assert.deepEqual(parseCookies('a=1; leitstand=x.y%3D; b'), { a: '1', leitstand: 'x.y=' });
 });
 
-test('loginLimiter sperrt nach zu vielen Fehlversuchen im Fenster', () => {
-  const l = loginLimiter(3, 1000);
-  for (let i = 0; i < 3; i++) l.fail(NOW + i);
-  assert.equal(l.blocked(NOW + 10), true);
-  assert.equal(l.blocked(NOW + 2000), false);
+test('parseCookies ignoriert nicht dekodierbare Werte, auch fremde Cookies', () => {
+  assert.deepEqual(parseCookies('other=50%; leitstand=1.x'), { leitstand: '1.x' });
+  assert.deepEqual(parseCookies('leitstand=%'), {});
+});
+
+test('loginGuard: sperrt eine IP nach zu vielen Fehlversuchen, bremst global, ohne IP keine Sperre', () => {
+  const g = loginGuard({ perIp: 3, windowMs: 1000, global: 5, delayMs: 500 });
+  g.fail('1.2.3.4', NOW); g.fail('1.2.3.4', NOW + 1);
+  assert.equal(g.blockedFor('1.2.3.4', NOW + 2), 0);
+  g.fail('1.2.3.4', NOW + 2);
+  assert.equal(g.blockedFor('1.2.3.4', NOW + 10), 990);  // bis der älteste Fehlversuch abläuft
+  assert.equal(g.blockedFor('5.6.7.8', NOW + 10), 0);
+  assert.equal(g.blockedFor('1.2.3.4', NOW + 1001), 0);
+  assert.equal(g.delay(NOW + 10), 0);
+  for (let i = 0; i < 10; i++) g.fail(null, NOW + 20 + i);
+  assert.equal(g.blockedFor(null, NOW + 40), 0);  // ohne IP nie gesperrt
+  assert.equal(g.delay(NOW + 40), 500);
+  assert.equal(g.delay(NOW + 2000), 0);
+  g.fail('9.9.9.9', NOW); g.fail('9.9.9.9', NOW); g.ok('9.9.9.9'); g.fail('9.9.9.9', NOW);
+  assert.equal(g.blockedFor('9.9.9.9', NOW + 1), 0);  // Erfolg setzt die IP zurück
+  const small = loginGuard({ perIp: 1, maxIps: 2 });
+  ['a1', 'a2', 'a3'].forEach((ip) => small.fail(ip, NOW));
+  assert.equal(small.blockedFor('a1', NOW), 0);  // älteste IP verdrängt
+  assert.ok(small.blockedFor('a3', NOW) > 0);
+});
+
+test('clientIp: X-Real-IP nur über Loopback, sonst null', () => {
+  const r = (addr, ip) => ({ socket: { remoteAddress: addr }, headers: ip ? { 'x-real-ip': ip } : {} });
+  assert.equal(clientIp(r('127.0.0.1', '203.0.113.5')), '203.0.113.5');
+  assert.equal(clientIp(r('::1', '2001:db8::1')), '2001:db8::1');
+  assert.equal(clientIp(r('127.0.0.1')), null);
+  assert.equal(clientIp(r('10.0.0.2', '203.0.113.5')), null);
+  assert.equal(clientIp(r('127.0.0.1', 'x; drop')), null);
 });
 
 test('today formatiert lokal als YYYY-MM-DD', () => {
   assert.equal(today(new Date(2026, 0, 5)), '2026-01-05');
+});
+
+// Request-Ersatz: liefert die Buffer nacheinander wie node:http
+async function* chunked(...parts) { yield* parts; }
+
+test('readBody: Umlaut über zwei Chunks verteilt bleibt erhalten', async () => {
+  const bytes = Buffer.from(JSON.stringify({ text: 'Gründe – „ok“' }));
+  const cut = bytes.indexOf(Buffer.from('ü')) + 1;  // mitten im ü
+  assert.deepEqual(await readBody(chunked(bytes.subarray(0, cut), bytes.subarray(cut))), { text: 'Gründe – „ok“' });
+});
+
+test('readBody: Limit zählt Bytes, nicht Zeichen', async () => {
+  const body = Buffer.from(JSON.stringify({ text: 'ä'.repeat(10) }));  // 10 Zeichen, 20 Bytes
+  await assert.rejects(readBody(chunked(body), body.length - 1), { code: 413 });
+  assert.deepEqual(await readBody(chunked(body), body.length), { text: 'ä'.repeat(10) });
+});
+
+test('readBody: kein JSON gibt 400', async () => {
+  await assert.rejects(readBody(chunked(Buffer.from('{kaputt'))), { code: 400 });
+});
+
+test('planRestarts: nur idle Worker ohne Claim, Slot, Drain und Nachricht über der Schwelle', () => {
+  const now = Date.parse('2026-10-18T22:00:00Z');
+  const quiet = '2026-10-18T21:55:00Z';
+  const w = (name, over = {}, act = {}) => ({
+    name, status: 'idle', drained: false, issues: [],
+    activity: { contextTokens: 400_000, lastAt: quiet, pending: [], ...act }, ...over,
+  });
+  const workers = [
+    w('fix-1'),
+    w('fix-2', { status: 'busy' }),
+    w('fix-3', { issues: [{ id: 'spot-x' }] }),
+    w('verify-1'),
+    w('verify-2', { drained: true }),
+    w('fix-4', {}, { contextTokens: 150_000 }),
+    w('fix-5', {}, { pending: [{ text: 'hallo' }] }),
+    w('fix-6', {}, { lastAt: '2026-10-18T21:59:30Z' }),
+    w('fix-7', { activity: null }),
+    w('fix-8', {}, { lastAt: null }),
+  ];
+  assert.deepEqual(planRestarts(workers, { threshold: 200_000, slotHolder: 'verify-1', now }), ['fix-1']);
+  assert.deepEqual(planRestarts(workers, { threshold: null, now }), []);
+  // Cooldown je Worker, danach wieder erlaubt
+  const lastRestart = new Map([['fix-1', now - 60_000]]);
+  assert.deepEqual(planRestarts(workers, { threshold: 200_000, slotHolder: 'verify-1', lastRestart, now }), []);
+  lastRestart.set('fix-1', now - RESTART_COOLDOWN_MS - 1);
+  assert.deepEqual(planRestarts(workers, { threshold: 200_000, slotHolder: 'verify-1', lastRestart, now }), ['fix-1']);
+  assert.deepEqual(planRestarts(null, { threshold: 200_000, now }), []);
+});
+
+test('chatTranscript: Nachrichten, Runden, Tool-Aufrufe mit Ergebnis, Meta und Blobs ausgelassen', () => {
+  const at = (s) => `2026-10-19T00:00:${String(s).padStart(2, '0')}Z`;
+  const lines = [
+    { type: 'api-request-blob', body: 'x'.repeat(100) },
+    { type: 'system', subtype: 'scheduled_task_fire', prompt: '/spot-fix', timestamp: at(1) },
+    { type: 'user', message: { content: '<command-message>spot-fix</command-message>\n<command-name>/spot-fix</command-name>' }, timestamp: at(2) },
+    { type: 'user', isMeta: true, message: { content: [{ type: 'text', text: 'Skill-Inhalt' }] }, timestamp: at(3) },
+    { type: 'assistant', message: { content: [{ type: 'thinking', thinking: 'geheim' }, { type: 'text', text: 'Ich prüfe die Queue.' },
+      { type: 'tool_use', id: 't1', name: 'Bash', input: { command: 'bdw ready', description: 'Bereite Issues' } }] }, timestamp: at(4) },
+    { type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 't1', is_error: true, content: [{ type: 'text', text: 'Fehler' }] }] }, timestamp: at(5) },
+    { type: 'user', message: { content: 'bitte stopp' }, timestamp: at(6) },
+    { type: 'user', message: { content: '<task-notification><summary>Hintergrund fertig</summary></task-notification>' }, timestamp: at(7) },
+    { type: 'system', subtype: 'compact_boundary', timestamp: at(8) },
+    { type: 'assistant', isSidechain: true, message: { content: [{ type: 'text', text: 'Subagent' }] }, timestamp: at(9) },
+  ].map((e) => JSON.stringify(e));
+  const c = chatTranscript(['kaputt', ...lines]);
+  assert.deepEqual(c.map((e) => e.kind), ['round', 'assistant', 'tool', 'user', 'note', 'note']);
+  assert.equal(c[0].text, '/spot-fix');
+  assert.equal(c[1].text, 'Ich prüfe die Queue.');
+  assert.equal(c[2].summary, 'Bereite Issues');
+  assert.equal(c[2].result, 'Fehler');
+  assert.equal(c[2].error, true);
+  assert.equal(c[3].text, 'bitte stopp');
+  assert.match(c[4].text, /Hintergrund fertig/);
+  assert.equal(c[5].text, 'Kontext zusammengefasst');
+  assert.equal(chatTranscript(lines, { limit: 2 }).length, 2);
+});
+
+test('Passwort-Login: scrypt-Zeile erzeugen, lesen, prüfen', async () => {
+  const line = await hashPassword('admin', 'richtig-langes-pw', Buffer.alloc(16, 7));
+  assert.match(line, /^admin:scrypt\$32768\$8\$1\$[\w-]+\$[\w-]+$/);
+  const entry = parsePasswordLine(line);
+  assert.equal(entry.user, 'admin');
+  assert.equal(await verifyPassword(entry, 'admin', 'richtig-langes-pw'), true);
+  assert.equal(await verifyPassword(entry, ' Admin ', 'richtig-langes-pw'), true);
+  assert.equal(await verifyPassword(entry, 'admin', 'richtig-langes-pX'), false);
+  assert.equal(await verifyPassword(entry, 'root', 'richtig-langes-pw'), false);
+  assert.equal(await verifyPassword(entry, 'admin', 123), false);
+  assert.equal(await verifyPassword(null, 'admin', 'richtig-langes-pw'), false);
+  // Unicode-Normalisierung: ä als ein oder zwei Codepoints
+  const u = parsePasswordLine(await hashPassword('admin', 'm\u00e4dchen-passwort'));
+  assert.equal(await verifyPassword(u, 'admin', 'ma\u0308dchen-passwort'), true);
+  await assert.rejects(hashPassword('admin', 'zu-kurz'), /12 Zeichen/);
+  await assert.rejects(hashPassword('Admin x', 'richtig-langes-pw'), /Benutzername/);
+  assert.equal(parsePasswordLine('admin:klartext'), null);
+  assert.equal(parsePasswordLine(line.replace('$32768$', '$1048577$')), null);
+  assert.equal(parsePasswordLine(line.replace('$32768$', '$4294967296$')), null);
+  assert.equal(parsePasswordLine(''), null);
+});
+
+test('isPagePath: Seite auch mit ?p= und ?ws=', () => {
+  assert.equal(isPagePath('/?ws=clubs'), true);
+  assert.equal(isPagePath('/?p=spot&ws=clubs'), true);
+  assert.equal(isPagePath('/index.html'), true);
+  assert.equal(isPagePath('/api/state?ws=clubs'), false);
+  assert.equal(isPagePath(undefined), false);
+});
+
+test('groupIssues: human vor Phase (auch ohne Phase), Bereit/In Arbeit nach Status, Erledigt 24 h', () => {
+  const cols = groupIssues([
+    { id: 'a-1', status: 'open', labels: ['phase:fix', 'human'], priority: 2 },
+    { id: 'a-2', status: 'open', labels: ['phase:fix'], priority: 3 },
+    { id: 'a-3', status: 'in_progress', labels: ['phase:fix'], priority: 1, lease_expires_at: '2026-10-16T11:00:00Z' },
+    { id: 'a-4', status: 'open', labels: ['phase:verify'], priority: 2 },
+    { id: 'a-5', status: 'open', labels: ['phase:merge', 'phase:verify'], priority: 2 },
+    { id: 'a-6', status: 'open', labels: ['phase:fix', 'tests'], priority: 2 },
+    { id: 'a-7', status: 'closed', labels: ['phase:fix'], priority: 2, closed_at: '2026-10-16T08:00:00Z' },
+    { id: 'a-10', status: 'closed', labels: ['phase:fix'], priority: 2, closed_at: '2026-10-14T08:00:00Z' },
+    { id: 'a-8', status: 'deferred', labels: ['phase:fix', 'human'], priority: 2 },
+    { id: 'a-11', status: 'open', labels: ['human'], priority: 1 },
+    { id: 'a-12', status: 'in_progress', labels: ['phase:fix', 'tests'], priority: 2, lease_expires_at: '2026-10-16T13:00:00Z' },
+    { id: 'spot-merge-slot', status: 'in_progress', labels: [], priority: 0 },
+    { id: 'a-13', status: 'open', labels: ['gt:slot'], priority: 0 },
+    { id: 'a-14', status: 'pinned', labels: [], priority: 0 },
+    { id: 'a-9', issue_type: 'epic', status: 'open', labels: ['phase:fix'], priority: 2 },
+  ], CODE, WS, NOW);
+  assert.deepEqual(Object.fromEntries(Object.entries(cols).map(([k, v]) => [k, v.map((i) => i.id)])), {
+    human: ['a-11', 'a-1'], ready: ['a-6', 'a-2'], fix: ['a-3', 'a-12'], verify: ['a-4'], merge: ['a-5'],
+    done: ['a-7'], deferred: ['a-8'],
+  });
+  assert.equal(cols.fix[0].stale, true);
+  assert.equal(cols.fix[1].stale, false);
+  const m = metrics(cols, CODE, [{ mergedAt: '2026-10-16T09:00:00Z' }, { mergedAt: '2026-10-10T09:00:00Z' }], NOW);
+  assert.equal(m.stale, 1);
+  assert.equal(m.done24h, 1);
+  assert.equal(m.mergedToday, 1);
+  assert.equal(m.working, 2);
+  assert.deepEqual(groupIssues(null, CODE, WS, NOW).ready, []);
+});
+
+test('planIssueAction: Verschieben entfernt nur vorhandene Phasen und human', () => {
+  const cur = { labels: ['phase:fix', 'human', 'modul:cli'], status: 'open' };
+  assert.deepEqual(planIssueAction({ id: 'spot-1', action: 'move', to: 'verify' }, cur, CODE, D), [
+    ['update', 'spot-1', '--remove-label', 'human', '--remove-label', 'phase:fix', '--add-label', 'phase:verify',
+      '--append-notes', `User-Entscheidung ${D}: verschoben nach phase:verify`],
+  ]);
+  assert.deepEqual(planIssueAction({ id: 'spot-1', action: 'move', to: 'ready', text: 'nochmal' }, { labels: ['phase:fix'], status: 'closed' }, CODE, D), [
+    ['reopen', 'spot-1'],
+    ['update', 'spot-1', '--append-notes', `User-Entscheidung ${D}: verschoben nach phase:fix. nochmal`],
+  ]);
+  assert.deepEqual(planIssueAction({ id: 'spot-1', action: 'move', to: 'human' }, { labels: [], status: 'deferred' }, CODE, D), [
+    ['undefer', 'spot-1'],
+    ['update', 'spot-1', '--add-label', 'human', '--append-notes', `User-Entscheidung ${D}: braucht Entscheidung`],
+  ]);
+  assert.deepEqual(planIssueAction({ id: 'spot-1', action: 'move', to: 'deferred' }, cur, CODE, D), [['defer', 'spot-1']]);
+  assert.deepEqual(planIssueAction({ id: 'spot-1', action: 'move', to: 'deferred' }, { status: 'closed' }, CODE, D), [
+    ['reopen', 'spot-1'], ['defer', 'spot-1'],
+  ]);
+  assert.deepEqual(planIssueAction({ id: 'spot-1', action: 'move', to: 'done', text: 'doppelt' }, cur, CODE, D), [
+    ['close', 'spot-1', '--reason', `User-Entscheidung ${D}: doppelt`],
+  ]);
+  assert.throws(() => planIssueAction({ id: 'spot-1', action: 'move', to: 'done' }, cur, CODE, D), /Grund/);
+  assert.throws(() => planIssueAction({ id: 'spot-1', action: 'move', to: 'fix' }, cur, CODE, D), /Ziel/);
+});
+
+test('planIssueAction: Priorität und Unclaim', () => {
+  assert.deepEqual(planIssueAction({ id: 'spot-1', action: 'priority', value: 0 }, {}, CODE), [['update', 'spot-1', '--priority', '0']]);
+  assert.throws(() => planIssueAction({ id: 'spot-1', action: 'priority', value: '1; x' }, {}, CODE), /Priorität/);
+  assert.throws(() => planIssueAction({ id: 'spot-1', action: 'priority', value: 5 }, {}, CODE), /Priorität/);
+  assert.deepEqual(planIssueAction({ id: 'spot-1', action: 'unclaim' }, { status: 'in_progress', assignee: 'fix-2' }, CODE), [
+    ['unclaim', 'spot-1', '--force', '--if-assignee', 'fix-2'],
+  ]);
+  assert.throws(() => planIssueAction({ id: 'spot-1', action: 'unclaim' }, { status: 'open' }, CODE), /nicht geclaimt/);
+  assert.throws(() => planIssueAction({ id: '--force', action: 'unclaim' }, { status: 'in_progress', assignee: 'x' }, CODE), /Issue-ID/);
+});
+
+test('planCreate: Werte als --flag=wert, Labels aus Modul und human', () => {
+  assert.deepEqual(planCreate({ title: '  --force  Titel  ', description: '', priority: 1, modul: 'cli', human: true }, CODE, CFG.modules), [
+    ['create', '--title=--force Titel', '--description=--force Titel', '--priority=1', '--type=bug', '--labels=phase:fix,modul:cli,human'],
+  ]);
+  assert.throws(() => planCreate({ title: 'kurz' }, CODE, CFG.modules), /Titel/);
+  assert.throws(() => planCreate({ title: 'langer Titel', modul: 'x,human' }, CODE, CFG.modules), /Modul/);
+  assert.throws(() => planCreate({ title: 'langer Titel', type: 'epic' }, CODE, CFG.modules), /Typ/);
+});
+
+test('planWorkerAction: nur bekannte Rollen und Worker-Namen', () => {
+  const p = (body) => planWorkerAction(body, WS);
+  assert.deepEqual(p({ action: 'add', role: 'fix' }), ['add', 'fix']);
+  assert.deepEqual(p({ action: 'drain', role: 'all' }), ['drain']);
+  assert.deepEqual(p({ action: 'drain', role: 'verify', off: true }), ['drain', 'verify', '--off']);
+  assert.deepEqual(p({ action: 'stop', name: 'fix-2', force: true }), ['stop', 'fix-2', '--force']);
+  assert.throws(() => p({ action: 'add', role: '--iterm' }), /Rolle/);
+  assert.throws(() => p({ action: 'stop', name: '--all' }), /Worker/);
+  assert.deepEqual(p({ action: 'stop', name: 'all' }), ['stop', '--all']);
+  assert.deepEqual(p({ action: 'stop', name: 'all', force: true }), ['stop', '--all', '--force']);
+  assert.throws(() => p({ action: 'restart', role: 'fix' }), /Worker/);
+  assert.throws(() => p({ action: 'restart', name: 'fix-1 --force' }), /Worker/);
+  assert.throws(() => p({ action: 'reboot', name: 'fix-1' }), /Aktion/);
+  assert.deepEqual(p({ action: 'restart', name: 'verify-3' }), ['restart', 'verify-3']);
+  assert.deepEqual(p({ action: 'restart', name: 'fix-1', force: true }), ['restart', 'fix-1', '--force']);
+  assert.deepEqual(p({ action: 'autorestart', threshold: 200000 }), ['autorestart', '--over', '200000']);
+  assert.deepEqual(p({ action: 'autorestart', off: true }), ['autorestart', '--off']);
+  assert.throws(() => p({ action: 'autorestart', threshold: 10000 }), /Schwelle/);
+  assert.throws(() => p({ action: 'autorestart', threshold: '200000 --off' }), /Schwelle/);
+  assert.deepEqual(p({ action: 'start', counts: { fix: 3, verify: 1 } }),
+    ['start', '--ws', 'code', 'fix=3', 'search=0', 'verify=1', 'regress=0']);
+  assert.throws(() => p({ action: 'start', counts: { fix: 9 } }), /0–8/);
+  assert.throws(() => p({ action: 'start', counts: { fix: '1 --iterm' } }), /0–8/);
+  assert.ok(workerRe(['fix', 'x|y', 'audit']).test('audit-3'));
+  assert.equal(workerRe(['fix', 'x|y']).test('y-1'), false);
+});
+
+test('planWorkerAction send: eine Zeile ohne Steuerzeichen, nur gültige Worker', () => {
+  const p = (body) => planWorkerAction(body, WS);
+  assert.deepEqual(p({ action: 'send', name: 'fix-1', text: ' bitte /compact\n' }), ['send', 'fix-1', '--', 'bitte /compact']);
+  assert.deepEqual(p({ action: 'send', name: 'fix-1', text: 'a\r\nb\u001b[2Jc' }), ['send', 'fix-1', '--', 'a b[2Jc']);
+  assert.deepEqual(p({ action: 'send', name: 'fix-1', text: '--force' }), ['send', 'fix-1', '--', '--force']);
+  assert.throws(() => p({ action: 'send', name: 'fix-1', text: ' \n ' }), /kein Text/);
+  assert.throws(() => p({ action: 'send', name: 'fix-1', text: 'x'.repeat(4001) }), /zu lang/);
+  assert.throws(() => p({ action: 'send', name: '--all', text: 'hi' }), /Worker/);
+});
+
+test('parseRunners: sortiert, füllt fehlende Felder mit dem Projekt-Slug, verwirft Ungültiges', () => {
+  assert.deepEqual(parseRunners([
+    { n: 2, name: 'spot-runner-2', container: 'exited', github: 'offline', busy: false },
+    { n: 1, container: 'running', github: 'online', busy: true, job: {
+      name: 'App', branch: 'fix/x', title: 'Fix X', url: 'https://github.com/o/r/actions/runs/1/job/2',
+      started: '2026-10-18T21:00:00Z', extra: 1,
+    } },
+    { n: 4, job: { name: 'Admin', url: 'javascript:alert(1)' } },
+    { n: 'x' }, null, { n: 12 },
+    { n: 3, busy: 'true' },
+  ], 'spot'), [
+    { n: 1, name: 'spot-runner-1', container: 'running', github: 'online', busy: true, job: {
+      name: 'App', branch: 'fix/x', title: 'Fix X', url: 'https://github.com/o/r/actions/runs/1/job/2',
+      started: '2026-10-18T21:00:00Z',
+    } },
+    { n: 2, name: 'spot-runner-2', container: 'exited', github: 'offline', busy: false, job: null },
+    { n: 3, name: 'spot-runner-3', container: 'missing', github: 'missing', busy: false, job: null },
+    { n: 4, name: 'spot-runner-4', container: 'missing', github: 'missing', busy: false, job: {
+      name: 'Admin', branch: '', title: '', url: null, started: null,
+    } },
+  ]);
+  assert.equal(parseRunners([{ n: 1 }], 'regiehub')[0].name, 'regiehub-runner-1');
+  assert.deepEqual(parseRunners(null), []);
+});
+
+test('parseWorkers nimmt nur Sessions in den Worktrees, mit Rolle und Workspace, sortiert numerisch', () => {
+  const wt = '/repo/.claude/worktrees';
+  const ws = parseWorkers([
+    { cwd: `${wt}/fix-10`, kind: 'background', status: 'busy', sessionId: 's1', name: 'fix-10', pid: 5, startedAt: 0 },
+    { cwd: `${wt}/fix-2/spot-app`, kind: 'interactive', status: 'idle' },
+    { cwd: '/repo', kind: 'interactive', status: 'busy' },
+    { cwd: `${wt}/add-worker`, kind: 'interactive', status: 'busy' },
+    { cwd: `${wt}/club-add-1`, kind: 'interactive', status: 'busy' },
+    { cwd: `${wt}/club-x-1`, kind: 'background', status: 'idle' },
+  ], wt, WS);
+  assert.deepEqual(ws.map((w) => [w.name, w.role, w.ws, w.kind, w.status]), [
+    ['club-add-1', 'club-add', 'clubs', 'terminal', 'busy'],
+    ['fix-2', 'fix', 'code', 'terminal', 'idle'],
+    ['fix-10', 'fix', 'code', 'background', 'busy'],
+  ]);
+  assert.equal(ws[2].sessionId, 's1');
+  assert.equal(ws[2].session, 'fix-10');
+  assert.deepEqual(parseWorkers(null, wt, WS), []);
+});
+
+test('parseProjectList: Pfade ohne Kommentare, Leerzeilen und Dubletten', () => {
+  assert.deepEqual(parseProjectList('/a\n\n# alt\n /b \n/a\n'), ['/a', '/b']);
+  assert.deepEqual(parseProjectList(''), []);
+});
+
+test('normalizeConfig: Vorgaben, ungültige Werte fallen weg, publicConfig ohne Pfade', () => {
+  assert.equal(normalizeConfig(null), null);
+  assert.equal(normalizeConfig({ root: '/r', slug: 'Böse Slug' }), null);
+  const c = normalizeConfig({ root: '/r', slug: 'regiehub', name: 'RegieHub', base: 'release-2.1.0',
+    roles: ['fix', 'verify', 'x;rm'], modules: ['server', 'admin', '../x'], drain: '/r/.git/regiehub-workers-drain' });
+  assert.deepEqual(c.roles, ['fix', 'verify']);
+  assert.deepEqual(c.modules, ['server', 'admin']);
+  assert.equal(c.base, 'release-2.1.0');
+  // ohne workspaces (beadskit 1.0): code aus den Rollen, Repo nur das Projekt, keine Runner
+  assert.deepEqual(c.workspaces, [{ key: 'code', name: 'Code', roles: ['fix', 'verify'],
+    phases: [{ key: 'fix', title: null }, { key: 'verify', title: null }, { key: 'merge', title: null }] }]);
+  assert.deepEqual(c.repos, [{ key: '.', path: '/r' }]);
+  assert.equal(c.runners, false);
+  assert.deepEqual(normalizeConfig({ root: '/r', slug: 's' }).roles, ['fix', 'search', 'verify', 'regress']);
+  const pub = publicConfig(CFG);
+  assert.equal('root' in pub || 'drain' in pub || 'autorestart' in pub, false);
+  assert.deepEqual(pub.repos, ['.', 'side']);
+  // Workspaces mit kaputten Phasen oder fremden Rollen fallen weg
+  const w = normalizeConfig({ root: '/r', slug: 's', roles: ['fix', 'a'], workspaces: [
+    { key: 'code', phases: [{ key: 'fix' }], roles: ['fix'] },
+    { key: 'Böse', phases: [{ key: 'x' }], roles: ['a'] },
+    { key: 'leer', phases: [], roles: ['a'] },
+    { key: 'fremd', phases: [{ key: 'x' }], roles: ['nicht-da'] },
+  ] });
+  assert.deepEqual(w.workspaces.map((x) => x.key), ['code']);
+});
+
+test('buildWorkspaces: Spalten, Ziele, Kennzahlen und Texte aus Config und Projektdatei', () => {
+  assert.deepEqual(CODE.cols.map(([k, t]) => [k, t]), [['ready', 'Bereit'], ['fix', 'In Arbeit'], ['verify', 'Verify'], ['merge', 'Merge'], ['done', 'Erledigt']]);
+  assert.deepEqual(CODE.moveTargets, ['ready', 'verify', 'merge', 'human', 'deferred', 'done']);
+  assert.equal(CODE.readyPhase, 'fix');
+  assert.equal(CODE.colors.fix, 'var(--fix)');
+  assert.equal(CODE.prs, true);
+  assert.equal(CODE.group.prefix, 'modul:');
+  assert.ok(CODE.kpis.some(([k]) => k === 'mergedToday'));
+  assert.deepEqual(CLUBS.cols.map(([k, t]) => [k, t]), [['ready', 'Bereit'], ['place', 'Anlegen'], ['settings', 'Settings'], ['test', 'Test'], ['done', 'Erledigt']]);
+  assert.deepEqual(CLUBS.cols[2].slice(2), ['#1ea0aa', 'SiteSetting einrichten']);
+  assert.deepEqual(CLUBS.moveTargets, ['ready', 'settings', 'test', 'human', 'deferred', 'done']);
+  assert.equal(CLUBS.colors['club-add'], 'rgb(230 120 30)');
+  assert.equal(CLUBS.colors['club-test'], 'var(--muted)');
+  assert.equal(CLUBS.roleLabels['club-add'], 'Anlegen');
+  assert.equal(CLUBS.roleLabels['club-search'], 'Club search');
+  assert.equal(CLUBS.prs, false);
+  assert.deepEqual(CLUBS.split, [{ key: 'activate', label: 'aktivieren', title: 'zum Aktivieren' }]);
+  assert.deepEqual(CLUBS.kpis.slice(0, 3).map(([k]) => k), ['human', 'activate', 'open']);
+  assert.deepEqual(CLUBS.defaults, { 'club-search': 1, 'club-add': 1, 'club-settings': 2, 'club-test': 1 });
+  // CSS aus der Projektdatei nur, wenn es eine Farbe ist
+  const evil = buildWorkspaces(CFG, normalizeExt({ workspaces: { code: { colors: { fix: 'red;}</style><script>' }, cols: { ready: { color: 'url(x)' } } } } }));
+  assert.equal(evil.code.colors.fix, 'var(--fix)');
+  assert.equal(evil.code.cols[0][2], 'var(--ready)');
+});
+
+test('groupIssues: code ohne ws:clubs-Issues, clubs mit eigenen Spalten und split', () => {
+  const issues = [
+    { id: 'c-1', status: 'open', labels: ['phase:fix'], priority: 2 },
+    { id: 'c-2', status: 'open', labels: ['phase:fix', 'ws:code'], priority: 2 },
+    { id: 'k-1', status: 'open', labels: ['ws:clubs', 'phase:place', 'stadt:Bonn'], priority: 2 },
+    { id: 'k-2', status: 'in_progress', labels: ['ws:clubs', 'phase:place'], priority: 2, lease_expires_at: '2026-10-16T11:00:00Z' },
+    { id: 'k-3', status: 'in_progress', labels: ['ws:clubs', 'phase:settings'], priority: 2 },
+    { id: 'k-4', status: 'open', labels: ['ws:clubs', 'phase:test'], priority: 2 },
+    { id: 'k-5', status: 'open', labels: ['ws:clubs', 'phase:test', 'human'], priority: 1 },
+    { id: 'k-6', status: 'open', labels: ['ws:clubs', 'phase:test', 'human', 'aktivieren'], priority: 2 },
+    { id: 'k-7', status: 'closed', labels: ['ws:clubs'], priority: 2, closed_at: '2026-10-16T10:00:00Z' },
+    { id: 'k-8', status: 'deferred', labels: ['ws:clubs', 'phase:place'], priority: 2 },
+    { id: 'k-9', issue_type: 'epic', status: 'open', labels: ['ws:clubs'], priority: 2 },
+  ];
+  const ids = (cols) => Object.fromEntries(Object.entries(cols).map(([k, v]) => [k, v.map((i) => i.id)]));
+  assert.deepEqual(ids(groupIssues(issues, CODE, WS, NOW)), {
+    human: [], ready: ['c-1', 'c-2'], fix: [], verify: [], merge: [], done: [], deferred: [],
+  });
+  const clubs = groupIssues(issues, CLUBS, WS, NOW);
+  assert.deepEqual(ids(clubs), {
+    human: ['k-5'], activate: ['k-6'], ready: ['k-1'], place: ['k-2'], settings: ['k-3'], test: ['k-4'],
+    done: ['k-7'], deferred: ['k-8'],
+  });
+  const m = metrics(clubs, CLUBS, [], NOW);
+  assert.equal(m.human, 1);
+  assert.equal(m.activate, 1);
+  assert.equal(m.place, 1);
+  assert.equal(m.working, 1);
+  assert.equal(m.stale, 1);
+  assert.equal(wsOfIssue({ labels: ['ws:unbekannt'] }, WS), 'code');
+  assert.equal(wsOfIssue({ labels: ['ws:__proto__'] }, WS), 'code');
+  // jede Board-Spalte der Beschreibung hat eine Spalte im Ergebnis
+  for (const def of Object.values(WS)) {
+    const cols = groupIssues([], def, WS, NOW);
+    for (const [k] of def.cols) assert.ok(Array.isArray(cols[k]), `${def.name}.${k}`);
+    for (const s of def.split) assert.ok(Array.isArray(cols[s.key]), `${def.name}.${s.key}`);
+  }
+});
+
+test('planIssueAction: in clubs ist Bereit phase:place, verschieben entfernt split-Labels', () => {
+  const cur = { labels: ['ws:clubs', 'phase:test', 'human', 'aktivieren'], status: 'open' };
+  assert.deepEqual(planIssueAction({ id: 'spot-1', action: 'move', to: 'ready' }, cur, CLUBS, D), [
+    ['update', 'spot-1', '--remove-label', 'human', '--remove-label', 'aktivieren', '--remove-label', 'phase:test',
+      '--add-label', 'phase:place', '--append-notes', `User-Entscheidung ${D}: verschoben nach phase:place`],
+  ]);
+  assert.deepEqual(planIssueAction({ id: 'spot-1', action: 'move', to: 'settings' }, { labels: ['ws:clubs', 'phase:place'] }, CLUBS, D), [
+    ['update', 'spot-1', '--remove-label', 'phase:place', '--add-label', 'phase:settings',
+      '--append-notes', `User-Entscheidung ${D}: verschoben nach phase:settings`],
+  ]);
+  assert.throws(() => planIssueAction({ id: 'spot-1', action: 'move', to: 'verify' }, { labels: ['ws:clubs'] }, CLUBS, D), /Ziel/);
+  assert.throws(() => planIssueAction({ id: 'spot-1', action: 'move', to: 'settings' }, { labels: [] }, CODE, D), /Ziel/);
+});
+
+test('planWorkerAction: Rollen nur im eigenen Workspace', () => {
+  const p = (body) => planWorkerAction(body, WS);
+  assert.deepEqual(p({ action: 'start', ws: 'clubs', counts: { 'club-settings': 2, 'club-add': 1 } }),
+    ['start', '--ws', 'clubs', 'club-search=0', 'club-add=1', 'club-settings=2', 'club-test=0']);
+  assert.deepEqual(p({ action: 'add', ws: 'clubs', role: 'club-add' }), ['add', 'club-add']);
+  assert.deepEqual(p({ action: 'drain', ws: 'clubs', role: 'club-test', off: true }), ['drain', 'club-test', '--off']);
+  assert.deepEqual(p({ action: 'drain', ws: 'clubs', role: 'ws' }), ['drain', '--ws', 'clubs']);
+  assert.deepEqual(p({ action: 'drain', ws: 'clubs', role: 'all' }), ['drain']);
+  assert.throws(() => p({ action: 'add', role: 'club-add' }), /Rolle/);
+  assert.throws(() => p({ action: 'add', ws: 'code', role: 'club-add' }), /Rolle/);
+  assert.throws(() => p({ action: 'drain', ws: 'clubs', role: 'fix' }), /Rolle/);
+  assert.throws(() => p({ action: 'add', ws: '__proto__', role: 'fix' }), /Workspace/);
+  assert.throws(() => p({ action: 'start', ws: 'clubs', counts: { 'club-add': 9 } }), /0–8/);
+  assert.deepEqual(p({ action: 'restart', name: 'club-settings-2' }), ['restart', 'club-settings-2']);
+  assert.deepEqual(p({ action: 'send', name: 'club-add-1', text: 'hallo' }), ['send', 'club-add-1', '--', 'hallo']);
+  assert.throws(() => p({ action: 'restart', name: 'club-1' }), /Worker/);
+  assert.throws(() => p({ action: 'restart', name: 'club-add-x' }), /Worker/);
+  // nur code: Rollen kommen aus dem Projekt
+  const small = buildWorkspaces(normalizeConfig({ root: '/r', slug: 's', roles: ['fix', 'verify'] }));
+  assert.deepEqual(planWorkerAction({ action: 'start', counts: { fix: 1, search: 4 } }, small), ['start', '--ws', 'code', 'fix=1', 'verify=0']);
+  assert.throws(() => planWorkerAction({ action: 'add', role: 'search' }, small), /Rolle/);
+  assert.throws(() => planWorkerAction({ action: 'stop', name: 'search-1' }, small), /Worker/);
+});
+
+test('planCreate: Workspace-Labels, Zusatzfelder als Label, Typ aus dem Workspace', () => {
+  assert.deepEqual(planCreate({ title: 'Club: Bahnhof (Bad Honnef)', stadt: '  Bad  Honnef ', priority: 2 }, CLUBS, CFG.modules), [
+    ['create', '--title=Club: Bahnhof (Bad Honnef)', '--description=Club: Bahnhof (Bad Honnef)', '--priority=2', '--type=task',
+      '--labels=ws:clubs,phase:place,stadt:bad-honnef'],
+  ]);
+  assert.equal(labelSlug('Mülheim an der Ruhr'), 'muelheim-an-der-ruhr');
+  assert.equal(labelSlug('Gießen'), 'giessen');
+  assert.equal(labelSlug('Bonn,human'), 'bonn-human');
+  assert.equal(labelSlug(''), '');
+  assert.deepEqual(planCreate({ title: 'Club ohne Stadt', human: true }, CLUBS, CFG.modules)[0].at(-1),
+    '--labels=ws:clubs,phase:place,human');
+  // Module gibt es in clubs nicht (create.modules false)
+  assert.throws(() => planCreate({ title: 'Club mit Modul', modul: 'cli' }, CLUBS, CFG.modules), /Modul/);
+  assert.throws(() => planCreate({ title: 'Club mit langer Stadt', stadt: 'x'.repeat(61) }, CLUBS, CFG.modules), /Stadt/);
+  assert.deepEqual(planCreate({ title: 'Titel lang genug', modul: 'app' }, CODE, CFG.modules)[0].at(-1), '--labels=phase:fix,modul:app');
+});
+
+test('normalizeExt und cardExtras: nur gültige Teile, Links nur http(s), Aktionen mit applies/check', () => {
+  const warns = [];
+  const ext = normalizeExt({ default: {
+    card: (it) => ({
+      logo: it.metadata?.logo, tags: ['Bonn', 7, ''],
+      links: [{ href: 'https://x.example/a', text: 'Web' }, { href: 'javascript:alert(1)', text: 'böse' }, { href: 'https://y', text: '' }],
+    }),
+    actions: [
+      { key: 'activate', title: 'Aktivieren', primary: true, applies: (it) => it.labels.includes('aktivieren'),
+        check: (it) => (it.metadata?.place_id ? null : 'place_id fehlt'), run: () => [] },
+      { key: 'kaputt', title: 'ohne run', applies: () => true },
+      { key: 'wirft', title: 'Wirft', applies: () => { throw new Error('x'); }, run: () => [] },
+    ],
+    panels: [{ key: 'cities', title: 'Neue Städte', items: () => [] }, { key: 'BAD KEY', title: 'x', items: () => [] }],
+  } }, (m) => warns.push(m));
+  assert.deepEqual(ext.actions.map((a) => a.key), ['activate', 'wirft']);
+  assert.deepEqual(ext.panels.map((p) => p.key), ['cities']);
+  assert.equal(warns.length, 2);
+  const x = cardExtras({ id: 'spot-1', labels: ['aktivieren'], metadata: { logo: 'data:image/png;base64,xx' } }, ext);
+  assert.equal(x.logo, undefined);
+  assert.deepEqual(x.tags, ['Bonn']);
+  assert.deepEqual(x.links, [{ href: 'https://x.example/a', text: 'Web' }]);
+  assert.deepEqual(x.actions, [{ key: 'activate', title: 'Aktivieren', hint: '', confirm: 'Aktivieren?', primary: true, disabled: 'place_id fehlt' }]);
+  assert.equal(cardExtras({ id: 'spot-1', labels: ['aktivieren'], metadata: { place_id: 1 } }, ext).actions[0].disabled, null);
+  // card wirft: keine Zusatzangaben, aber kein Fehler
+  assert.equal(cardExtras({ id: 'a-1', labels: [] }, normalizeExt({ card: () => { throw new Error('kaputt'); } })), null);
+  assert.equal(cardExtras({ id: 'a-1', labels: [] }, normalizeExt(null)), null);
+});
+
+test('repoOfIssue: modul:<repo> eines weiteren Repos, sonst das Projekt selbst', () => {
+  assert.equal(repoOfIssue({ labels: ['modul:side'] }, CFG.repos), 'side');
+  assert.equal(repoOfIssue({ labels: ['modul:cli'] }, CFG.repos), '.');
+  assert.equal(repoOfIssue({ labels: ['modul:.'] }, CFG.repos), '.');
+  assert.equal(repoOfIssue(null, CFG.repos), '.');
 });
