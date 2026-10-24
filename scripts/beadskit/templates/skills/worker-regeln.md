@@ -45,10 +45,10 @@ für eine Rolle (z. B. `drain fix`). Danach hören die betroffenen Worker nach d
 Schritt auf. **Vor jedem neuen Claim** (und vor jeder neuen Such- oder Prüfrunde) prüfen, die
 Rolle kommt aus dem Worktree-Namen (`fix-2` → `fix`):
 ```bash
-d="$(git rev-parse --git-common-dir)/{{SLUG}}-workers-drain"
-r=$(basename "$(git rev-parse --show-toplevel)" | sed 's/-[0-9]*$//')
-{ test -e "$d" || test -e "$d-$r"; } && echo DRAIN
+scripts/beadskit/workers drain-check
 ```
+Ein einzelner Befehl, damit die Sandbox ihn ohne Rückfrage erlaubt. Die Ausgabe beginnt mit
+`DRAIN` oder lautet `kein Drain`, der Exit-Code ist immer 0.
 - `DRAIN` → nichts Neues claimen, kurzen Bericht ausgeben, aufhören. Keine weitere Frage an
   den User. Unter `/loop` die Schleife beenden, wenn das geht; sonst endet jede weitere Runde
   sofort an dieser Prüfung.
@@ -80,3 +80,16 @@ Wie in CLAUDE.md, passend zum Modul. Vor jedem Push und nach jedem Rebase erneut
 
 ## Projektspezifisch
 <!-- Hier die Grenzen und Eigenheiten des Projekts eintragen (Server, Testgeräte, Commit-Stil, …). -->
+
+## Mehrere Repos (BK_REPOS)
+Gehören zum Projekt weitere Repos (`BK_REPOS` in `beads.project.sh`), legt das Label
+`modul:<schlüssel>` fest, in welchem Repo ein Issue bearbeitet wird. Den Pfad liefert
+`scripts/beadskit/workers repo-for <id>`. Ist es nicht dieses Repo:
+- Branch, Commits, Prüfkommandos und PR im anderen Repo, in einem eigenen Worktree dort:
+  `git -C <pfad> worktree add <pfad>/.claude/worktrees/<worker>-<id> -b fix/<id> origin/<ziel>`.
+  `<ziel>` ist der Standard-Branch des anderen Repos
+  (`git -C <pfad> rev-parse --abbrev-ref origin/HEAD`, ohne `origin/`).
+- Beim Übergeben zusätzlich `--set-metadata repo=<schlüssel>`. Verify und Merge arbeiten dann
+  mit `gh … -R <owner/name>` bzw. im Worktree des anderen Repos.
+- Prüfkommandos und Review-Pflicht des anderen Repos gelten dort (dessen `CLAUDE.md`).
+- Den Worktree im anderen Repo nach dem Merge entfernen (`git -C <pfad> worktree remove …`).

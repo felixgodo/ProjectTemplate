@@ -110,3 +110,81 @@ export async function sessionSummary(agent, opts = {}) {
   const lines = await readTail(file, opts.bytes);
   return lines.length ? summarizeTranscript(lines, { cwd: agent.cwd, ...opts }) : null;
 }
+
+// Nachrichten, die Claude Code selbst einfügt (Befehlsausgaben, Erinnerungen, Benachrichtigungen)
+const NOTE_TAGS = /^<(local-command-stdout|local-command-caveat|system-reminder|task-notification|bash-input|bash-stdout|bash-stderr)\b/;
+const tagText = (s, tag) => s.match(new RegExp(`<${tag}>([\\s\\S]*?)</${tag}>`))?.[1]?.trim() ?? '';
+
+/** Ein Text der User-Seite als Chat-Eintrag, `/befehl args` statt der Tags; null zum Auslassen. */
+function userEntry(text, at) {
+  const t = String(text ?? '').trim();
+  if (!t) return null;
+  const cmd = tagText(t, 'command-name');
+  if (cmd) return { kind: 'user', at, text: `${cmd} ${tagText(t, 'command-args')}`.trim() };
+  if (NOTE_TAGS.test(t)) return { kind: 'note', at, text: clip(t.replace(/<[^>]+>/g, ' '), 300) };
+  return { kind: 'user', at, text: t.slice(0, 8000) };
+}
+
+/**
+ * Chatverlauf aus Transkriptzeilen (älteste zuerst): Nachrichten an die Session, Antworten,
+ * Tool-Aufrufe mit Kurzbeschreibung und Ergebnis, Runden des /loop, Kontext-Zusammenfassungen.
+ * Gibt die letzten `limit` Einträge zurück, älteste zuerst. Zeilen ohne Chat-Inhalt (z. B. die
+ * großen api-request-Blobs) werden vor dem Parsen übersprungen.
+ */
+export function chatTranscript(lines, { cwd = '', limit = 200 } = {}) {
+  const out = [];
+  const tools = new Map();
+  for (const line of lines) {
+    if (!/"type":"(user|assistant|system)"/.test(line)) continue;
+    let e;
+    try { e = JSON.parse(line); } catch { continue; }
+    if (!e || typeof e !== 'object' || e.isSidechain) continue;
+    const at = e.timestamp || null;
+    if (e.type === 'system') {
+      if (e.subtype === 'scheduled_task_fire') out.push({ kind: 'round', at, text: String(e.prompt || e.content || '') });
+      else if (e.subtype === 'compact_boundary') out.push({ kind: 'note', at, text: 'Kontext zusammengefasst' });
+      continue;
+    }
+    const m = e.message;
+    if (!m || typeof m !== 'object') continue;
+    if (e.type === 'user') {
+      // isMeta: von Claude Code eingefügter Text (z. B. der Inhalt eines Skills), kein Chat
+      if (typeof m.content === 'string') {
+        const u = e.isMeta ? null : userEntry(m.content, at);
+        // die Runde eines /loop kommt danach noch einmal als Befehl
+        const prev = out.at(-1);
+        if (u && !(prev?.kind === 'round' && prev.text === u.text)) out.push(u);
+        continue;
+      }
+      for (const c of Array.isArray(m.content) ? m.content : []) {
+        if (c?.type === 'tool_result') {
+          const tool = tools.get(c.tool_use_id);
+          if (!tool) continue;
+          const body = Array.isArray(c.content)
+            ? c.content.filter((x) => x?.type === 'text').map((x) => x.text).join('\n')
+            : String(c.content ?? '');
+          tool.result = body.slice(0, 2000);
+          tool.error = c.is_error === true;
+        } else if (c?.type === 'text' && !e.isMeta) {
+          const u = userEntry(c.text, at);
+          if (u) out.push(u);
+        }
+      }
+      continue;
+    }
+    for (const c of Array.isArray(m.content) ? m.content : []) {
+      if (c?.type === 'text' && c.text?.trim()) {
+        out.push({ kind: 'assistant', at, text: c.text.trim().slice(0, 8000) });
+      } else if (c?.type === 'tool_use') {
+        const input = c.input || {};
+        const tool = {
+          kind: 'tool', at, name: String(c.name), summary: toolSummary(c.name, input, cwd),
+          input: JSON.stringify(input, null, 1).slice(0, 2000), result: null, error: false,
+        };
+        tools.set(c.id, tool);
+        out.push(tool);
+      }
+    }
+  }
+  return out.slice(-limit);
+}

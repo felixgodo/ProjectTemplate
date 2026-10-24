@@ -1,13 +1,21 @@
 #!/usr/bin/env node
-// Leitstand für die beads-Pipelines aller Projekte: oben „Wartet auf dich“ (Issues mit Label
-// human) mit Entscheidungsfeld, Worker-Karten (was jede Claude-Session gerade tut, aus ihrem
-// Transkript), Kanban-Board Bereit → In Arbeit → Verify → Merge → Erledigt, PRs mit CI-Stand.
-// Steuert Issues (verschieben, Priorität, Unclaim, anlegen) und Worker (add, drain, stop).
-// Liest und schreibt nur über scripts/beadskit/bdw, scripts/beadskit/workers, `claude agents|logs`,
+// Leitstand für die beads-Pipelines aller Projekte (Login mit Token oder Benutzer/Passwort): oben
+// „Wartet auf dich“ (Issues mit Label human) mit Entscheidungsfeld, Worker-Karten (was jede
+// Claude-Session gerade tut, aus ihrem Transkript), Kanban-Board je Workspace, PRs mit CI-Stand,
+// CI-Runner. Steuert Issues (verschieben, Priorität, Unclaim, anlegen), Worker (start, add, drain,
+// stop, restart, Chat: Verlauf lesen, Nachricht in den iTerm-Tab senden) und die CI-Runner auf dem
+// Server (an/aus, hinzufügen, löschen). Mit `workers autorestart` startet der Server Worker mit
+// großem Kontext zwischen zwei Runden selbst neu (Prüfung jede Minute, siehe planRestarts).
+// Liest und schreibt nur über scripts/beadskit/{bdw,workers,ci/runner-server}, `claude agents|logs`,
 // `gh` und die Transkripte unter ~/.claude/projects (nur lesend).
 //
 // Ein Prozess für alle Projekte: Die Liste steht in ~/.config/beadskit/projects.txt (ein Pfad je
-// Zeile; `workers` trägt sein Projekt bei jedem Aufruf ein). Jede API-Route nimmt ?p=<slug>.
+// Zeile; `workers` trägt sein Projekt bei jedem Aufruf ein). Jede Projekt-Route nimmt ?p=<slug>.
+// Workspaces (code und BK_WORKSPACES aus beads.project.sh): ein Issue gehört über das Label
+// ws:<name> zu einem Workspace, ohne ws:-Label zu code; /api/state?p=…&ws=… liefert Spalten und
+// Kennzahlen eines Workspaces plus deren Beschreibung, damit die Seite nichts fest verdrahtet.
+// Projektspezifisches (Knöpfe, Zusatzlisten, Links an Karten, Texte) kommt aus der optionalen
+// beads.leitstand.mjs im Projekt, siehe README.
 //
 //   node scripts/beadskit/leitstand/inbox.mjs        http://127.0.0.1:3738
 //   PORT=4000 node scripts/beadskit/leitstand/inbox.mjs
@@ -15,16 +23,17 @@
 // Schreibzugriffe nur von der eigenen Seite: Origin muss passen, und der Header
 // X-Beads-Inbox erzwingt bei fremden Seiten einen CORS-Preflight, den der Server nicht erlaubt.
 import { execFile } from 'node:child_process';
-import { createHash, createHmac, timingSafeEqual } from 'node:crypto';
-import { access, readFile } from 'node:fs/promises';
+import { createHash, createHmac, randomBytes, scrypt as scryptCb, timingSafeEqual } from 'node:crypto';
+import { access, readFile, stat } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { promisify } from 'node:util';
-import { sessionSummary } from './sessions.mjs';
+import { chatTranscript, readTail, sessionSummary, transcriptPath } from './sessions.mjs';
 
 const run = promisify(execFile);
+const scrypt = promisify(scryptCb);
 const HERE = dirname(fileURLToPath(import.meta.url));
 const HOST = '127.0.0.1';
 const PORT = Number(process.env.PORT || 3738);
@@ -37,17 +46,16 @@ export const CONF_DIR = process.env.BEADSKIT_HOME || join(homedir(), '.config', 
 export const ACTIONS = ['release', 'note', 'defer', 'close'];
 export const DEFAULT_ROLES = ['fix', 'search', 'verify', 'regress'];
 export const TYPES = ['bug', 'feature', 'task', 'chore'];
-// Ziele beim Verschieben einer Karte; „In Arbeit“ fehlt absichtlich, claimen nur Worker
-export const MOVE_TARGETS = ['ready', 'verify', 'merge', 'human', 'deferred', 'done'];
 const ID_RE = /^[a-z0-9]+-[a-z0-9]+(\.[0-9]+)*$/;
 const SLUG_RE = /^[a-z0-9][a-z0-9-]{0,40}$/;
+const ROLE_RE = /^[a-z]+(-[a-z]+)*$/;
+const WS_RE = /^[a-z]+$/;
+const KEY_RE = /^[a-z][a-z0-9-]{0,30}$/;
 const DONE_WINDOW_MS = 24 * 3600 * 1000;
 const CONFIG_TTL_MS = 30_000;
-
-/** Worker-Namen eines Projekts: <rolle>-<n> mit einer seiner Rollen. */
-export function workerRe(roles = DEFAULT_ROLES) {
-  return new RegExp(`^(${roles.filter((r) => /^[a-z]+$/.test(r)).join('|')})-\\d+$`);
-}
+// Auto-Neustart: so lange still im Transkript, und frühestens so oft je Worker
+export const RESTART_QUIET_MS = 60_000;
+export const RESTART_COOLDOWN_MS = 10 * 60_000;
 
 /** Heutiges Datum als YYYY-MM-DD (lokale Zeit). */
 export function today(now = new Date()) {
@@ -63,6 +71,114 @@ function cleanText(text, max = 4000) {
   const t = typeof text === 'string' ? text.trim() : '';
   if (t.length > max) throw new Error(`Text zu lang (max. ${max} Zeichen)`);
   return t;
+}
+
+/** Worker-Namen eines Projekts: <rolle>-<n> mit einer seiner Rollen. */
+export function workerRe(roles = DEFAULT_ROLES) {
+  return new RegExp(`^(${roles.filter((r) => ROLE_RE.test(r)).join('|')})-\\d+$`);
+}
+
+// ---- Workspaces ----
+// Vorgaben für code (die Pipeline fix → verify → merge); andere Workspaces bekommen ihre Texte
+// aus beads.project.sh (Phasen-Titel) und beads.leitstand.mjs (workspaces.<name>).
+const CODE_ROLE_LABELS = { fix: 'Fix', verify: 'Verify', search: 'Suche', regress: 'Regression' };
+const CODE_ROLE_COLORS = { fix: 'var(--fix)', verify: 'var(--verify)', search: 'var(--search)', regress: 'var(--regress)' };
+const CODE_COLS = {
+  ready: ['Bereit', 'var(--ready)', 'Wartet auf einen Fix-Worker'],
+  fix: ['In Arbeit', 'var(--fix)', 'Geclaimt von einem Worker'],
+  verify: ['Verify', 'var(--verify)', 'PR offen, wartet auf Prüfung'],
+  merge: ['Merge', 'var(--merge)', 'Geprüft, wartet auf den Merge-Slot'],
+};
+const PHASE_PALETTE = ['#e6781e', '#1ea0aa', '#d25096', '#7c3aed', '#3c6ed2', '#d2aa28'];
+const cap = (s) => s.charAt(0).toUpperCase() + s.slice(1);
+const str = (v, d = '') => (typeof v === 'string' && v ? v : d);
+const rgb = (c) => (Array.isArray(c) && c.length === 3 && c.every((n) => Number.isInteger(n) && n >= 0 && n <= 255)
+  ? `rgb(${c.join(' ')})` : null);
+// CSS-Farbe aus beads.leitstand.mjs: Hex, rgb() oder var(--x), nichts, was aus dem Attribut ausbricht
+const cssColor = (c) => (typeof c === 'string' && /^(#[0-9a-f]{3,8}|rgba?\([0-9 ,.%/]+\)|var\(--[a-z-]+\))$/i.test(c) ? c : null);
+
+/**
+ * Beschreibung aller Workspaces eines Projekts für Server und Seite (JSON-tauglich).
+ * cols: Board-Spalten [key, Titel, Farbe, Hinweis]; human, die split-Spalten und deferred zeigt
+ * die Seite außerhalb des Boards. Die erste Phase ist die, die Worker claimen: offen = „Bereit“,
+ * in Arbeit = Spalte der Phase. moveTargets: Ziele beim Verschieben (die erste Phase fehlt
+ * absichtlich, claimen nur Worker). split: human-Issues mit diesem Label bekommen eine eigene
+ * Spalte (z. B. „zum Aktivieren“).
+ */
+export function buildWorkspaces(cfg, ext = {}) {
+  const out = {};
+  for (const w of cfg.workspaces) {
+    const ui = (ext.workspaces && typeof ext.workspaces[w.key] === 'object' && ext.workspaces[w.key]) || {};
+    const code = w.key === 'code';
+    const phases = w.phases.map((p) => p.key);
+    const titleOf = Object.fromEntries(w.phases.map((p, i) => [p.key,
+      p.title || (code && CODE_COLS[p.key]?.[0]) || (i === 0 ? 'In Arbeit' : cap(p.key))]));
+    const uiCol = (k) => (ui.cols && typeof ui.cols[k] === 'object' && ui.cols[k]) || {};
+    const col = (k, title, color, hint) => [k, str(uiCol(k).title, title), cssColor(uiCol(k).color) || color, str(uiCol(k).hint, hint)];
+    const cols = [
+      col('ready', 'Bereit', 'var(--ready)', code ? CODE_COLS.ready[2] : 'Wartet auf einen Worker'),
+      ...phases.map((p, i) => col(p, titleOf[p], (code && CODE_COLS[p]?.[1]) || PHASE_PALETTE[i % PHASE_PALETTE.length],
+        (code && CODE_COLS[p]?.[2]) || (i === 0 ? 'Geclaimt von einem Worker' : ''))),
+      col('done', 'Erledigt', 'var(--done)', 'Geschlossen in den letzten 24 h'),
+    ];
+    const split = (Array.isArray(ui.split) ? ui.split : [])
+      .filter((s) => s && KEY_RE.test(s.key) && typeof s.label === 'string' && s.label && !phases.includes(s.key))
+      .map((s) => ({ key: s.key, label: s.label, title: str(s.title, s.key) }));
+    const roleLabels = Object.fromEntries(w.roles.map((r) => [r,
+      str(ui.roleLabels?.[r], (code && CODE_ROLE_LABELS[r]) || cap(r.replace(/-/g, ' ')))]));
+    const colors = Object.fromEntries(w.roles.map((r) => [r,
+      cssColor(ui.colors?.[r]) || (code && CODE_ROLE_COLORS[r]) || rgb(cfg.colors?.[r]) || 'var(--muted)']));
+    const group = ui.group && typeof ui.group.prefix === 'string' && /^[a-z-]+:$/.test(ui.group.prefix)
+      ? { prefix: ui.group.prefix, all: str(ui.group.all, 'alle') } : { prefix: 'modul:', all: 'alle Module' };
+    const create = ui.create && typeof ui.create === 'object' ? ui.create : {};
+    const fields = (Array.isArray(create.fields) ? create.fields : [])
+      .filter((f) => f && KEY_RE.test(f.name) && typeof f.prefix === 'string' && /^[a-z-]+:$/.test(f.prefix))
+      .map((f) => ({ name: f.name, label: str(f.label, f.name), placeholder: str(f.placeholder), prefix: f.prefix }));
+    out[w.key] = {
+      name: w.key,
+      label: str(ui.name, w.name || cap(w.key)),
+      roles: w.roles,
+      roleLabels,
+      colors,
+      defaults: Object.fromEntries(w.roles.map((r) => [r, Number(cfg.start?.[r] ?? 0)])),
+      phases,
+      readyPhase: phases[0],
+      moveTargets: ['ready', ...phases.slice(1), 'human', 'deferred', 'done'],
+      cols,
+      split,
+      group,
+      kpis: Array.isArray(ui.kpis) ? ui.kpis : [
+        ['human', 'wartet auf dich'], ...split.map((s) => [s.key, s.title]), ['open', 'bereit'],
+        ...phases.map((p, i) => [p, i === 0 ? 'in Arbeit' : titleOf[p]]),
+        ...(code ? [['mergedToday', 'heute gemergt']] : []),
+        ['done24h', 'erledigt (24 h)'], ['leadMs', 'Ø Durchlauf (24 h)'], ['stale', 'Claims abgelaufen']],
+      create: {
+        type: TYPES.includes(create.type) ? create.type : code ? 'bug' : 'task',
+        modules: create.modules ?? code,
+        fields,
+        title: str(create.title, code ? 'Neues Issue' : `Neu: ${str(ui.name, w.name || cap(w.key))}`),
+        titlePlaceholder: str(create.titlePlaceholder, code ? 'Modul: was passiert, wann, warum es falsch ist' : ''),
+        descriptionPlaceholder: str(create.descriptionPlaceholder, code ? 'Fundstelle, Schritte zum Nachstellen, erwartetes Verhalten' : ''),
+      },
+      // HTML-Hinweise kommen nur aus dem Projekt selbst (beads.leitstand.mjs), nie aus beads
+      humanHint: str(ui.humanHint),
+      release: str(ui.release, code ? 'Freigeben an Fix' : 'Freigeben'),
+      prs: ui.prs ?? code,
+    };
+  }
+  return out;
+}
+
+/** Workspace eines Issues: Label ws:<name>, ohne (oder mit unbekanntem) zu code. */
+export function wsOfIssue(issue, workspaces) {
+  const l = (issue?.labels || []).find((x) => typeof x === 'string' && x.startsWith('ws:'));
+  const w = l?.slice(3);
+  return w && Object.hasOwn(workspaces, w) ? w : 'code';
+}
+
+/** Workspace einer Rolle (fix → code, club-add → clubs), null wenn unbekannt. */
+export function wsOfRole(role, workspaces) {
+  return Object.keys(workspaces).find((w) => workspaces[w].roles.includes(role)) ?? null;
 }
 
 /**
@@ -91,10 +207,11 @@ export function planDecision({ id, action, text }, date = today()) {
 
 /**
  * Übersetzt eine Issue-Aktion aus dem Board in bdw-Aufrufe. `current` ist der aktuelle Stand
- * des Issues (labels, status, assignee) aus `bdw show`, damit nur vorhandene Labels entfernt werden.
- *   priority {value 0–4} · move {to: MOVE_TARGETS, text?} · unclaim
+ * des Issues (labels, status, assignee) aus `bdw show`, damit nur vorhandene Labels entfernt werden;
+ * `ws` die Beschreibung seines Workspaces (buildWorkspaces).
+ *   priority {value 0–4} · move {to: ws.moveTargets, text?} · unclaim
  */
-export function planIssueAction({ id, action, value, to, text }, current = {}, date = today()) {
+export function planIssueAction({ id, action, value, to, text }, current = {}, ws, date = today()) {
   checkId(id);
   const t = cleanText(text);
   const labels = Array.isArray(current.labels) ? current.labels : [];
@@ -111,7 +228,7 @@ export function planIssueAction({ id, action, value, to, text }, current = {}, d
       return [['unclaim', id, '--force', '--if-assignee', current.assignee]];
     }
     case 'move': {
-      if (!MOVE_TARGETS.includes(to)) throw new Error('unbekanntes Ziel');
+      if (!ws.moveTargets.includes(to)) throw new Error('unbekanntes Ziel');
       const note = (what) => ['--append-notes', `User-Entscheidung ${date}: ${what}${t ? `. ${t}` : ''}`];
       if (to === 'done') {
         if (!t) throw new Error('Zum Schließen bitte einen Grund eintragen');
@@ -134,8 +251,10 @@ export function planIssueAction({ id, action, value, to, text }, current = {}, d
         if (!labels.includes('human')) update.push('--add-label', 'human');
         update.push(...note('braucht Entscheidung'));
       } else {
-        const phase = to === 'ready' ? 'fix' : to;
+        const phase = to === 'ready' ? ws.readyPhase : to;
         if (labels.includes('human')) update.push('--remove-label', 'human');
+        // split-Labels (z. B. aktivieren) gelten nur zusammen mit human
+        for (const s of ws.split) if (labels.includes(s.label)) update.push('--remove-label', s.label);
         for (const l of labels) {
           if (l.startsWith('phase:') && l !== `phase:${phase}`) update.push('--remove-label', l);
         }
@@ -150,28 +269,58 @@ export function planIssueAction({ id, action, value, to, text }, current = {}, d
   }
 }
 
-/** Neues Issue aus dem Formular; landet mit phase:fix (oder human) in der Warteschlange. */
-export function planCreate({ title, description, priority, modul, type, human }, modules = []) {
+/**
+ * Text als Label-Wert: klein, Umlaute als ae/oe/ue/ss, Leerzeichen als „-“, sonst nur a–z, 0–9
+ * und „-“ („Bad Honnef“ → bad-honnef). Leer bleibt leer; wirft bei zu langem Wert.
+ */
+export function labelSlug(name, what = 'Wert') {
+  const s = String(name ?? '').trim().toLowerCase()
+    .replace(/ä/g, 'ae').replace(/ö/g, 'oe').replace(/ü/g, 'ue').replace(/ß/g, 'ss')
+    .normalize('NFKD').replace(/[̀-ͯ]/g, '')
+    .replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
+  if (s.length > 60) throw new Error(`${what}: höchstens 60 Zeichen`);
+  return s;
+}
+
+/**
+ * Neues Issue aus dem Formular; landet in der ersten Phase des Workspaces (code: phase:fix), mit
+ * ws:<name> außerhalb von code, optional modul:<x>, den Zusatzfeldern des Workspaces als Labels
+ * (<prefix><slug>) und human.
+ */
+export function planCreate({ title, description, priority, modul, type, human, ...rest }, ws, modules = []) {
   const t = typeof title === 'string' ? title.replace(/\s+/g, ' ').trim() : '';
   if (t.length < 5 || t.length > 200) throw new Error('Titel 5–200 Zeichen');
   const d = cleanText(description, 20_000);
   const p = Number(priority ?? 2);
   if (!Number.isInteger(p) || p < 0 || p > 4) throw new Error('Priorität 0–4');
-  if (modul && !modules.includes(modul)) throw new Error('unbekanntes Modul');
-  const ty = type || 'bug';
+  const ty = type || ws.create.type;
   if (!TYPES.includes(ty)) throw new Error('unbekannter Typ');
-  const labels = ['phase:fix', ...(modul ? [`modul:${modul}`] : []), ...(human ? ['human'] : [])];
+  if (modul && (!ws.create.modules || !modules.includes(modul))) throw new Error('unbekanntes Modul');
+  const extra = ws.create.fields.map((f) => {
+    const v = labelSlug(rest[f.name], f.label);
+    return v ? `${f.prefix}${v}` : null;
+  }).filter(Boolean);
+  const labels = [...(ws.name === 'code' ? [] : [`ws:${ws.name}`]), `phase:${ws.readyPhase}`,
+    ...(modul ? [`modul:${modul}`] : []), ...extra, ...(human ? ['human'] : [])];
   // Werte immer als --flag=wert: ein Titel wie „--force …“ bleibt so ein Wert
   return [['create', `--title=${t}`, `--description=${d || t}`, `--priority=${p}`, `--type=${ty}`,
     `--labels=${labels.join(',')}`]];
 }
 
-/** Argumente für scripts/beadskit/workers. */
-export function planWorkerAction({ action, role, name, force, off, counts }, roles = DEFAULT_ROLES) {
+/**
+ * Argumente für scripts/beadskit/workers. `ws` (Standard code) bestimmt, welche Rollen start, add
+ * und drain annehmen. drain mit role 'all' = globaler Drain, role 'ws' = alle Rollen des Workspaces.
+ */
+export function planWorkerAction({ action, role, name, force, off, counts, threshold, text, ws }, workspaces) {
+  const w = ws ?? 'code';
+  if (typeof w !== 'string' || !Object.hasOwn(workspaces, w)) throw new Error('unbekannter Workspace');
+  const roles = workspaces[w].roles;
+  const all = Object.values(workspaces).flatMap((x) => x.roles);
+  const re = workerRe(all);
   switch (action) {
     case 'start': {
-      // Gesamtzahl je Rolle; start hebt auch einen Drain auf
-      const args = ['start'];
+      // Gesamtzahl je Rolle des Workspaces; start hebt auch dessen Drain auf
+      const args = ['start', '--ws', w];
       for (const r of roles) {
         const n = Number(counts?.[r] ?? 0);
         if (!Number.isInteger(n) || n < 0 || n > 8) throw new Error(`Anzahl ${r}: 0–8`);
@@ -182,24 +331,88 @@ export function planWorkerAction({ action, role, name, force, off, counts }, rol
     case 'add':
       if (!roles.includes(role)) throw new Error('unbekannte Rolle');
       return ['add', role];
-    case 'drain':
-      if (role !== 'all' && !roles.includes(role)) throw new Error('unbekannte Rolle');
-      return ['drain', ...(role === 'all' ? [] : [role]), ...(off ? ['--off'] : [])];
+    case 'drain': {
+      const what = role === 'all' ? [] : role === 'ws' ? ['--ws', w] : roles.includes(role) ? [role] : null;
+      if (!what) throw new Error('unbekannte Rolle');
+      return ['drain', ...what, ...(off ? ['--off'] : [])];
+    }
     case 'stop':
-      if (typeof name !== 'string' || !workerRe(roles).test(name)) throw new Error('unbekannter Worker');
-      return ['stop', name, ...(force ? ['--force'] : [])];
+      if (name === 'all') return ['stop', '--all', ...(force ? ['--force'] : [])];
+    // falls through
+    case 'restart':
+      if (typeof name !== 'string' || !re.test(name)) throw new Error('unbekannter Worker');
+      return [action, name, ...(force ? ['--force'] : [])];
+    case 'send': {
+      if (typeof name !== 'string' || !re.test(name)) throw new Error('unbekannter Worker');
+      // eine Zeile: Enter im Tab schickt ab, Steuerzeichen würden die Oberfläche bedienen
+      // eslint-disable-next-line no-control-regex
+      const t = String(text ?? '').replace(/[\r\n\t]+/g, ' ').replace(/[\x00-\x1f\x7f]/g, '').trim();
+      if (!t) throw new Error('kein Text');
+      if (t.length > 4000) throw new Error('Text zu lang (höchstens 4000 Zeichen)');
+      return ['send', name, '--', t];
+    }
+    case 'autorestart': {
+      if (off) return ['autorestart', '--off'];
+      const n = Number(threshold);
+      if (!Number.isInteger(n) || n < 50_000 || n > 900_000) throw new Error('Schwelle: 50k–900k Tokens');
+      return ['autorestart', '--over', String(n)];
+    }
     default:
       throw new Error('unbekannte Aktion');
   }
 }
 
-/** Ordnet Issues den Board-Spalten zu. human hat Vorrang vor der Phase. */
-export function groupIssues(issues, now = Date.now()) {
-  const cols = { human: [], ready: [], fix: [], verify: [], merge: [], done: [], deferred: [] };
+/** Argumente für scripts/beadskit/ci/runner-server: start/stop eines Runners (1–8) oder aller, add, delete. */
+export function planRunnerAction({ action, n, force }) {
+  if (action === 'add') return ['add'];
+  if (action === 'delete') return ['delete', ...(force ? ['--force'] : [])];
+  if (action !== 'start' && action !== 'stop') throw new Error('unbekannte Aktion');
+  if (n !== 'all' && !(Number.isInteger(n) && n >= 1 && n <= 8)) throw new Error('Runner: 1–8 oder all');
+  return [action, String(n), ...(action === 'stop' && force ? ['--force'] : [])];
+}
+
+/** Normalisiert die Runner aus `runner-server status --json`; Einträge ohne gültige Nummer fallen weg. */
+export function parseRunners(list, slug = 'runner') {
+  const job = (j) => (j && typeof j === 'object' ? {
+    name: str(j.name),
+    branch: str(j.branch),
+    title: str(j.title),
+    // nur Links zu GitHub, die Seite setzt sie als href
+    url: typeof j.url === 'string' && j.url.startsWith('https://github.com/') ? j.url : null,
+    started: str(j.started, null),
+  } : null);
+  return (Array.isArray(list) ? list : [])
+    .filter((r) => r && Number.isInteger(r.n) && r.n >= 1 && r.n <= 8)
+    .map((r) => ({
+      n: r.n,
+      name: str(r.name, `${slug}-runner-${r.n}`),
+      container: str(r.container, 'missing'),
+      github: str(r.github, 'missing'),
+      busy: r.busy === true,
+      job: job(r.job),
+    }))
+    .sort((a, b) => a.n - b.n);
+}
+
+/** Gehört ein Issue aufs Board? Epics, Merge-Slot und angeheftete nicht. */
+export function isBoardIssue(raw) {
+  const labels = raw?.labels || [];
+  return !!raw && raw.issue_type !== 'epic' && !String(raw.id).endsWith('-merge-slot')
+    && !labels.includes('gt:slot') && raw.status !== 'pinned';
+}
+
+/**
+ * Ordnet die Issues eines Workspaces den Spalten zu. human hat Vorrang vor der Phase; human mit
+ * einem split-Label landet in dessen Spalte. Spätere Phasen gehen nach Label (die letzte zuerst),
+ * die erste nach Status: offen = ready, in Arbeit = Spalte der Phase.
+ */
+export function groupIssues(issues, ws, workspaces, now = Date.now()) {
+  const later = ws.phases.slice(1).reverse();
+  const cols = Object.fromEntries(['human', ...ws.split.map((s) => s.key), 'ready', ...ws.phases, 'done', 'deferred']
+    .map((k) => [k, []]));
   for (const raw of Array.isArray(issues) ? issues : []) {
+    if (!isBoardIssue(raw) || wsOfIssue(raw, workspaces) !== ws.name) continue;
     const labels = raw.labels || [];
-    if (raw.issue_type === 'epic' || String(raw.id).endsWith('-merge-slot') || labels.includes('gt:slot')) continue;
-    if (raw.status === 'pinned') continue;
     const it = {
       ...raw,
       labels,
@@ -208,11 +421,13 @@ export function groupIssues(issues, now = Date.now()) {
     if (raw.status === 'closed') {
       if (raw.closed_at && now - Date.parse(raw.closed_at) <= DONE_WINDOW_MS) cols.done.push(it);
     } else if (raw.status === 'deferred') cols.deferred.push(it);
-    else if (labels.includes('human')) cols.human.push(it);
-    else if (labels.includes('phase:merge')) cols.merge.push(it);
-    else if (labels.includes('phase:verify')) cols.verify.push(it);
-    else if (raw.status === 'in_progress') cols.fix.push(it);
-    else cols.ready.push(it);
+    else if (labels.includes('human')) cols[ws.split.find((s) => labels.includes(s.label))?.key ?? 'human'].push(it);
+    else {
+      const p = later.find((x) => labels.includes(`phase:${x}`));
+      if (p) cols[p].push(it);
+      else if (raw.status === 'in_progress') cols[ws.readyPhase].push(it);
+      else cols.ready.push(it);
+    }
   }
   for (const [k, list] of Object.entries(cols)) {
     if (k === 'done') list.sort((a, b) => String(b.closed_at).localeCompare(String(a.closed_at)));
@@ -221,22 +436,21 @@ export function groupIssues(issues, now = Date.now()) {
   return cols;
 }
 
-/** Kennzahlen für die Kopfleiste. */
-export function metrics(cols, merged = [], now = Date.now()) {
+/** Kennzahlen für die Kopfleiste: die Länge jeder Spalte unter ihrem Schlüssel plus Summen. */
+export function metrics(cols, ws, merged = [], now = Date.now()) {
   const day = today(new Date(now));
   const lead = cols.done
     .filter((i) => i.created_at && i.closed_at)
     .map((i) => Date.parse(i.closed_at) - Date.parse(i.created_at));
+  const n = (k) => cols[k]?.length ?? 0;
   return {
-    open: cols.ready.length,
-    working: cols.fix.length,
-    verify: cols.verify.length,
-    merge: cols.merge.length,
-    human: cols.human.length,
-    done24h: cols.done.length,
+    ...Object.fromEntries(Object.keys(cols).map((k) => [k, n(k)])),
+    open: n('ready'),
+    working: n(ws.readyPhase),
+    done24h: n('done'),
     mergedToday: merged.filter((p) => p.mergedAt && today(new Date(p.mergedAt)) === day).length,
     leadMs: lead.length ? Math.round(lead.reduce((a, b) => a + b, 0) / lead.length) : null,
-    stale: [...cols.fix, ...cols.verify, ...cols.merge].filter((i) => i.stale).length,
+    stale: ws.phases.flatMap((k) => cols[k]).filter((i) => i.stale).length,
   };
 }
 
@@ -257,20 +471,28 @@ export function prSummary(pr) {
   return { ...rest, ci, checks: checks.filter((c) => c.state !== 'SKIPPED') };
 }
 
+/** Repo-Schlüssel eines Issues: modul:<schlüssel> eines weiteren Repos (BK_REPOS), sonst „.“. */
+export function repoOfIssue(issue, repos = []) {
+  const labels = issue?.labels || [];
+  return repos.find((r) => r.key !== '.' && labels.includes(`modul:${r.key}`))?.key ?? '.';
+}
+
 /**
- * Laufende Worker aus `claude agents --json`: Sessions in .claude/worktrees/<rolle>-<n>.
- * Andere Worktrees (z. B. eine Arbeits-Session) zählen nicht als Worker.
+ * Laufende Worker aus `claude agents --json`: Sessions in .claude/worktrees/<rolle>-<n>, mit
+ * Workspace. Andere Worktrees (z. B. eine Arbeits-Session) zählen nicht als Worker.
  */
-export function parseWorkers(agents, wtDir, roles = DEFAULT_ROLES) {
+export function parseWorkers(agents, wtDir, workspaces) {
   const prefix = wtDir.endsWith('/') ? wtDir : `${wtDir}/`;
-  const re = workerRe(roles);
+  const re = workerRe(Object.values(workspaces).flatMap((w) => w.roles));
   return (Array.isArray(agents) ? agents : [])
     .filter((a) => typeof a.cwd === 'string' && a.cwd.startsWith(prefix))
     .map((a) => {
       const name = a.cwd.slice(prefix.length).split('/')[0];
+      const role = name.replace(/-\d+$/, '');
       return {
         name,
-        role: name.replace(/-\d+$/, ''),
+        role,
+        ws: wsOfRole(role, workspaces),
         kind: a.kind === 'background' ? 'background' : 'terminal',
         status: a.status || '?',
         session: a.name || null,
@@ -284,6 +506,24 @@ export function parseWorkers(agents, wtDir, roles = DEFAULT_ROLES) {
     .sort((a, b) => a.name.localeCompare(b.name, 'de', { numeric: true }));
 }
 
+/**
+ * Worker, die der Auto-Neustart jetzt neu starten soll: idle zwischen zwei Runden, kein Issue in
+ * Arbeit, nicht Halter des Merge-Slots, kein Drain, keine wartende Nachricht, Kontext über der
+ * Schwelle, seit RESTART_QUIET_MS still und nicht innerhalb des Cooldowns schon versucht.
+ * `workers` wie in state() (mit activity und issues). `workers restart` prüft selbst noch einmal.
+ */
+export function planRestarts(workers, { threshold, slotHolder = null, lastRestart = new Map(), now = Date.now() } = {}) {
+  if (!Number.isFinite(threshold) || threshold <= 0) return [];
+  return (Array.isArray(workers) ? workers : []).filter((w) => {
+    const a = w.activity;
+    if (w.status !== 'idle' || w.drained || w.issues?.length || w.name === slotHolder) return false;
+    if (!a || !(a.contextTokens > threshold) || a.pending?.length) return false;
+    const last = Date.parse(a.lastAt);
+    if (!Number.isFinite(last) || now - last < RESTART_QUIET_MS) return false;
+    return !(now - (lastRestart.get(w.name) ?? -Infinity) < RESTART_COOLDOWN_MS);
+  }).map((w) => w.name);
+}
+
 /** Projektpfade aus projects.txt: ein Pfad je Zeile, # und Leerzeilen zählen nicht, ohne Dubletten. */
 export function parseProjectList(text) {
   const out = [];
@@ -295,28 +535,119 @@ export function parseProjectList(text) {
   return out;
 }
 
-/** Prüft die Ausgabe von `workers config` und ergänzt Vorgaben; null bei Unbrauchbarem. */
+/**
+ * Prüft die Ausgabe von `workers config` und ergänzt Vorgaben; null bei Unbrauchbarem.
+ * Eine Config ohne workspaces (beadskit 1.0) bekommt den Workspace code aus ihren Rollen.
+ */
 export function normalizeConfig(cfg) {
   if (!cfg || typeof cfg !== 'object' || typeof cfg.root !== 'string' || !SLUG_RE.test(cfg.slug || '')) return null;
-  const words = (a) => (Array.isArray(a) ? a.filter((x) => typeof x === 'string' && /^[a-z0-9-]+$/.test(x)) : []);
-  const roles = words(cfg.roles).filter((r) => /^[a-z]+$/.test(r));
+  const words = (a, re = /^[a-z0-9-]+$/) => (Array.isArray(a) ? a.filter((x) => typeof x === 'string' && re.test(x)) : []);
+  const roles = words(cfg.roles, ROLE_RE);
+  const allRoles = roles.length ? roles : DEFAULT_ROLES;
+  const phase = (p) => (p && typeof p === 'object' && KEY_RE.test(p.key)
+    ? { key: p.key, title: typeof p.title === 'string' && p.title ? p.title : null } : null);
+  let workspaces = (Array.isArray(cfg.workspaces) ? cfg.workspaces : [])
+    .filter((w) => w && WS_RE.test(w.key))
+    .map((w) => ({
+      key: w.key,
+      name: typeof w.name === 'string' && w.name ? w.name : w.key,
+      phases: (Array.isArray(w.phases) ? w.phases : []).map(phase).filter(Boolean),
+      roles: words(w.roles, ROLE_RE).filter((r) => allRoles.includes(r)),
+    }))
+    .filter((w) => w.phases.length && w.roles.length);
+  if (!workspaces.some((w) => w.key === 'code')) {
+    const rest = new Set(workspaces.flatMap((w) => w.roles));
+    workspaces = [{ key: 'code', name: 'Code', phases: ['fix', 'verify', 'merge'].map((key) => ({ key, title: null })),
+      roles: allRoles.filter((r) => !rest.has(r)) }, ...workspaces];
+  }
+  const repos = (Array.isArray(cfg.repos) ? cfg.repos : [])
+    .filter((r) => r && typeof r.path === 'string' && (r.key === '.' || KEY_RE.test(r.key)));
   return {
     root: cfg.root,
     name: typeof cfg.name === 'string' && cfg.name ? cfg.name : cfg.slug,
     slug: cfg.slug,
     base: typeof cfg.base === 'string' && cfg.base ? cfg.base : 'main',
-    roles: roles.length ? roles : DEFAULT_ROLES,
+    roles: allRoles,
     modules: words(cfg.modules),
     drain: typeof cfg.drain === 'string' ? cfg.drain : null,
+    autorestart: typeof cfg.autorestart === 'string' ? cfg.autorestart : null,
     start: cfg.start && typeof cfg.start === 'object' ? cfg.start : {},
     prompts: cfg.prompts && typeof cfg.prompts === 'object' ? cfg.prompts : {},
+    colors: cfg.colors && typeof cfg.colors === 'object' ? cfg.colors : {},
+    workspaces,
+    repos: repos.some((r) => r.key === '.') ? repos : [{ key: '.', path: cfg.root }, ...repos],
+    runners: cfg.runners === true,
   };
 }
 
 /** Öffentlicher Teil einer Projekt-Config für die Seite (ohne lokale Pfade). */
 export function publicConfig(cfg) {
-  const { root, drain, ...rest } = cfg;
-  return rest;
+  const { root, drain, autorestart, repos, ...rest } = cfg;
+  return { ...rest, repos: repos.map((r) => r.key) };
+}
+
+/**
+ * Projektdatei beads.leitstand.mjs prüfen: nur bekannte Teile mit passender Form, der Rest fällt
+ * weg (mit Hinweis). So kann ein Tippfehler im Projekt den Leitstand nicht umwerfen.
+ */
+export function normalizeExt(mod, warn = () => {}) {
+  const x = mod && typeof mod === 'object' ? (mod.default && typeof mod.default === 'object' ? mod.default : mod) : {};
+  const fn = (f) => (typeof f === 'function' ? f : null);
+  const actions = (Array.isArray(x.actions) ? x.actions : []).filter((a) => {
+    const ok = a && KEY_RE.test(a.key) && typeof a.title === 'string' && fn(a.applies) && fn(a.run);
+    if (!ok) warn(`Aktion ${a?.key ?? '?'} ohne key/title/applies/run, ignoriert`);
+    return ok;
+  });
+  const panels = (Array.isArray(x.panels) ? x.panels : []).filter((p) => {
+    const ok = p && KEY_RE.test(p.key) && typeof p.title === 'string' && fn(p.items);
+    if (!ok) warn(`Liste ${p?.key ?? '?'} ohne key/title/items, ignoriert`);
+    return ok;
+  });
+  return {
+    workspaces: x.workspaces && typeof x.workspaces === 'object' ? x.workspaces : {},
+    card: fn(x.card),
+    actions,
+    panels,
+  };
+}
+
+const httpUrl = (u) => {
+  try {
+    const x = new URL(String(u));
+    return ['http:', 'https:'].includes(x.protocol) ? x.href : null;
+  } catch {
+    return null;
+  }
+};
+
+/**
+ * Zusatzangaben einer Karte aus card() der Projektdatei, auf sichere Werte gekürzt: logo (URL),
+ * links [{href, text}] (nur http/https), tags [Text], actions [{key, title, primary, disabled}].
+ */
+export function cardExtras(issue, ext) {
+  let c = {};
+  try { c = (ext.card && ext.card(issue)) || {}; } catch { c = {}; }
+  const links = (Array.isArray(c.links) ? c.links : [])
+    .map((l) => ({ href: httpUrl(l?.href), text: str(l?.text).slice(0, 80) }))
+    .filter((l) => l.href && l.text).slice(0, 6);
+  const tags = (Array.isArray(c.tags) ? c.tags : []).filter((t) => typeof t === 'string' && t).map((t) => t.slice(0, 40)).slice(0, 4);
+  const actions = [];
+  for (const a of ext.actions) {
+    let applies = false;
+    try { applies = !!a.applies(issue); } catch { applies = false; }
+    if (!applies) continue;
+    let disabled = null;
+    try { disabled = a.check ? a.check(issue) || null : null; } catch (e) { disabled = e.message; }
+    actions.push({ key: a.key, title: a.title, hint: str(a.hint), confirm: str(a.confirm, `${a.title}?`),
+      primary: !!a.primary, disabled: disabled ? String(disabled) : null });
+  }
+  const out = {};
+  const logo = httpUrl(c.logo);
+  if (logo) out.logo = logo;
+  if (links.length) out.links = links;
+  if (tags.length) out.tags = tags;
+  if (actions.length) out.actions = actions;
+  return Object.keys(out).length ? out : null;
 }
 
 /**
@@ -329,6 +660,12 @@ export function isOwnHost(headers, port = PORT, publicUrl = PUBLIC_URL) {
   return hosts.includes(headers.host);
 }
 
+/** Pfad der Seite selbst, auch mit Query (?p=…&ws=…). */
+export function isPagePath(url) {
+  const path = String(url ?? '').split('?')[0];
+  return path === '/' || path === '/index.html';
+}
+
 /** Prüft, ob ein schreibender Request von der eigenen Seite kommt. */
 export function isSameOrigin(headers, port = PORT, publicUrl = PUBLIC_URL) {
   if (headers['x-beads-inbox'] !== '1') return false;
@@ -338,10 +675,44 @@ export function isSameOrigin(headers, port = PORT, publicUrl = PUBLIC_URL) {
 }
 
 // ---- Login (nur aktiv, wenn eine Token-Datei existiert) ----
-// Das Token liegt nur auf dem Mac. Nach dem Login trägt ein Cookie „<ablauf>.<hmac>“ die
-// Sitzung; es überlebt Neustarts und wird ungültig, sobald das Token gewechselt wird.
+// Das Token liegt nur auf dem Mac. Ist zusätzlich ein Passwort gesetzt (leitstand-remote
+// password), meldet man sich mit Benutzer und Passwort an, sonst mit dem Token. Nach dem Login
+// trägt ein Cookie „<ablauf>.<hmac>“ die Sitzung; Schlüssel ist das Token plus die Passwortzeile.
+// Sitzungen überleben Neustarts und werden ungültig, sobald Token oder Passwort wechseln.
 export const SESSION_DAYS = 30;
 const COOKIE = 'leitstand';
+export const LOGIN_USER_RE = /^[a-z][a-z0-9._-]{1,31}$/;
+export const PASSWORD_MIN = 12;
+const SCRYPT = { N: 1 << 15, r: 8, p: 1 };
+// scrypt braucht 128 * N * r Bytes; Node erlaubt ohne maxmem nur 32 MB
+const scryptOpts = ({ N, r, p }) => ({ N, r, p, maxmem: 256 * N * r });
+
+/** Passwortzeile „<user>:scrypt$N$r$p$<salt>$<hash>“ (base64url) für die Passwort-Datei. */
+export async function hashPassword(user, password, salt = randomBytes(16)) {
+  if (!LOGIN_USER_RE.test(String(user))) throw new Error('Benutzername: a–z, 0–9, . _ -, 2–32 Zeichen, erst ein Buchstabe');
+  if (typeof password !== 'string' || [...password].length < PASSWORD_MIN) {
+    throw new Error(`Passwort: mindestens ${PASSWORD_MIN} Zeichen`);
+  }
+  const key = await scrypt(password.normalize('NFC'), salt, 32, scryptOpts(SCRYPT));
+  return `${user}:scrypt$${SCRYPT.N}$${SCRYPT.r}$${SCRYPT.p}$${salt.toString('base64url')}$${key.toString('base64url')}`;
+}
+
+/** Liest eine Passwortzeile; null, wenn sie nicht passt (auch bei absurden scrypt-Parametern). */
+export function parsePasswordLine(line) {
+  const m = String(line ?? '').trim().match(/^([a-z][a-z0-9._-]{1,31}):scrypt\$(\d+)\$(\d+)\$(\d+)\$([\w-]{16,})\$([\w-]{32,})$/);
+  if (!m) return null;
+  const [N, r, p] = [m[2], m[3], m[4]].map(Number);
+  if (N < 2 ** 14 || N > 2 ** 20 || (N & (N - 1)) !== 0 || r < 1 || r > 32 || p < 1 || p > 4) return null;
+  return { user: m[1], N, r, p, salt: Buffer.from(m[5], 'base64url'), key: Buffer.from(m[6], 'base64url') };
+}
+
+/** Prüft Benutzer und Passwort; rechnet scrypt auch bei falschem Benutzer (gleiche Laufzeit). */
+export async function verifyPassword(entry, user, password) {
+  if (!entry || typeof user !== 'string' || typeof password !== 'string' || password.length > 1024) return false;
+  const key = await scrypt(password.normalize('NFC'), entry.salt, entry.key.length, scryptOpts(entry));
+  const okKey = timingSafeEqual(key, entry.key);
+  return safeEqual(user.trim().toLowerCase(), entry.user) && okKey;
+}
 
 export function signSession(token, exp) {
   return `${exp}.${createHmac('sha256', token).update(`leitstand:${exp}`).digest('base64url')}`;
@@ -364,21 +735,74 @@ export function parseCookies(header = '') {
   const out = {};
   for (const part of String(header).split(';')) {
     const i = part.indexOf('=');
-    if (i > 0) out[part.slice(0, i).trim()] = decodeURIComponent(part.slice(i + 1).trim());
+    if (i <= 0) continue;
+    // Cookies sind nicht nach Port getrennt: ein fremdes wie „x=50%“ darf nicht jeden Request kippen
+    try {
+      out[part.slice(0, i).trim()] = decodeURIComponent(part.slice(i + 1).trim());
+    } catch { /* nicht dekodierbar: ignorieren */ }
   }
   return out;
 }
 
-/** Fehlversuche begrenzen: höchstens `max` je Fenster, danach gesperrt bis das Fenster abläuft. */
-export function loginLimiter(max = 10, windowMs = 15 * 60_000) {
-  const fails = [];
+// Chunks erst als Bytes sammeln: ein Mehrbytezeichen (ä, „) kann auf zwei Chunks verteilt sein
+export async function readBody(req, limit = 64 * 1024) {
+  const chunks = [];
+  let size = 0;
+  for await (const chunk of req) {
+    size += chunk.length;
+    if (size > limit) throw Object.assign(new Error('zu groß'), { code: 413 });
+    chunks.push(chunk);
+  }
+  try {
+    return JSON.parse(Buffer.concat(chunks).toString('utf8'));
+  } catch {
+    throw Object.assign(new Error('kein JSON'), { code: 400 });
+  }
+}
+
+/**
+ * Fehlversuche bremsen. Je Client-IP (von nginx als X-Real-IP gesetzt): ab `perIp` Fehlversuchen
+ * im Fenster ist die IP bis zum Ablauf des ältesten gesperrt. Zusätzlich global: ab `global`
+ * Fehlversuchen wartet jeder Versuch `delayMs` (verteilte Angriffe), ohne jemanden auszusperren.
+ * Ohne X-Real-IP (direkt am Mac oder ein Prozess auf dem Server am Tunnel-Port) gibt es keine
+ * Sperre, nur die globale Bremse; sonst könnte ein Fremder am Tunnel den User aussperren.
+ */
+export function loginGuard({ perIp = 5, windowMs = 15 * 60_000, global = 20, delayMs = 3000, maxIps = 10_000 } = {}) {
+  const byIp = new Map();
+  const all = [];
+  const prune = (arr, now) => { while (arr.length && arr[0] <= now - windowMs) arr.shift(); };
   return {
-    blocked(now = Date.now()) {
-      while (fails.length && fails[0] < now - windowMs) fails.shift();
-      return fails.length >= max;
+    /** Millisekunden, die diese IP noch gesperrt ist; 0 = darf. */
+    blockedFor(ip, now = Date.now()) {
+      const a = ip && byIp.get(ip);
+      if (!a) return 0;
+      prune(a, now);
+      if (!a.length) { byIp.delete(ip); return 0; }
+      return a.length >= perIp ? a[0] + windowMs - now : 0;
     },
-    fail(now = Date.now()) { fails.push(now); },
+    delay(now = Date.now()) {
+      prune(all, now);
+      return all.length >= global ? delayMs : 0;
+    },
+    fail(ip, now = Date.now()) {
+      all.push(now);
+      if (all.length > global) all.shift();  // mehr als global braucht delay() nicht
+      if (!ip) return;
+      if (!byIp.has(ip) && byIp.size >= maxIps) byIp.delete(byIp.keys().next().value);
+      const a = byIp.get(ip) || [];
+      a.push(now);
+      if (a.length > perIp) a.shift();
+      byIp.set(ip, a);
+    },
+    ok(ip) { if (ip) byIp.delete(ip); },
   };
+}
+
+/** Client-IP für die Sperre: nur X-Real-IP von nginx (Verbindung über den Tunnel), sonst null. */
+export function clientIp(req) {
+  const local = ['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(req.socket?.remoteAddress);
+  const ip = String(req.headers?.['x-real-ip'] ?? '').trim();
+  return local && /^[0-9a-f.:]{3,45}$/i.test(ip) ? ip : null;
 }
 
 async function json(cmd, args, cwd, env) {
@@ -393,8 +817,9 @@ async function json(cmd, args, cwd, env) {
 const exists = (p) => access(p).then(() => true, () => false);
 // eslint-disable-next-line no-control-regex
 const stripAnsi = (s) => s.replace(/\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b\][^\x07]*(\x07|\x1b\\)/g, '');
+const cmdOutput = (e) => stripAnsi(`${e.stdout || ''}${e.stderr || ''}`).trim() || e.message;
 
-const LOGIN_HTML = `<!doctype html>
+const loginHtml = (password) => `<!doctype html>
 <html lang="de"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Leitstand</title><style>
 :root{--bg:#f6f6f3;--panel:#fff;--ink:#1d1d1b;--muted:#6b6b66;--line:#e2e1db;--accent:#c2410c;--bad:#b91c1c}
@@ -405,15 +830,20 @@ h1{font-size:19px;margin:0}input{font:inherit;padding:9px 11px;border-radius:8px
 button{font:inherit;font-weight:600;padding:9px;border-radius:8px;border:0;background:var(--accent);color:#fff;cursor:pointer}
 p{margin:0;color:var(--muted);font-size:13px}.bad{color:var(--bad)}</style></head>
 <body><form id="f"><h1>Leitstand</h1>
-<input type="text" name="username" value="leitstand" autocomplete="username" hidden>
+${password
+    ? `<input type="text" name="user" placeholder="Benutzer" autocomplete="username" autocapitalize="none" spellcheck="false" required autofocus>
+<input type="password" name="password" placeholder="Passwort" autocomplete="current-password" required>
+<button>Anmelden</button><p id="m">Passwort ändern: <code>scripts/beadskit/leitstand/leitstand-remote password</code> auf dem Mac.</p>`
+    : `<input type="text" name="username" value="leitstand" autocomplete="username" hidden>
 <input type="password" name="token" placeholder="Zugangs-Token" autocomplete="current-password" required autofocus>
-<button>Anmelden</button><p id="m">Token: <code>scripts/beadskit/leitstand/leitstand-remote token</code> auf dem Mac.</p></form>
+<button>Anmelden</button><p id="m">Token: <code>scripts/beadskit/leitstand/leitstand-remote token</code> auf dem Mac.</p>`}</form>
 <script>
 document.getElementById('f').onsubmit = async (e) => {
   e.preventDefault();
   const m = document.getElementById('m');
   const r = await fetch('/login', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Beads-Inbox': '1' },
-    body: JSON.stringify({ token: e.target.token.value }) });
+    body: JSON.stringify(e.target.token ? { token: e.target.token.value }
+      : { user: e.target.user.value, password: e.target.password.value }) });
   if (r.ok) { location.href = '/'; return; }
   const res = await r.json().catch(() => ({}));
   m.className = 'bad'; m.textContent = res.error || 'Anmeldung fehlgeschlagen';
@@ -445,11 +875,31 @@ async function ownRoot() {
 /**
  * Projekte mit ihrer Config, kurz zwischengespeichert. Ein Projekt ohne beadskit oder mit
  * kaputter beads.project.sh fehlt einfach (Hinweis im Log), statt den Leitstand zu stören.
+ * Dazu je Projekt die Erweiterungen aus beads.leitstand.mjs (neu geladen, wenn sich die Datei
+ * ändert) und die daraus gebauten Workspaces.
  */
 function projectRegistry(selfRoot) {
   let cache = null;
   let at = 0;
   const warned = new Set();
+  const warnOnce = (msg) => { if (!warned.has(msg)) { warned.add(msg); console.warn(`Leitstand: ${msg}`); } };
+  const extCache = new Map();
+  async function loadExt(root) {
+    const file = join(root, 'beads.leitstand.mjs');
+    let mtime;
+    try { mtime = (await stat(file)).mtimeMs; } catch { return normalizeExt({}); }
+    const hit = extCache.get(file);
+    if (hit?.mtime === mtime) return hit.ext;
+    let ext;
+    try {
+      ext = normalizeExt(await import(`${pathToFileURL(file).href}?v=${mtime}`), (m) => warnOnce(`${file}: ${m}`));
+    } catch (e) {
+      warnOnce(`${file} nicht ladbar (${e.message}), ohne Erweiterungen`);
+      ext = normalizeExt({});
+    }
+    extCache.set(file, { mtime, ext });
+    return ext;
+  }
   async function load() {
     let paths = [];
     try { paths = parseProjectList(await readFile(join(CONF_DIR, 'projects.txt'), 'utf8')); } catch { /* noch keine Liste */ }
@@ -459,12 +909,11 @@ function projectRegistry(selfRoot) {
       const cmd = join(root, 'scripts/beadskit/workers');
       const cfg = (await exists(cmd)) ? normalizeConfig(await json(cmd, ['config'], root)) : null;
       if (!cfg) {
-        if (!warned.has(root)) console.warn(`Leitstand: ${root} übersprungen (kein beadskit oder beads.project.sh fehlerhaft)`);
-        warned.add(root);
+        warnOnce(`${root} übersprungen (kein beadskit oder beads.project.sh fehlerhaft)`);
         continue;
       }
       if (list.some((p) => p.slug === cfg.slug)) {
-        console.warn(`Leitstand: Slug ${cfg.slug} doppelt, ${root} übersprungen`);
+        warnOnce(`Slug ${cfg.slug} doppelt, ${root} übersprungen`);
         continue;
       }
       list.push(cfg);
@@ -480,16 +929,37 @@ function projectRegistry(selfRoot) {
       return cache;
     },
     async get(slug) {
-      return (await this.all()).find((p) => p.slug === slug) || null;
+      const cfg = (await this.all()).find((p) => p.slug === slug);
+      if (!cfg) return null;
+      const ext = await loadExt(cfg.root);
+      return { cfg, ext, workspaces: buildWorkspaces(cfg, ext) };
     },
   };
 }
 
 function startServer(token, selfRoot) {
-  const limiter = loginLimiter();
+  const passwordFile = process.env.LEITSTAND_PASSWORD_FILE || join(CONF_DIR, 'leitstand-password');
+  // bei jedem Request gelesen: ein neues Passwort gilt sofort und meldet alte Sitzungen ab
+  async function loadPassword() {
+    try {
+      const line = (await readFile(passwordFile, 'utf8')).trim();
+      const entry = parsePasswordLine(line);
+      if (!entry) console.warn(`Leitstand: Passwort-Datei ${passwordFile} unlesbar, Token-Login aktiv`);
+      return entry ? { line, entry } : null;
+    } catch {
+      return null;
+    }
+  }
+  const limiter = loginGuard();
   const publicHost = PUBLIC_URL ? new URL(PUBLIC_URL).host : null;
   const env = { ...process.env, BEADS_ACTOR: ACTOR };
   const projects = projectRegistry(selfRoot);
+  // Auto-Neustart je Projekt: letzter Versuch je Worker (für den Cooldown) und die letzten Ergebnisse
+  const restartState = new Map();
+  const restartsOf = (slug) => {
+    if (!restartState.has(slug)) restartState.set(slug, { last: new Map(), recent: [] });
+    return restartState.get(slug);
+  };
 
   // Werkzeuge eines Projekts
   function tools(cfg) {
@@ -499,6 +969,7 @@ function startServer(token, selfRoot) {
       root,
       bdw,
       workersCmd: join(root, 'scripts/beadskit/workers'),
+      runnerCmd: join(root, 'scripts/beadskit/ci/runner-server'),
       wtDir: join(root, '.claude/worktrees'),
       bd: (args) => json(bdw, [...args, '--json'], root, env),
     };
@@ -511,6 +982,17 @@ function startServer(token, selfRoot) {
     return { all, roles };
   }
 
+  // Schwelle des Auto-Neustarts in Tokens, null wenn aus
+  async function autoThreshold(cfg) {
+    if (!cfg.autorestart) return null;
+    try {
+      const n = Number((await readFile(cfg.autorestart, 'utf8')).trim());
+      return Number.isInteger(n) && n > 0 ? n : null;
+    } catch {
+      return null;
+    }
+  }
+
   async function projectList() {
     return Promise.all((await projects.all()).map(async (cfg) => {
       const human = await tools(cfg).bd(['list', '-l', 'human', '-n', '0']);
@@ -519,51 +1001,152 @@ function startServer(token, selfRoot) {
     }));
   }
 
-  async function state(cfg) {
-    const { root, bd, wtDir } = tools(cfg);
-    const [issues, slot, agents, prs, merged, drain] = await Promise.all([
+  const withActivity = (p, agents, issues, drain) => Promise.all(parseWorkers(agents, tools(p.cfg).wtDir, p.workspaces).map(async (w) => ({
+    ...w,
+    drained: !!drain.roles[w.role],
+    activity: await sessionSummary(w),
+    issues: issues.filter((i) => i.assignee === w.name && i.status === 'in_progress')
+      .map((i) => ({ id: i.id, title: i.title, pr: i.metadata?.pr ?? null, repo: repoOfIssue(i, p.cfg.repos) })),
+  })));
+
+  // Eine Runde Auto-Neustart eines Projekts; ohne vollständige Lage (beads, Slot, Agents) wird nichts angefasst
+  async function autoRestartTick(p) {
+    const threshold = await autoThreshold(p.cfg);
+    if (!threshold) return;
+    const { root, bd, workersCmd } = tools(p.cfg);
+    const [issues, slot, agents, drain] = await Promise.all([
+      bd(['list', '--status', 'in_progress']), bd(['merge-slot', 'check']),
+      json('claude', ['agents', '--json'], root), drainState(p.cfg),
+    ]);
+    if (!issues || !slot || !agents) return;
+    const rs = restartsOf(p.cfg.slug);
+    const workers = await withActivity(p, agents, issues, drain);
+    for (const name of planRestarts(workers, { threshold, slotHolder: slot.holder || null, lastRestart: rs.last })) {
+      rs.last.set(name, Date.now());
+      const tokens = workers.find((w) => w.name === name)?.activity?.contextTokens;
+      let ok = true;
+      let output;
+      try {
+        const r = await run(workersCmd, ['restart', name], { cwd: root, timeout: 120_000 });
+        output = stripAnsi(`${r.stdout}${r.stderr}`).trim();
+      } catch (e) {
+        ok = false;
+        output = cmdOutput(e);
+      }
+      console.log(`Auto-Neustart ${p.cfg.slug}/${name} (${Math.round((tokens || 0) / 1000)}k Tokens): ${ok ? 'ok' : 'verweigert'} – ${output}`);
+      rs.recent.unshift({ name, at: new Date().toISOString(), tokens: tokens ?? null, ok, output: output.slice(-300) });
+      rs.recent.length = Math.min(rs.recent.length, 10);
+    }
+  }
+
+  // PRs aller Repos des Projekts; jeder PR trägt den Schlüssel seines Repos
+  async function pullRequests(cfg) {
+    const lists = await Promise.all(cfg.repos.map(async (r) => {
+      const [open, merged] = await Promise.all([
+        json('gh', ['pr', 'list', '--state', 'open', '--json',
+          'number,title,url,mergeable,headRefName,baseRefName,isDraft,createdAt,additions,deletions,statusCheckRollup'], r.path),
+        json('gh', ['pr', 'list', '--state', 'merged', '--limit', '30', '--json', 'number,title,url,mergedAt,headRefName'], r.path),
+      ]);
+      const tag = (list) => (Array.isArray(list) ? list.map((x) => ({ ...x, repo: r.key })) : null);
+      return { open: tag(open), merged: tag(merged) };
+    }));
+    const ok = lists.every((l) => l.open);
+    return {
+      prs: lists.flatMap((l) => l.open || []).map(prSummary),
+      merged: lists.flatMap((l) => l.merged || []).sort((a, b) => String(b.mergedAt).localeCompare(String(a.mergedAt))),
+      ok,
+    };
+  }
+
+  async function state(p, wsName = 'code') {
+    const { cfg, ext, workspaces } = p;
+    const ws = workspaces[wsName];
+    const { root, bd } = tools(cfg);
+    const [issues, slot, agents, pr, drain, threshold] = await Promise.all([
       bd(['list', '--all', '-n', '0']),
       bd(['merge-slot', 'check']),
       json('claude', ['agents', '--json'], root),
-      json('gh', ['pr', 'list', '--state', 'open', '--json',
-        'number,title,url,mergeable,headRefName,baseRefName,isDraft,createdAt,additions,deletions,statusCheckRollup'], root),
-      json('gh', ['pr', 'list', '--state', 'merged', '--limit', '30', '--json', 'number,title,url,mergedAt,headRefName'], root),
+      ws.prs ? pullRequests(cfg) : Promise.resolve({ prs: [], merged: [], ok: true }),
       drainState(cfg),
+      autoThreshold(cfg),
     ]);
-    const columns = groupIssues(issues || []);
-    const live = [...columns.human, ...columns.ready, ...columns.fix, ...columns.verify, ...columns.merge];
-    const workers = await Promise.all(parseWorkers(agents, wtDir, cfg.roles).map(async (w) => ({
-      ...w,
-      drained: !!drain.roles[w.role],
-      activity: await sessionSummary(w),
-      issues: live.filter((i) => i.assignee === w.name && i.status === 'in_progress')
-        .map((i) => ({ id: i.id, title: i.title, pr: i.metadata?.pr ?? null })),
-    })));
+    const now = Date.now();
+    const columns = groupIssues(issues || [], ws, workspaces, now);
+    for (const list of Object.values(columns)) {
+      for (const it of list) {
+        const x = cardExtras(it, ext);
+        if (x) it.x = x;
+        if (it.metadata?.pr) it.pr_repo = repoOfIssue(it, cfg.repos);
+      }
+    }
+    // Claims aller Workspaces: die Worker-Karten zeigen auch Worker des anderen Workspaces
+    const live = (issues || []).filter((i) => isBoardIssue(i) && i.status === 'in_progress');
+    const workers = await withActivity(p, agents, live, drain);
+    // offene Entscheidungen je Workspace, für den Umschalter
+    const attention = Object.fromEntries(Object.keys(workspaces).map((w) => [w, 0]));
+    for (const i of issues || []) {
+      if (isBoardIssue(i) && (i.labels || []).includes('human') && !['closed', 'deferred'].includes(i.status)) attention[wsOfIssue(i, workspaces)] += 1;
+    }
+    const panels = [];
+    for (const panel of ext.panels.filter((x) => !x.ws || x.ws === ws.name)) {
+      let items = [];
+      try { items = panel.items(issues || [], now) || []; } catch (e) { console.warn(`Leitstand: Liste ${panel.key}: ${e.message}`); }
+      panels.push({
+        key: panel.key,
+        title: panel.title,
+        sub: str(panel.sub),
+        items: (Array.isArray(items) ? items : []).slice(0, 50).map((i) => ({
+          id: ID_RE.test(i?.id) ? i.id : null,
+          title: str(i?.title).slice(0, 200),
+          text: str(i?.text).slice(0, 200),
+          href: httpUrl(i?.href),
+          linkText: str(i?.linkText).slice(0, 60),
+          at: str(i?.at, null),
+        })),
+      });
+    }
     return {
       project: publicConfig(cfg),
+      workspace: ws.name,
+      workspaces,
+      attention,
       columns,
-      metrics: metrics(columns, merged || []),
+      panels,
+      metrics: metrics(columns, ws, pr.merged, now),
       slot: slot ? { available: !!slot.available, holder: slot.holder || null } : null,
       drain,
+      autorestart: { threshold, recent: restartsOf(cfg.slug).recent.slice(0, 5) },
       workers,
-      prs: (prs || []).map(prSummary),
-      merged: (merged || []).slice(0, 10),
+      prs: pr.prs,
+      merged: pr.merged.slice(0, 10),
       auth: !!token,
-      errors: [issues ? null : 'beads', agents ? null : 'claude agents', prs ? null : 'gh'].filter(Boolean),
+      errors: [issues ? null : 'beads', agents ? null : 'claude agents', pr.ok ? null : 'gh'].filter(Boolean),
       at: new Date().toISOString(),
     };
   }
 
-  async function workerDetail(cfg, name) {
-    const { root, wtDir } = tools(cfg);
-    const agents = await json('claude', ['agents', '--json'], root);
-    const w = parseWorkers(agents, wtDir, cfg.roles).find((x) => x.name === name);
+  async function findWorker(p, name) {
+    const agents = await json('claude', ['agents', '--json'], p.cfg.root);
+    return parseWorkers(agents, tools(p.cfg).wtDir, p.workspaces).find((x) => x.name === name) || null;
+  }
+
+  // Chatverlauf eines Workers aus dem Ende seines Transkripts (die api-request-Blobs sind groß)
+  async function workerChat(p, name) {
+    const w = await findWorker(p, name);
+    if (!w) return null;
+    const file = transcriptPath(w.cwd, w.sessionId);
+    const entries = file ? chatTranscript(await readTail(file, 8 * 1024 * 1024), { cwd: w.cwd, limit: 250 }) : [];
+    return { name: w.name, kind: w.kind, status: w.status, sessionId: w.sessionId, entries };
+  }
+
+  async function workerDetail(p, name) {
+    const w = await findWorker(p, name);
     if (!w) return null;
     const activity = await sessionSummary(w, { bytes: 1024 * 1024, toolLimit: 80, textLimit: 4000 });
     let logs = null;
     if (w.kind === 'background' && w.session) {
       try {
-        const { stdout } = await run('claude', ['logs', w.session], { cwd: root, timeout: 10_000, maxBuffer: 8 * 1024 * 1024 });
+        const { stdout } = await run('claude', ['logs', w.session], { cwd: p.cfg.root, timeout: 10_000, maxBuffer: 8 * 1024 * 1024 });
         logs = stripAnsi(stdout).slice(-20_000);
       } catch (e) {
         logs = `claude logs fehlgeschlagen: ${(e.stderr || e.message || '').trim()}`;
@@ -587,24 +1170,37 @@ function startServer(token, selfRoot) {
   // Login-Routen; liefert true, wenn der Request damit erledigt ist
   async function handleAuth(req, res, path) {
     if (!token) return false;
+    const pw = await loadPassword();
+    const key = pw ? `${token}\n${pw.line}` : token;
     const secure = publicHost && req.headers.host === publicHost ? '; Secure' : '';
     if (path === '/login' && req.method === 'GET') {
-      send(res, 200, LOGIN_HTML, 'text/html; charset=utf-8');
+      send(res, 200, loginHtml(!!pw), 'text/html; charset=utf-8');
       return true;
     }
     if (path === '/login' && req.method === 'POST') {
       if (!isSameOrigin(req.headers)) return send(res, 403, { error: 'nur von der Leitstand-Seite' }), true;
-      if (limiter.blocked()) return send(res, 429, { error: 'zu viele Fehlversuche, später erneut' }), true;
+      const ip = clientIp(req);
+      const blocked = limiter.blockedFor(ip);
+      if (blocked) {
+        return send(res, 429, { error: `Zu viele Fehlversuche, wieder in ${Math.ceil(blocked / 60_000)} min` },
+          undefined, { 'Retry-After': String(Math.ceil(blocked / 1000)) }), true;
+      }
+      const wait = limiter.delay();
+      if (wait) await new Promise((r) => setTimeout(r, wait));
       let body;
       try { body = await readBody(req); } catch (e) { return send(res, e.code || 400, { error: e.message }), true; }
-      if (typeof body.token !== 'string' || !safeEqual(body.token.trim(), token)) {
-        limiter.fail();
-        console.warn(`Leitstand: fehlgeschlagener Login ${new Date().toISOString()}`);
-        return send(res, 401, { error: 'Token falsch' }), true;
+      const ok = pw
+        ? await verifyPassword(pw.entry, body.user, body.password)
+        : typeof body.token === 'string' && safeEqual(body.token.trim(), token);
+      if (!ok) {
+        limiter.fail(ip);
+        console.warn(`Leitstand: fehlgeschlagener Login ${new Date().toISOString()}${ip ? ` von ${ip}` : ''}`);
+        return send(res, 401, { error: pw ? 'Benutzer oder Passwort falsch' : 'Token falsch' }), true;
       }
+      limiter.ok(ip);
       const exp = Date.now() + SESSION_DAYS * 86_400_000;
       send(res, 200, { ok: true }, undefined, {
-        'Set-Cookie': `${COOKIE}=${signSession(token, exp)}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${SESSION_DAYS * 86400}${secure}`,
+        'Set-Cookie': `${COOKIE}=${signSession(key, exp)}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${SESSION_DAYS * 86400}${secure}`,
       });
       return true;
     }
@@ -613,27 +1209,14 @@ function startServer(token, selfRoot) {
       send(res, 200, { ok: true }, undefined, { 'Set-Cookie': `${COOKIE}=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0${secure}` });
       return true;
     }
-    if (verifySession(token, parseCookies(req.headers.cookie)[COOKIE])) return false;
-    if (req.method === 'GET' && (path === '/' || path === '/index.html')) {
+    if (verifySession(key, parseCookies(req.headers.cookie)[COOKIE])) return false;
+    if (req.method === 'GET' && isPagePath(path)) {
       res.writeHead(302, { Location: '/login', 'Cache-Control': 'no-store' });
       res.end();
     } else {
       send(res, 401, { error: 'nicht angemeldet' });
     }
     return true;
-  }
-
-  async function readBody(req) {
-    let raw = '';
-    for await (const chunk of req) {
-      raw += chunk;
-      if (raw.length > 64 * 1024) throw Object.assign(new Error('zu groß'), { code: 413 });
-    }
-    try {
-      return JSON.parse(raw);
-    } catch {
-      throw Object.assign(new Error('kein JSON'), { code: 400 });
-    }
   }
 
   // Führt die bdw-Schritte nacheinander aus; bricht beim ersten Fehler ab
@@ -650,35 +1233,70 @@ function startServer(token, selfRoot) {
     return send(res, 200, { ok: true, output: out.trim() });
   }
 
+  async function showIssue(t, id) {
+    const shown = await t.bd(['show', id]);
+    return (Array.isArray(shown) ? shown[0] : shown) || null;
+  }
+
   const server = createServer(async (req, res) => {
     try {
       if (!isOwnHost(req.headers)) return send(res, 403, { error: 'falscher Host' });
       const url = new URL(req.url || '/', `http://${HOST}:${PORT}`);
       const path = url.pathname;
       if (await handleAuth(req, res, path)) return;
-      if (req.method === 'GET' && (path === '/' || path === '/index.html')) {
+      if (req.method === 'GET' && isPagePath(path)) {
         return send(res, 200, await readFile(join(HERE, 'inbox.html'), 'utf8'), 'text/html; charset=utf-8');
       }
       if (req.method === 'GET' && path === '/api/projects') return send(res, 200, await projectList());
 
       // Alles Weitere gehört zu einem Projekt
       const slug = url.searchParams.get('p') || '';
-      const cfg = SLUG_RE.test(slug) ? await projects.get(slug) : null;
-      if (!cfg) return send(res, 404, { error: `unbekanntes Projekt: ${slug || '–'}` });
+      const p = SLUG_RE.test(slug) ? await projects.get(slug) : null;
+      if (!p) return send(res, 404, { error: `unbekanntes Projekt: ${slug || '–'}` });
+      const { cfg, ext, workspaces } = p;
       const t = tools(cfg);
 
-      if (req.method === 'GET' && path === '/api/state') return send(res, 200, await state(cfg));
+      if (req.method === 'GET' && path === '/api/state') {
+        const ws = url.searchParams.get('ws') || 'code';
+        if (!Object.hasOwn(workspaces, ws)) return send(res, 400, { error: 'unbekannter Workspace' });
+        return send(res, 200, await state(p, ws));
+      }
       if (req.method === 'GET' && path.startsWith('/api/issue/')) {
         const id = decodeURIComponent(path.slice('/api/issue/'.length));
         if (!ID_RE.test(id)) return send(res, 400, { error: 'ungültige Issue-ID' });
-        const data = await t.bd(['show', id]);
-        return data ? send(res, 200, Array.isArray(data) ? data[0] : data) : send(res, 404, { error: 'nicht gefunden' });
+        const it = await showIssue(t, id);
+        if (!it) return send(res, 404, { error: 'nicht gefunden' });
+        const x = cardExtras(it, ext);
+        return send(res, 200, { ...it, ws: wsOfIssue(it, workspaces), pr_repo: repoOfIssue(it, cfg.repos), ...(x ? { x } : {}) });
+      }
+      const re = workerRe(cfg.roles);
+      if (req.method === 'GET' && path.startsWith('/api/worker/') && path.endsWith('/chat')) {
+        const name = decodeURIComponent(path.slice('/api/worker/'.length, -'/chat'.length));
+        if (!re.test(name)) return send(res, 400, { error: 'unbekannter Worker' });
+        const c = await workerChat(p, name);
+        return c ? send(res, 200, c) : send(res, 404, { error: 'Worker läuft nicht' });
       }
       if (req.method === 'GET' && path.startsWith('/api/worker/')) {
         const name = decodeURIComponent(path.slice('/api/worker/'.length));
-        if (!workerRe(cfg.roles).test(name)) return send(res, 400, { error: 'unbekannter Worker' });
-        const data = await workerDetail(cfg, name);
+        if (!re.test(name)) return send(res, 400, { error: 'unbekannter Worker' });
+        const data = await workerDetail(p, name);
         return data ? send(res, 200, data) : send(res, 404, { error: 'Worker läuft nicht' });
+      }
+      if (req.method === 'GET' && path === '/api/runners') {
+        if (!cfg.runners) return send(res, 404, { error: 'keine eigenen CI-Runner' });
+        // eigene Route: ssh zum Server dauert, ein Fehler soll das Board nicht stören
+        try {
+          const { stdout } = await run(t.runnerCmd, ['status', '--json'], { cwd: t.root, timeout: 30_000 });
+          const d = JSON.parse(stdout);
+          return send(res, 200, {
+            runners: parseRunners(Array.isArray(d) ? d : d?.runners, cfg.slug),
+            queued: Number.isInteger(d?.queued) ? d.queued : null,
+            at: new Date().toISOString(),
+          });
+        } catch (e) {
+          const msg = stripAnsi(`${e.stderr || ''}`).trim() || e.message;
+          return send(res, 502, { error: `Runner-Status nicht lesbar: ${msg}` });
+        }
       }
       if (req.method !== 'POST') return send(res, 404, { error: 'nicht gefunden' });
       if (!isSameOrigin(req.headers)) return send(res, 403, { error: 'nur von der Leitstand-Seite' });
@@ -695,27 +1313,60 @@ function startServer(token, selfRoot) {
       }
       if (path === '/api/issue') {
         if (typeof body.id !== 'string' || !ID_RE.test(body.id)) return send(res, 400, { error: 'ungültige Issue-ID' });
-        const shown = await t.bd(['show', body.id]);
-        const current = Array.isArray(shown) ? shown[0] : shown;
+        const current = await showIssue(t, body.id);
         if (!current) return send(res, 404, { error: 'Issue nicht gefunden' });
         let steps;
-        try { steps = planIssueAction(body, current); } catch (e) { return send(res, 400, { error: e.message }); }
+        try { steps = planIssueAction(body, current, workspaces[wsOfIssue(current, workspaces)]); } catch (e) { return send(res, 400, { error: e.message }); }
         return runSteps(res, t, steps);
       }
-      if (path === '/api/create') {
+      // Knopf aus beads.leitstand.mjs: erst applies/check am aktuellen Stand, dann run → bdw-Schritte
+      if (path === '/api/action') {
+        if (typeof body.id !== 'string' || !ID_RE.test(body.id)) return send(res, 400, { error: 'ungültige Issue-ID' });
+        const a = ext.actions.find((x) => x.key === body.action);
+        if (!a) return send(res, 400, { error: 'unbekannte Aktion' });
+        const current = await showIssue(t, body.id);
+        if (!current) return send(res, 404, { error: 'Issue nicht gefunden' });
+        const x = cardExtras(current, ext)?.actions?.find((y) => y.key === a.key);
+        if (!x) return send(res, 400, { error: `${a.title}: passt nicht zu diesem Issue` });
+        if (x.disabled) return send(res, 400, { error: x.disabled });
         let steps;
-        try { steps = planCreate(body, cfg.modules); } catch (e) { return send(res, 400, { error: e.message }); }
+        try {
+          const exec = (cmd, args, opts = {}) => run(cmd === 'node' ? process.execPath : cmd, args,
+            { cwd: t.root, timeout: 60_000, maxBuffer: 8 * 1024 * 1024, ...opts });
+          steps = await a.run({ issue: current, root: t.root, exec, text: cleanText(body.text) });
+        } catch (e) {
+          return send(res, 502, { error: `${a.title} fehlgeschlagen: ${cmdOutput(e).slice(-800)}` });
+        }
+        const ok = Array.isArray(steps) && steps.every((s) => Array.isArray(s) && s.every((v) => typeof v === 'string'));
+        return ok ? runSteps(res, t, steps) : send(res, 200, { ok: true });
+      }
+      if (path === '/api/create') {
+        const ws = workspaces[body.ws ?? 'code'];
+        if (!ws) return send(res, 400, { error: 'unbekannter Workspace' });
+        let steps;
+        try { steps = planCreate(body, ws, cfg.modules); } catch (e) { return send(res, 400, { error: e.message }); }
         return runSteps(res, t, steps);
       }
       if (path === '/api/workers') {
         let args;
-        try { args = planWorkerAction(body, cfg.roles); } catch (e) { return send(res, 400, { error: e.message }); }
+        try { args = planWorkerAction(body, workspaces); } catch (e) { return send(res, 400, { error: e.message }); }
         try {
           const r = await run(t.workersCmd, args, { cwd: t.root, timeout: 120_000 });
           return send(res, 200, { ok: true, output: stripAnsi(`${r.stdout}${r.stderr}`).trim() });
         } catch (e) {
-          const msg = stripAnsi(`${e.stdout || ''}${e.stderr || ''}`).trim() || e.message;
-          return send(res, 409, { error: msg });
+          return send(res, 409, { error: cmdOutput(e) });
+        }
+      }
+      if (path === '/api/runners') {
+        if (!cfg.runners) return send(res, 404, { error: 'keine eigenen CI-Runner' });
+        let args;
+        try { args = planRunnerAction(body); } catch (e) { return send(res, 400, { error: e.message }); }
+        try {
+          // add baut das Image und registriert, das dauert bis zu einigen Minuten
+          const r = await run(t.runnerCmd, args, { cwd: t.root, timeout: args[0] === 'add' ? 300_000 : 60_000 });
+          return send(res, 200, { ok: true, output: stripAnsi(`${r.stdout}${r.stderr}`).trim() });
+        } catch (e) {
+          return send(res, 409, { error: cmdOutput(e) });
         }
       }
       send(res, 404, { error: 'nicht gefunden' });
@@ -723,15 +1374,41 @@ function startServer(token, selfRoot) {
       send(res, 500, { error: e.message });
     }
   });
+
+  let ticking = false;
+  setInterval(async () => {
+    if (ticking) return;
+    ticking = true;
+    try {
+      for (const cfg of await projects.all()) {
+        try {
+          if (await autoThreshold(cfg)) await autoRestartTick(await projects.get(cfg.slug));
+        } catch (e) { console.error(`Auto-Neustart ${cfg.slug}: ${e.message}`); }
+      }
+    } finally { ticking = false; }
+  }, 60_000).unref();
+
   server.listen(PORT, HOST, async () => {
     const list = await projects.all();
     console.log(`beads-Leitstand: http://${HOST}:${PORT}  (Actor ${ACTOR}, beenden mit Ctrl+C)`);
-    console.log(`Projekte: ${list.map((p) => p.slug).join(', ') || 'keine'}  (Liste: ${join(CONF_DIR, 'projects.txt')})`);
+    console.log(`Projekte: ${list.map((x) => x.slug).join(', ') || 'keine'}  (Liste: ${join(CONF_DIR, 'projects.txt')})`);
     if (token) console.log(`Login aktiv${PUBLIC_URL ? `, öffentlich über ${PUBLIC_URL}` : ''}; Token: leitstand-remote token`);
   });
 }
 
-if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
+const isMain = process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1];
+// `node inbox.mjs --hash-password <user>`: Passwort von stdin, Passwortzeile auf stdout
+// (für leitstand-remote password; das Passwort steht so nie in argv)
+if (isMain && process.argv[2] === '--hash-password') {
+  let input = '';
+  for await (const chunk of process.stdin) input += chunk;
+  try {
+    process.stdout.write(`${await hashPassword(process.argv[3] || 'admin', input.replace(/\r?\n$/, ''))}\n`);
+  } catch (e) {
+    console.error(e.message);
+    process.exit(2);
+  }
+} else if (isMain) {
   const token = await loadToken();
   if (PUBLIC_URL && !token) {
     console.error('LEITSTAND_PUBLIC_URL gesetzt, aber kein Token: ohne Login nicht öffentlich starten.');

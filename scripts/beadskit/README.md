@@ -6,10 +6,12 @@ ein Leitstand für alle Projekte. In allen Projekten identisch; die Quelle liegt
 hochzählen und mit `./beadskit-sync.sh --apply` verteilen.
 
 ```
-beads.project.sh        im Projekt: Name, Slug, Ziel-Branch, Rollen, Module (das Einzige, was ein Projekt schreibt)
+beads.project.sh        im Projekt: Name, Slug, Ziel-Branch, Rollen, Workspaces, Module, Repos
+beads.leitstand.mjs     im Projekt, optional: Knöpfe, Zusatzlisten, Links und Texte für den Leitstand
 scripts/beadskit/
   bdw                   bd mit Worktree-Name als Actor
-  workers               Worker starten/hinzufügen/auslaufen/stoppen, config (JSON für den Leitstand)
+  workers               Worker starten/hinzufügen/auslaufen/stoppen/neu starten, Chat (send),
+                        drain-check, repo-for, config (JSON für den Leitstand); Tests workers.test.mjs
   leitstand/            Web-Leitstand (inbox.mjs + inbox.html), Tests, Fernzugang (leitstand-remote)
   ci/runner-server      eigene GitHub-Actions-Runner als Docker-Container auf dem Server
   templates/            Vorlagen für --adopt: beads.project.sh, Skills, reviews/README.md
@@ -41,25 +43,40 @@ scripts/beadskit/workers start --dry-run
 ## Bedienen
 
 ```bash
-scripts/beadskit/workers start fix=2 search=1 verify=1     # Gesamtzahl je Rolle
+scripts/beadskit/workers start fix=2 search=1 verify=1     # Gesamtzahl je Rolle (Workspace code)
+scripts/beadskit/workers start --ws clubs                  # anderer Workspace, Vorgabe BK_WS_clubs_START
 scripts/beadskit/workers add fix                           # einen weiteren
 scripts/beadskit/workers ls
 scripts/beadskit/workers drain && scripts/beadskit/workers ls   # warten bis idle
 scripts/beadskit/workers stop --all
+scripts/beadskit/workers restart fix-2                     # frischer Kontext, nur zwischen zwei Runden
+scripts/beadskit/workers autorestart --over 200k           # macht der Leitstand dann selbst
+scripts/beadskit/workers send fix-2 -- /compact            # Zeile in den iTerm-Tab tippen
 ```
 
+Worker laufen als iTerm-Tabs (Farbe je Rolle, `--bg` für Hintergrund-Sessions; ohne
+steuerbares iTerm automatisch im Hintergrund).
+
 **Leitstand:** `node scripts/beadskit/leitstand/inbox.mjs` (aus einem beliebigen eingerichteten
-Projekt) → http://127.0.0.1:3738. Ein Prozess für alle Projekte; Umschalter oben. Die Liste steht
-in `~/.config/beadskit/projects.txt` – `workers` trägt sein Projekt bei jedem Aufruf ein. Der
-Leitstand zeigt Kennzahlen, Worker-Karten, „Wartet auf dich“ (Label `human`), Kanban mit Drag &
-Drop und PRs mit CI-Stand; er steuert Issues und Worker als Actor `user`.
-Tests: `node --test scripts/beadskit/leitstand/inbox.test.mjs`.
+Projekt) → http://127.0.0.1:3738. Ein Prozess für alle Projekte; Umschalter oben (`#<slug>` in
+der Adresse), daneben der Umschalter der Workspaces. Die Liste steht in
+`~/.config/beadskit/projects.txt` – `workers` trägt sein Projekt bei jedem Aufruf ein. Der
+Leitstand zeigt Kennzahlen, Worker-Karten mit Detail (Chat aus dem Transkript, Senden in den
+iTerm-Tab, Neu starten), „Wartet auf dich“ (Label `human`), Kanban mit Drag & Drop je Workspace,
+PRs mit CI-Stand (aller Repos aus `BK_REPOS`) und die CI-Runner, wenn das Projekt welche nutzt.
+Er steuert Issues und Worker als Actor `user` und startet mit `autorestart` Worker mit großem
+Kontext selbst neu. Tests: `node --test scripts/beadskit/leitstand/inbox.test.mjs`.
 
-Fernzugang: `scripts/beadskit/leitstand/leitstand-remote` (Token-Login, SSH-Rückkanal, nginx mit
-HTTPS und Basic-Auth; Hilfe im Kopf des Skripts). Token und Basic-Auth liegen in `~/.config/beadskit/`.
+Fernzugang: `scripts/beadskit/leitstand/leitstand-remote` (Login mit Token oder Benutzer/Passwort
+`leitstand-remote password`, Sperre je IP; SSH-Rückkanal, nginx mit HTTPS, Basic-Auth nur mit
+`server-setup --basic-auth`; Hilfe im Kopf des Skripts). Token, Passwort und Basic-Auth liegen in
+`~/.config/beadskit/`, Domain, SSH-Host usw. optional in `~/.config/beadskit/remote.conf`
+(`LEITSTAND_PUBLIC_URL=…`). `install` übernimmt Token und Passwort eines früheren,
+projekteigenen Leitstands (`<git-dir>/<slug>-leitstand-*`) und entfernt dessen launchd-Dienste.
 
-**CI-Runner:** `scripts/beadskit/ci/runner-server setup|status|logs|remove` (Label = `BK_SLUG`,
-Repo aus `gh`). Der Workflow wählt sie mit `runs-on: [self-hosted, <slug>]`.
+**CI-Runner:** `scripts/beadskit/ci/runner-server setup|status|start|stop|add|delete|logs|remove`
+(Label = `BK_SLUG`, Repo aus `gh`, Ablage `/opt/<slug>-runner` auf dem Server). Der Workflow
+wählt sie mit `runs-on: [self-hosted, <slug>]`; dann zeigt der Leitstand den Abschnitt CI-Runner.
 
 ## beads.project.sh
 
@@ -73,3 +90,47 @@ Repo aus `gh`). Der Workflow wählt sie mit `runs-on: [self-hosted, <slug>]`.
 | `BK_MODULES` | Werte für `modul:<x>` | leer |
 | `BK_START` | Vorgabe für `workers start` | `fix=2 search=1 verify=1 regress=0` |
 | `bk_prompt <rolle>` | eigener Startbefehl je Rolle (Funktion, optional) | `/loop … /<prefix>-<rolle>` |
+| `BK_PHASES` | Phasen von code; die erste claimen Worker | `fix verify merge` |
+| `BK_WORKSPACES` | weitere Workspaces (nur a-z), Issues mit Label `ws:<name>` | leer |
+| `BK_WS_<ws>_NAME` / `_ROLES` / `_START` / `_PHASES` | Anzeigename, Rollen, Vorgabe, Phasen (`key:Titel`) | – |
+| `bk_color <rolle>` | iTerm-Tabfarbe `"r g b"` (Funktion, optional) | je Rolle |
+| `BK_REPOS` | weitere Repos `<schlüssel>:<pfad>`; Label `modul:<schlüssel>` → dort bearbeiten | leer |
+| `RUNNER_APT`, `RUNNER_MYSQL` | Zusatzpakete und MySQL-Version im CI-Runner | leer |
+
+Rollen bestehen aus a-z und `-` (`club-add`). Ein Worker `<rolle>-<n>` gehört zum Workspace
+seiner Rolle; `start` startet genau einen Workspace und hebt nur dessen Drain auf.
+
+## beads.leitstand.mjs
+
+Optional im Projekt-Root, ein ES-Modul mit `export default { … }`. Der Leitstand lädt es neu,
+sobald es sich ändert; Fehler darin schalten nur die Erweiterungen ab (Hinweis im Log).
+
+```js
+export default {
+  // Texte und Zusatzspalten je Workspace (alles optional)
+  workspaces: {
+    clubs: {
+      roleLabels: { 'club-add': 'Anlegen' },
+      colors: { 'club-add': '#e6781e' },                       // CSS-Farbe für die Seite
+      cols: { settings: { title: 'Settings', color: '#1ea0aa', hint: 'SiteSetting einrichten' } },
+      split: [{ key: 'activate', label: 'aktivieren', title: 'zum Aktivieren' }],  // human + Label → eigene Spalte
+      group: { prefix: 'stadt:', all: 'alle Städte' },         // Filter und Karten-Tag statt modul:
+      create: { type: 'task', title: 'Neuer Club', fields: [{ name: 'stadt', label: 'Stadt', prefix: 'stadt:' }] },
+      humanHint: 'HTML-Hinweis über „Wartet auf dich“', release: 'Freigeben', prs: false,
+    },
+  },
+  // Zusatzangaben je Karte: Logo, Links (nur http/https), Tags
+  card: (issue) => ({ logo: issue.metadata?.logo_url, links: [{ href: '…', text: 'Admin' }], tags: [] }),
+  // Knöpfe an Issues (Inbox und Detail). primary ersetzt „Freigeben“. run bekommt exec (ohne Shell,
+  // cwd = Projekt) und gibt bdw-Schritte zurück, die der Leitstand danach ausführt.
+  actions: [{
+    key: 'activate', title: 'Aktivieren', primary: true, confirm: 'Wirklich aktivieren?',
+    applies: (it) => it.labels.includes('human') && it.labels.includes('aktivieren'),
+    check: (it) => (it.metadata?.place_id ? null : 'Metadatum place_id fehlt'),
+    run: async ({ issue, exec }) => { await exec('node', ['scripts/x.mjs', String(issue.metadata.place_id)]);
+      return [['close', issue.id, '--reason', 'aktiviert']]; },
+  }],
+  // Zusatzlisten unter dem Board: items(issues, now) → [{ id, title, text, href, linkText, at }]
+  panels: [{ key: 'cities', title: 'Neue Städte', ws: 'clubs', items: (issues, now) => [] }],
+};
+```

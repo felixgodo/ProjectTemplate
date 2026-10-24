@@ -5,15 +5,34 @@
 # (Standard: BK_SLUG aus beads.project.sh), z. B. `runs-on: [self-hosted, regiehub]`.
 # Teil des beadskit aus dem ProjectTemplate – nicht im Projekt ändern.
 #
-#   runner-server setup [--dry-run]   Image bauen, Runner registrieren (kurzlebiges Token), starten
-#   runner-server status              Container auf dem Server und Status bei GitHub
+#   runner-server setup [--dry-run] [--recreate]  Image bauen, Runner registrieren (kurzlebiges Token), alle starten
+#   runner-server status [--json]     Container auf dem Server und Status bei GitHub
+#   runner-server start <n…|all>      Runner einschalten, nimmt wieder Jobs an
+#   runner-server stop <n…|all> [--force]  Runner ausschalten
+#   runner-server add                 einen Runner mehr (nächste Nummer, höchstens 8)
+#   runner-server delete [--force]    den Runner mit der höchsten Nummer löschen
 #   runner-server logs                letzte Zeilen der Runner-Logs
 #   runner-server remove              Runner bei GitHub abmelden, Container und Volumes löschen
 #
+# Ein gestoppter Runner ist bei GitHub offline und bekommt keine Jobs; die Registrierung bleibt im
+# Volume, und wegen `restart: unless-stopped` bleibt er auch nach einem Server-Neustart aus.
+# `stop` verweigert ohne --force, wenn der Runner gerade einen Job hat (der Job bräche ab) oder
+# danach keiner mehr liefe (die CI bliebe in „Queued“). `setup` startet wieder alle, ersetzt aber
+# keine laufenden Container (sonst brächen deren Jobs ab, auch wenn nur das Image neu gebaut ist).
+# Neues Image oder geänderte Grenzen übernehmen: `setup --recreate`, wenn kein Job läuft.
+# Die Anzahl steht in compose.yml auf dem Server (Dienste runner-1 … runner-N); `add` und `delete`
+# ändern sie, `delete` nimmt immer die höchste Nummer, damit die Nummern lückenlos bleiben, und
+# verweigert wie `stop` bei laufendem Job oder wenn danach keiner mehr liefe.
+# `status --json` nennt je Runner auch den laufenden Job und zählt die wartenden Jobs.
+# Mit RUNNER_MYSQL (z. B. 8.0) läuft neben den Runnern der Dienst `mysql` (nur im Netz ci, Daten im
+# RAM, root-Passwort ci) für DB-Tests; `setup` startet ihn mit, `start`/`stop`/`add`/`delete` lassen
+# ihn in Ruhe. Gesteuert auch aus dem Leitstand (Abschnitt CI-Runner).
+#
 # Einstellungen per Umgebung (Standard in Klammern): RUNNER_SSH_HOST (server),
-# RUNNER_REPO (GitHub-Repo dieses Checkouts), RUNNER_LABEL (BK_SLUG), RUNNER_COUNT (3),
-# RUNNER_CPUS (2), RUNNER_MEM (6g), RUNNER_APT (zusätzliche apt-Pakete im Image).
-# Ablage auf dem Server: /opt/<label>-runner (Dockerfile, compose.yml). Das Token zum Registrieren
+# RUNNER_REPO (GitHub-Repo dieses Checkouts), RUNNER_LABEL (BK_SLUG), RUNNER_COUNT (Anzahl aus
+# compose.yml auf dem Server, ohne compose.yml 3), RUNNER_CPUS (2), RUNNER_MEM (6g),
+# RUNNER_APT (zusätzliche apt-Pakete im Image), RUNNER_MYSQL (MySQL-Version, leer = kein MySQL).
+# beads.project.sh kann sie setzen. Ablage auf dem Server: /opt/<label>-runner (Dockerfile, compose.yml). Das Token zum Registrieren
 # gilt eine Stunde und wird nicht gespeichert; die Runner-Zugangsdaten liegen in den Volumes.
 set -eu
 
@@ -26,21 +45,35 @@ SSH_HOST=${RUNNER_SSH_HOST:-server}
 REPO=${RUNNER_REPO:-$(cd "$ROOT" && gh repo view --json nameWithOwner --jq .nameWithOwner 2>/dev/null || true)}
 LABEL=${RUNNER_LABEL:-$BK_SLUG}
 EXTRA_APT=${RUNNER_APT:-}
+MYSQL_VERSION=${RUNNER_MYSQL:-}
 [ -n "$REPO" ] || { echo "GitHub-Repo unbekannt: RUNNER_REPO=owner/name setzen" >&2; exit 1; }
 case $LABEL in ''|*[!a-z0-9-]*) echo "Runner-Label ungültig: '$LABEL' (RUNNER_LABEL oder BK_SLUG)" >&2; exit 1 ;; esac
-COUNT=${RUNNER_COUNT:-3}
+case $MYSQL_VERSION in *[!0-9.]*) echo "RUNNER_MYSQL ungültig: '$MYSQL_VERSION'" >&2; exit 1 ;; esac
+COUNT=${RUNNER_COUNT:-}
+MAX=8
 CPUS=${RUNNER_CPUS:-2}
 MEM=${RUNNER_MEM:-6g}
 VERSION=2.337.0
 DIR=/opt/$LABEL-runner
 
 usage() {
-  sed -n '6,9s/^# \{0,1\}//p' "$0" >&2
+  sed -n '6,13s/^# \{0,1\}//p' "$0" >&2
   exit 2
 }
 
 remote() {
   ssh -o BatchMode=yes "$SSH_HOST" "$@"
+}
+
+# COUNT aus RUNNER_COUNT, sonst aus den Diensten in compose.yml auf dem Server, sonst 3
+load_count() {
+  [ -z "$COUNT" ] || return 0
+  # ohne Server keine Schätzung: add/delete schrieben sonst compose.yml mit falscher Anzahl
+  COUNT=$(remote "grep -c '^  runner-[0-9]*:\$' $DIR/compose.yml 2>/dev/null || true") || {
+    echo "$SSH_HOST nicht erreichbar" >&2
+    exit 1
+  }
+  case $COUNT in '' | 0 | *[!0-9]*) COUNT=3 ;; esac
 }
 
 runners() {
@@ -66,6 +99,20 @@ x-runner: &runner
   security_opt: ["no-new-privileges:true"]
   networks: [ci]
 services:
+EOF
+  [ -z "$MYSQL_VERSION" ] || cat <<EOF
+  # MySQL für DB-Tests (RUNNER_MYSQL), nur im Netz ci, kein Port nach außen; Daten im RAM
+  mysql:
+    image: mysql:$MYSQL_VERSION
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: ci
+    command: ["--innodb-buffer-pool-size=256M", "--max-connections=200"]
+    tmpfs: ["/var/lib/mysql"]
+    cpus: 1
+    mem_limit: 1g
+    security_opt: ["no-new-privileges:true"]
+    networks: [ci]
 EOF
   for i in $(runners); do
     printf '  runner-%s:\n    <<: *runner\n    volumes: ["runner-%s:/home/runner"]\n' "$i" "$i"
@@ -93,7 +140,8 @@ USER runner
 EOF
 }
 
-# Skript für den Server; $1 = Registrierungs-Token
+# Skript für den Server; $1 = Registrierungs-Token, $2 = Argumente für `docker compose up -d`,
+# $3 = Nummern der Runner, die registriert sein müssen
 setup_script() {
   cat <<EOF
 set -euo pipefail
@@ -107,7 +155,7 @@ $(compose_file)
 COMPOSE
 docker compose build -q
 EOF
-  for i in $(runners); do
+  for i in $3; do
     cat <<EOF
 if docker compose run --rm --no-deps -T runner-$i test -f .runner </dev/null; then
   echo "runner-$i: schon registriert"
@@ -117,7 +165,7 @@ else
 fi
 EOF
   done
-  echo "docker compose up -d"
+  echo "docker compose up -d $2"
   echo "docker compose ps"
 }
 
@@ -139,12 +187,21 @@ token() {
 }
 
 cmd_setup() {
-  if [ "${1-}" = --dry-run ]; then
+  dry=
+  up=--no-recreate
+  for a in "$@"; do
+    case $a in
+      --dry-run) dry=1 ;;
+      --recreate) up= ;;
+      *) usage ;;
+    esac
+  done
+  if [ -n "$dry" ]; then
     echo "# ssh $SSH_HOST bash -s"
-    setup_script '<token>'
+    setup_script '<token>' "$up" "$(runners)"
     return
   fi
-  setup_script "$(token registration-token)" | remote bash -s
+  setup_script "$(token registration-token)" "$up" "$(runners)" | remote bash -s
   cmd_status
 }
 
@@ -152,6 +209,143 @@ cmd_status() {
   remote "cd $DIR 2>/dev/null && docker compose ps --format 'table {{.Service}}\t{{.Status}}' || echo 'keine Runner auf $SSH_HOST'"
   echo
   gh api "repos/$REPO/actions/runners" --jq '.runners[] | "\(.name)\t\(.status)\t\(if .busy then "busy" else "idle" end)\t\([.labels[].name] | join(","))"'
+}
+
+# Zustand je Runner als JSON-Liste: n, name, container (running, exited, … oder missing),
+# github (online, offline oder missing), busy
+runner_state() {
+  containers=$(remote "cd $DIR 2>/dev/null && docker compose ps --all --format json || true" |
+    jq -s 'map({key: .Service, value: .State}) | from_entries')
+  github=$(gh api "repos/$REPO/actions/runners" --jq '[.runners[] | {key: .name, value: {status, busy}}] | from_entries')
+  jq -n --argjson c "$containers" --argjson g "$github" --argjson count "$COUNT" --arg label "$LABEL" '
+    [range(1; $count + 1) as $n | "\($label)-runner-\($n)" as $name | {
+      n: $n, name: $name,
+      container: ($c["runner-\($n)"] // "missing"),
+      github: ($g[$name].status // "missing"),
+      busy: ($g[$name].busy // false)
+    }]'
+}
+
+# Nicht abgeschlossene Jobs der offenen Workflow-Läufe, ein JSON-Objekt je Zeile
+active_jobs() {
+  tab=$(printf '\t')
+  gh api "repos/$REPO/actions/runs?per_page=30" \
+    --jq '.workflow_runs[] | select(.status != "completed") | "\(.id)\t\(.head_branch)\t\(.display_title)"' |
+    {
+      # je Lauf parallel; jede Ausgabezeile ist kurz und wird am Stück geschrieben
+      while IFS=$tab read -r id branch title; do
+        gh api "repos/$REPO/actions/runs/$id/jobs?per_page=100" |
+          jq -c --arg branch "$branch" --arg title "$title" '.jobs[] | select(.status != "completed") |
+            {runner: .runner_name, status, name, url: .html_url, started: .started_at, branch: $branch, title: $title}' &
+      done
+      wait
+    }
+}
+
+# {runners: [… mit job (laufender Job oder null)], queued: Anzahl wartender Jobs}
+cmd_status_json() {
+  state=$(runner_state)
+  jobs=$(active_jobs | jq -s .)
+  jq -n --argjson r "$state" --argjson j "$jobs" '{
+    runners: [$r[] | .name as $name | . + {job: ([$j[] | select(.status == "in_progress" and .runner == $name)
+      | {name, branch, title, url, started}][0] // null)}],
+    queued: ([$j[] | select(.status != "in_progress")] | length)
+  }'
+}
+
+# Runner-Nummern aus den Argumenten, eine je Zeile: Zahlen 1…COUNT oder all
+pick() {
+  [ $# -ge 1 ] || usage
+  if [ "$1" = all ] && [ $# -eq 1 ]; then
+    runners
+    return
+  fi
+  for n in "$@"; do
+    case $n in '' | 0* | *[!0-9]*) usage ;; esac
+    [ "$n" -le "$COUNT" ] || usage
+    echo "$n"
+  done
+}
+
+services() {
+  for n in "$@"; do printf ' runner-%s' "$n"; done
+}
+
+cmd_start() {
+  ns=$(pick "$@") || exit 2
+  # shellcheck disable=SC2086
+  remote "cd $DIR && docker compose up -d --no-recreate$(services $ns)"
+}
+
+cmd_stop() {
+  force=
+  set -- "$@" --
+  while [ "$1" != -- ]; do
+    if [ "$1" = --force ]; then force=1; else set -- "$@" "$1"; fi
+    shift
+  done
+  shift
+  ns=$(pick "$@") || exit 2
+  # shellcheck disable=SC2086
+  [ -n "$force" ] || guard_stop $ns
+  # shellcheck disable=SC2086
+  remote "cd $DIR && docker compose stop$(services $ns)"
+}
+
+# Bricht ab, wenn einer der Runner einen Job hat oder danach keiner mehr liefe
+guard_stop() {
+  st=$(runner_state)
+  list=$(printf '%s\n' "$@" | jq -s -c .)
+  busy=$(echo "$st" | jq -r --argjson ns "$list" '[.[] | select(.busy and (.n | IN($ns[]))) | .name] | join(", ")')
+  if [ -n "$busy" ]; then
+    echo "$busy arbeitet gerade an einem Job, der beim Stoppen abbräche. Trotzdem: --force" >&2
+    exit 1
+  fi
+  left=$(echo "$st" | jq --argjson ns "$list" '[.[] | select(.container == "running" and (.n | IN($ns[]) | not))] | length')
+  if [ "$left" -eq 0 ]; then
+    echo "Danach liefe kein Runner mehr, CI-Jobs blieben in der Warteschlange. Trotzdem: --force" >&2
+    exit 1
+  fi
+}
+
+cmd_add() {
+  if [ "$COUNT" -ge "$MAX" ]; then
+    echo "Schon $COUNT Runner, mehr als $MAX gehen nicht." >&2
+    exit 1
+  fi
+  COUNT=$((COUNT + 1))
+  setup_script "$(token registration-token)" "--no-recreate runner-$COUNT" "$COUNT" | remote bash -s
+  echo "$LABEL-runner-$COUNT hinzugefügt."
+}
+
+# Löscht den Runner mit der höchsten Nummer: Container stoppen und löschen, Volume löschen,
+# compose.yml ohne ihn, bei GitHub abmelden
+cmd_delete() {
+  case ${1-} in
+    '') force= ;;
+    --force) force=1 ;;
+    *) usage ;;
+  esac
+  n=$COUNT
+  if [ "$n" -le 1 ]; then
+    echo "Der letzte Runner bleibt. Alle entfernen: runner-server remove" >&2
+    exit 1
+  fi
+  [ -n "$force" ] || guard_stop "$n"
+  id=$(gh api "repos/$REPO/actions/runners" --jq ".runners[] | select(.name == \"$LABEL-runner-$n\") | .id")
+  COUNT=$((n - 1))
+  remote bash -s <<EOF
+set -euo pipefail
+cd $DIR
+docker compose stop runner-$n
+docker compose rm -f runner-$n
+docker volume rm -f $LABEL-runner_runner-$n
+cat >compose.yml <<'COMPOSE'
+$(compose_file)
+COMPOSE
+EOF
+  [ -z "$id" ] || gh api -X DELETE "repos/$REPO/actions/runners/$id"
+  echo "$LABEL-runner-$n gelöscht."
 }
 
 cmd_logs() {
@@ -167,8 +361,22 @@ cmd_remove() {
 cmd=$1
 shift
 case $cmd in
+  setup | status | start | stop | add | delete | logs | remove) load_count ;;
+  *) usage ;;
+esac
+case $cmd in
   setup) cmd_setup "$@" ;;
-  status) cmd_status ;;
+  status)
+    case ${1-} in
+      '') cmd_status ;;
+      --json) cmd_status_json ;;
+      *) usage ;;
+    esac
+    ;;
+  start) cmd_start "$@" ;;
+  stop) cmd_stop "$@" ;;
+  add) [ $# -eq 0 ] || usage; cmd_add ;;
+  delete) cmd_delete "$@" ;;
   logs) cmd_logs ;;
   remove) cmd_remove ;;
   *) usage ;;

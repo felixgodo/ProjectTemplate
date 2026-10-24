@@ -62,6 +62,18 @@
   .empty { padding: 18px; text-align: center; color: var(--muted); background: var(--panel);
     border: 1px dashed var(--line); border-radius: 12px; }
 
+  /* CI-Runner */
+  .runners { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(280px, 100%), 1fr)); gap: 8px; }
+  .runner { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 7px 10px;
+    font-size: 13px; min-width: 0; }
+  .runner .rhead { display: flex; align-items: center; gap: 8px; }
+  .runner .rhead button { margin-left: auto; }
+  .runner .rhead b, .runner .rhead span { white-space: nowrap; }
+  .runner .job { margin-top: 4px; font-size: 12.5px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .runner.on .dot { background: var(--ok); }
+  .runner.warn .dot { background: var(--warn); }
+  .runner.missing { opacity: .7; }
+
   /* Kennzahlen */
   .kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(118px, 1fr)); gap: 8px; }
   .kpi { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 8px 12px; }
@@ -172,6 +184,22 @@
   .feed li:first-child { border-top: 0; }
   .feed .when { color: var(--muted); font-variant-numeric: tabular-nums; }
   .feed .s { overflow-wrap: anywhere; }
+  .wtabs { display: flex; gap: 6px; margin-bottom: 10px; }
+  .wtabs button.on { background: var(--chip); border-color: var(--muted); font-weight: 600; }
+  .chat { display: flex; flex-direction: column; gap: 6px; font-size: 13px; }
+  .chat .b { max-width: 92%; padding: 7px 10px; border-radius: 10px; white-space: pre-wrap; overflow-wrap: anywhere; }
+  .chat .b .when { display: block; font-size: 11px; color: var(--muted); margin-bottom: 2px; }
+  .chat .user { align-self: flex-end; background: color-mix(in srgb, var(--accent) 16%, var(--panel)); }
+  .chat .assistant { align-self: flex-start; background: var(--bg); border: 1px solid var(--line); }
+  .chat .round, .chat .note { align-self: center; font-size: 11.5px; color: var(--muted); text-align: center; }
+  .chat details { font-size: 12px; color: var(--muted); margin-left: 4px; }
+  .chat details summary { cursor: pointer; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .chat details.err summary { color: var(--bad); }
+  .chat details pre { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 11.5px; background: var(--bg);
+    padding: 6px 8px; border-radius: 6px; margin: 4px 0; max-height: 260px; overflow: auto; color: var(--ink); }
+  .chatbar { position: sticky; bottom: -28px; background: var(--panel); padding: 10px 0 12px; margin-top: 10px;
+    border-top: 1px solid var(--line); display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  .chatbar input { flex: 1 1 200px; min-width: 0; }
   pre.logs { white-space: pre-wrap; font-size: 11.5px; background: var(--bg); padding: 10px; border-radius: 8px; max-height: 360px; overflow: auto; }
   .form { display: grid; gap: 10px; }
   .form label { display: grid; gap: 4px; font-size: 13px; }
@@ -181,6 +209,19 @@
   .toast { position: fixed; left: 50%; bottom: 20px; transform: translateX(-50%); background: var(--ink); color: var(--bg);
     padding: 8px 14px; border-radius: 8px; font-size: 13px; z-index: 20; max-width: min(90vw, 640px); white-space: pre-wrap; display: none; }
   .toast.bad { background: var(--bad); color: #fff; }
+
+  /* Workspaces */
+  .wsswitch { display: inline-flex; border: 1px solid var(--line); border-radius: 9px; overflow: hidden; }
+  .wsswitch button { border: 0; border-radius: 0; padding: 4px 12px; background: var(--panel); }
+  .wsswitch button + button { border-left: 1px solid var(--line); }
+  .wsswitch button.on { background: var(--chip); font-weight: 600; }
+  .wsswitch .badge { margin-left: 5px; background: var(--accent); color: var(--accent-ink); }
+  .xinfo { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; font-size: 12px; margin-top: 4px; }
+  .xinfo a { color: var(--ink); }
+  img.logo { width: 28px; height: 28px; object-fit: contain; border-radius: 5px; background: var(--chip); flex: none; }
+  img.logo.big { width: 72px; height: 72px; }
+  .card.decide.xact { border-left-color: var(--ok); }
+  button.go { background: var(--ok); border-color: var(--ok); color: #fff; font-weight: 600; }
 </style>
 </head>
 <body>
@@ -188,6 +229,7 @@
   <header>
     <h1 id="title">Leitstand</h1>
     <nav class="projects" id="projects" aria-label="Projekt"></nav>
+    <div class="wsswitch" id="ws-switch" role="group" aria-label="Workspace"></div>
     <span class="muted" id="updated">lädt …</span>
     <span class="spacer"></span>
     <label class="muted" style="font-size:13px"><input type="checkbox" id="auto" checked> Auto-Refresh</label>
@@ -202,11 +244,15 @@
   <h2>Worker <span class="sub muted" id="workers-n"></span></h2>
   <div class="roles" id="roles"></div>
 
+  <div id="runners-wrap" hidden><h2>CI-Runner <span class="sub muted" id="runners-n"></span>
+    <button class="small" data-ra="start" data-n="all" title="Alle Runner auf dem Server einschalten">Alle an</button>
+    <button class="small" data-ra="stop" data-n="all" title="Alle Runner ausschalten (verweigert bei laufenden Jobs)">Alle aus</button>
+    <button class="small" data-ra="add" title="Einen Runner mehr anlegen und starten (höchstens 8, dauert etwa eine Minute)">+ Runner</button>
+    <button class="small danger" data-ra="delete" title="Den Runner mit der höchsten Nummer löschen (verweigert bei laufendem Job)">− Runner</button></h2>
+  <div class="runners" id="runners"><span class="muted" style="font-size:13px">lädt …</span></div></div>
+
   <h2>Wartet auf dich <span id="human-n"></span></h2>
-  <p class="muted" style="margin:-4px 0 10px;font-size:13px">
-    Entscheidung eintragen und <b>Freigeben</b>: Die Notiz landet am Issue, das Label <code>human</code>
-    fällt weg, und der nächste Fix-Worker übernimmt. <b>Notiz</b> ergänzt nur. Karten vom Board lassen sich hierher ziehen.
-  </p>
+  <p class="muted" style="margin:-4px 0 10px;font-size:13px" id="human-hint"></p>
   <div class="inbox" id="inbox" data-drop="human" style="--c:var(--human)"></div>
 
   <h2>Board <span class="sub muted">Karten ziehen oder anklicken · „In Arbeit“ claimen nur Worker</span></h2>
@@ -222,7 +268,9 @@
     <div class="col" data-drop="deferred" style="--c:var(--muted);margin-top:8px"><div class="col-body" id="deferred"></div></div>
   </details>
 
-  <div class="two">
+  <div id="panels"></div>
+
+  <div class="two" id="prs-wrap">
     <div><h2>Offene PRs</h2><div class="list" id="prs"></div></div>
     <div><h2>Zuletzt gemergt</h2><div class="list" id="merged"></div></div>
   </div>
@@ -238,23 +286,32 @@
 <script>
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
-// Rollen, Module und Ziel-Branch kommen aus der Projekt-Config (beads.project.sh)
-let ROLES = ['fix', 'verify', 'search', 'regress'];
+// Projekt (#<slug>, sonst zuletzt gewählt) und Workspace (?ws=, sonst zuletzt gewählt je Projekt,
+// sonst code). Rollen, Farben, Spalten, Texte und Standardanzahlen kommen vom Server
+// (st.project aus beads.project.sh, st.workspaces dazu aus beads.leitstand.mjs).
 let PROJECTS = [];
 let P = '';                    // Slug des gewählten Projekts
+let WS = new URLSearchParams(location.search).get('ws') || '';
 const withP = (url) => `${url}${url.includes('?') ? '&' : '?'}p=${encodeURIComponent(P)}`;
-const roleLabel = (r) => ROLE_LABEL[r] || r.charAt(0).toUpperCase() + r.slice(1);
-const ROLE_LABEL = { fix: 'Fix', verify: 'Verify', search: 'Suche', regress: 'Regression' };
+const wsKey = () => `leitstand-ws:${P}`;
+let ROLES = [];
+let ROLE_LABEL = {};
+let COLS = [];
+let DROP_OK = new Set();
+let ROLE_COLOR = {};           // Farbe je Rolle aller Workspaces des Projekts
+const meta = () => st?.workspaces?.[st.workspace] || null;
 const roleOf = (name) => String(name || '').replace(/-\d+$/, '');
-const roleVar = (name) => (ROLES.includes(roleOf(name)) ? `var(--${roleOf(name)}, var(--muted))` : 'var(--muted)');
-const COLS = [
-  ['ready', 'Bereit', '--ready', 'Wartet auf einen Fix-Worker'],
-  ['fix', 'In Arbeit', '--fix', 'Geclaimt von einem Worker'],
-  ['verify', 'Verify', '--verify', 'PR offen, wartet auf Prüfung'],
-  ['merge', 'Merge', '--merge', 'Geprüft, wartet auf den Merge-Slot'],
-  ['done', 'Erledigt', '--done', 'Geschlossen in den letzten 24 h'],
-];
-const DROP_OK = new Set(['ready', 'verify', 'merge', 'done', 'human', 'deferred']);
+const roleVar = (name) => ROLE_COLOR[roleOf(name)] || 'var(--muted)';
+// Übernimmt die Beschreibung des aktuellen Workspaces vom Server
+function applyMeta() {
+  ROLE_COLOR = {};
+  for (const w of Object.values(st.workspaces || {})) Object.assign(ROLE_COLOR, w.colors);
+  const m = meta();
+  ROLES = m.roles;
+  ROLE_LABEL = m.roleLabels;
+  COLS = m.cols;
+  DROP_OK = new Set(m.moveTargets);
+}
 
 let st = null;                 // letzter Stand vom Server
 const drafts = new Map();      // Entwürfe je Issue, überleben das Neuladen
@@ -285,7 +342,7 @@ function toast(text, bad = false) {
   clearTimeout(toast.h); toast.h = setTimeout(() => (t.style.display = 'none'), bad ? 7000 : 3000);
 }
 async function post(url, body) {
-  const r = await fetch(withP(url), {
+  const r = await fetch(url.startsWith('/api/') ? withP(url) : url, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'X-Beads-Inbox': '1' },
     body: JSON.stringify(body),
@@ -305,53 +362,80 @@ function armed(btn, label) {
 }
 const prio = (p) => `<span class="prio p${esc(p)}">P${esc(p)}</span>`;
 const modOf = (it) => (it.labels || []).find((l) => l.startsWith('modul:'))?.slice(6);
-const prByNum = () => new Map((st?.prs || []).map((p) => [String(p.number), p]));
+// PRs je Repo des Projekts (BK_REPOS): Schlüssel „<repo>#<nummer>“, Repo „.“ = das Projekt selbst
+const prMap = () => new Map((st?.prs || []).map((p) => [`${p.repo || '.'}#${p.number}`, p]));
+const prFor = (num, repo) => {
+  if (num == null) return null;
+  const m = prMap();
+  return m.get(`${repo || '.'}#${num}`) || (repo ? null : (st?.prs || []).find((p) => String(p.number) === String(num))) || null;
+};
+const multiRepo = () => (st?.project?.repos?.length || 0) > 1;
+const repoTag = (repo) => (multiRepo() && repo && repo !== '.' ? `<span class="tag">${esc(repo)}</span>` : '');
 const allIssues = () => (st ? Object.values(st.columns).flat() : []);
 const findIssue = (id) => allIssues().find((i) => i.id === id);
 // Worker ohne eigenen Branch stehen detached auf dem Ziel-Branch
-const base = () => st?.project?.base || 'main';
-const branchLabel = (b) => (!b ? '–' : b === 'HEAD' ? `detached (${base()})` : b);
+const branchLabel = (b) => (!b ? '–' : b === 'HEAD' ? `detached (${st?.project?.base || 'main'})` : b);
 const ciDot = (pr) => (pr ? `<span class="ci ${esc(pr.ci)}" title="CI: ${esc(pr.ci)}"></span>` : '');
+// Gruppe für Filter und Karten: Label-Präfix des Workspaces (Standard modul:)
+const groupOf = (it) => { const pre = meta()?.group?.prefix || 'modul:'; return (it.labels || []).find((l) => l.startsWith(pre))?.slice(pre.length); };
+// Zusatzangaben aus beads.leitstand.mjs (it.x, vom Server auf http(s)-Links gekürzt)
+const logoImg = (it, cls = '') => (it.x?.logo
+  ? `<img class="logo ${cls}" src="${esc(it.x.logo)}" alt="Logo" loading="lazy" referrerpolicy="no-referrer">` : '');
+const xLinks = (it) => (it.x?.links || []).map((l) => `<a href="${esc(l.href)}" target="_blank" rel="noopener">${esc(l.text)}</a>`).join(' · ');
+function xInfo(it, cls = '') {
+  const links = xLinks(it), logo = logoImg(it, cls), tags = (it.x?.tags || []).map((t) => `<span class="tag">${esc(t)}</span>`).join('');
+  return links || logo || tags ? `<div class="xinfo">${logo}${tags}${links}</div>` : '';
+}
+const xActions = (it) => it.x?.actions || [];
+const xButton = (a, cls = '') => `<button class="go ${cls}" data-xaction="${esc(a.key)}" data-confirm="${esc(a.confirm)}"
+  ${a.disabled ? `disabled title="${esc(a.disabled)}"` : a.hint ? `title="${esc(a.hint)}"` : ''}>${esc(a.title)}</button>`;
 
 // ---- Kopf ----
 function renderHead() {
   const m = st.metrics;
   const kpi = (v, label, cls = '') => `<div class="kpi ${cls}"><b>${esc(v)}</b><span>${esc(label)}</span></div>`;
-  $('kpis').innerHTML = [
-    kpi(m.human, 'wartet auf dich', m.human ? 'attn' : ''),
-    kpi(m.open, 'bereit'),
-    kpi(m.working, 'in Arbeit'),
-    kpi(m.verify, 'Verify'),
-    kpi(m.merge, 'Merge'),
-    kpi(m.mergedToday, 'heute gemergt'),
-    kpi(m.done24h, 'erledigt (24 h)'),
-    kpi(dur(m.leadMs), 'Ø Durchlauf (24 h)'),
-    kpi(m.stale, 'Claims abgelaufen', m.stale ? 'alert' : ''),
-  ].join('');
+  $('kpis').innerHTML = meta().kpis.map(([k, label]) => {
+    const v = m[k] ?? 0;
+    const cls = (k === 'human' || meta().split.some((s) => s.key === k)) && v ? 'attn' : k === 'stale' && v ? 'alert' : '';
+    return kpi(k === 'leadMs' ? dur(m.leadMs) : v, label, cls);
+  }).join('');
   const s = st.slot;
   const slot = !s ? '<span class="chip">Merge-Slot ?</span>'
     : s.available ? '<span class="chip slot free"><span class="dot"></span>Merge-Slot frei</span>'
       : `<span class="chip slot held busy"><span class="dot"></span>Merge-Slot: ${esc(s.holder)}</span>`;
   const d = st.drain;
-  $('controls').innerHTML = `${slot}
+  const ar = st.autorestart || {};
+  const recent = (ar.recent || []).map((x) => `${clock(x.at)} ${x.name} (${ktok(x.tokens)}): ${x.ok ? 'neu gestartet' : 'verweigert'}`).join('\n');
+  const opts = [0, 150_000, 200_000, 300_000, 400_000, 600_000];
+  if (ar.threshold && !opts.includes(ar.threshold)) opts.push(ar.threshold);
+  const html = `${slot}
     <button class="small ${d.all ? 'on' : ''}" data-wa="drain" data-role="all" data-off="${d.all ? 1 : ''}"
       title="${d.all ? 'Drain für alle aufheben' : 'Alle Worker auslaufen lassen: laufenden Schritt fertig, nichts Neues claimen'}">
       ${d.all ? 'Drain aktiv · aufheben' : 'Alle auslaufen lassen'}</button>
-    <button class="small" id="start-open" title="Pipeline mit Anzahl je Rolle starten (hebt Drain auf)">Pipeline starten …</button>
+    <button class="small" id="start-open" title="Pipeline mit Anzahl je Rolle starten (hebt Drain auf)">${st.workspace === 'code' ? 'Pipeline' : esc(meta().label)} starten …</button>
+    <label class="small muted" style="font-size:12.5px" title="${esc(`Startet idle Worker ohne Claim neu, sobald ihr Kontext über der Schwelle liegt (Prüfung jede Minute).${recent ? `\n\nZuletzt:\n${recent}` : ''}`)}">Auto-Neustart
+      <select id="autorestart">${opts.map((n) => `<option value="${n}" ${n === (ar.threshold || 0) ? 'selected' : ''}>${n ? `ab ${ktok(n)}` : 'aus'}</option>`).join('')}</select></label>
+    ${st.workers.length ? `<button class="small danger" data-stop="all"
+      title="Alle Hintergrund-Worker stoppen; verweigert, solange einer arbeitet (besser erst auslaufen lassen)">Alle stoppen</button>` : ''}
     <span class="muted" style="font-size:12.5px">${st.workers.length} Worker, ${st.workers.filter((w) => w.status !== 'idle').length} aktiv</span>`;
+  // nur bei Änderung neu zeichnen, sonst schließt das Auto-Refresh eine offene Auswahl;
+  // nicht, solange „Alle stoppen“ scharf ist oder auf --force wartet
+  const armedStop = $('controls').querySelector('[data-armed], [data-force]');
+  if (keys.controls !== html && !armedStop) { keys.controls = html; $('controls').innerHTML = html; }
   $('logout').hidden = !st.auth;
 }
 
 function openStart() {
   const have = (r) => st?.workers.filter((w) => w.role === r).length || 0;
-  const def = st?.project?.start || {};
-  openDrawer('start', null, 'Pipeline starten', `
+  const def = meta().defaults;
+  const r0 = ROLES[0];
+  openDrawer('start', null, st.workspace === 'code' ? 'Pipeline starten' : `${esc(meta().label)} starten`, `
     <form class="form" id="start">
-      <p class="muted" style="margin:0;font-size:13px">Anzahl ist die <b>Gesamtzahl</b> je Rolle (fix-1 … fix-N);
-        laufende Worker werden übersprungen. <code>start</code> hebt einen aktiven Drain auf.
-        Die Worker laufen als Hintergrund-Sessions auf dem Mac.</p>
-      <div class="inline">${ROLES.map((r) => `<label>${esc(roleLabel(r))} <span class="muted">(läuft: ${have(r)})</span>
-        <input type="number" name="${r}" min="0" max="8" value="${Math.max(have(r), def[r] || 0)}"></label>`).join('')}</div>
+      <p class="muted" style="margin:0;font-size:13px">Anzahl ist die <b>Gesamtzahl</b> je Rolle (${esc(r0)}-1 … ${esc(r0)}-N);
+        laufende Worker werden übersprungen. <code>start</code> hebt einen aktiven Drain auf${st.workspace === 'code' ? '' : ` (nur für ${esc(meta().label)})`}.
+        Die Worker öffnen sich als Tabs in iTerm auf dem Mac (ohne iTerm-Freigabe im Hintergrund).</p>
+      <div class="inline">${ROLES.map((r) => `<label>${esc(ROLE_LABEL[r])} <span class="muted">(läuft: ${have(r)})</span>
+        <input type="number" name="${esc(r)}" min="0" max="8" value="${Math.max(have(r), def[r] ?? 0)}"></label>`).join('')}</div>
       <div class="actions"><button class="primary" type="submit">Starten</button><span class="msg" id="s-msg"></span></div>
     </form>`);
 }
@@ -362,14 +446,13 @@ function workerCard(w) {
   const busy = w.status !== 'idle';
   const quiet = ms(a.lastAt);
   const quietCls = busy && quiet > 30 * 60000 ? 'bad-t' : busy && quiet > 10 * 60000 ? 'warn-t' : '';
-  const prs = prByNum();
   const issue = w.issues?.[0];
   const prNum = issue?.pr ?? a.prs?.at(-1)?.number;
-  const pr = prNum ? prs.get(String(prNum)) : null;
+  const pr = prFor(prNum, issue?.pr != null ? issue.repo : null);
   const last = a.tools?.[0];
   const issueLine = issue
     ? `<a href="#" data-issue="${esc(issue.id)}"><span class="id">${esc(issue.id)}</span></a> ${esc(issue.title)}${w.issues.length > 1 ? ` <span class="badge">+${w.issues.length - 1}</span>` : ''}`
-    : `<span class="muted">${!busy ? 'wartet auf die nächste Runde' : w.role === 'search' ? 'sucht Funde' : w.role === 'regress' ? `prüft ${base()}` : 'kein Claim'}</span>`;
+    : `<span class="muted">${!busy ? 'wartet auf die nächste Runde' : w.role === 'search' ? 'sucht Funde' : w.role === 'regress' ? `prüft ${esc(st.project.base)}` : 'kein Claim'}</span>`;
   const branch = branchLabel(a.branch);
   return `<div class="wcard ${busy ? '' : 'idle'}" data-worker="${esc(w.name)}" style="--c:${roleVar(w.name)}">
     <div class="whead ${busy ? 'busy' : ''}">
@@ -387,23 +470,31 @@ function workerCard(w) {
     <div class="wline"><span class="k">Aktiv</span><span class="v">
       <span class="${quietCls}" title="letzte Aktivität im Transkript">${esc(ago(a.lastAt))}</span>
       · läuft seit ${esc(dur(ms(w.startedAt)))}</span></div>
-    <div class="wline"><span class="k">Kontext</span><span class="v">${esc(ktok(a.contextTokens))} Tokens${a.model ? ` · ${esc(a.model.replace(/^claude-/, ''))}` : ''}</span></div>
+    <div class="wline"><span class="k">Kontext</span><span class="v"><span class="${overLimit(a) ? 'bad-t' : ''}">${esc(ktok(a.contextTokens))} Tokens</span>${a.model ? ` · ${esc(a.model.replace(/^claude-/, ''))}` : ''}</span></div>
   </div>`;
 }
 
+const overLimit = (a) => !!st?.autorestart?.threshold && a?.contextTokens > st.autorestart.threshold;
+
 function renderWorkers() {
-  const key = JSON.stringify([st.workers, st.drain, st.prs.map((p) => [p.number, p.ci, p.mergeable])]);
+  const key = JSON.stringify([P, st.workspace, st.workers, st.drain, st.autorestart?.threshold, st.prs.map((p) => [p.repo, p.number, p.ci, p.mergeable])]);
   if (keys.workers === key) return;
   keys.workers = key;
-  $('workers-n').textContent = `${st.workers.length} laufend`;
-  $('roles').innerHTML = ROLES.map((r) => {
+  const mine = st.workers.filter((w) => ROLES.includes(w.role));
+  $('workers-n').textContent = `${mine.length} laufend`;
+  // Workspace-Drain nur außerhalb von code (dort reicht „Alle auslaufen lassen“ wie bisher)
+  const allDrained = ROLES.every((r) => st.drain.roles[r]);
+  const wsDrain = st.workspace === 'code' ? '' : `<div class="role-head">
+      <button class="small ${allDrained ? 'on' : ''}" data-wa="drain" data-role="ws" data-off="${allDrained ? 1 : ''}"
+        ${st.drain.all ? 'disabled title="globaler Drain aktiv"' : ''}>${allDrained ? `Drain ${esc(meta().label)} aktiv · aufheben` : `Alle ${esc(meta().label)}-Worker auslaufen lassen`}</button></div>`;
+  $('roles').innerHTML = wsDrain + ROLES.map((r) => {
     const ws = st.workers.filter((w) => w.role === r);
     const drained = st.drain.roles[r];
-    return `<section style="--c:var(--${r}, var(--muted))">
-      <div class="role-head"><span class="sw"></span><b>${esc(roleLabel(r))}</b>
+    return `<section style="--c:${roleVar(r)}">
+      <div class="role-head"><span class="sw"></span><b>${esc(ROLE_LABEL[r])}</b>
         <span class="muted">${ws.length} Worker, ${ws.filter((w) => w.status !== 'idle').length} aktiv</span>
-        <button class="small" data-wa="add" data-role="${r}" title="Einen weiteren ${r}-Worker im Hintergrund starten">+1</button>
-        <button class="small ${drained ? 'on' : ''}" data-wa="drain" data-role="${r}" data-off="${drained ? 1 : ''}"
+        <button class="small" data-wa="add" data-role="${esc(r)}" title="Einen weiteren ${esc(r)}-Worker als iTerm-Tab starten">+1</button>
+        <button class="small ${drained ? 'on' : ''}" data-wa="drain" data-role="${esc(r)}" data-off="${drained ? 1 : ''}"
           ${st.drain.all ? 'disabled title="globaler Drain aktiv"' : ''}>${drained ? 'Drain aktiv · aufheben' : 'auslaufen lassen'}</button>
       </div>
       ${ws.length ? `<div class="workers">${ws.map(workerCard).join('')}</div>` : '<div class="muted" style="font-size:13px">keiner aktiv</div>'}
@@ -415,40 +506,51 @@ function renderWorkers() {
 function renderInbox(items) {
   $('human-n').textContent = items.length ? `(${items.length})` : '';
   // Nicht neu zeichnen, während getippt wird oder sich nichts geändert hat
-  const key = items.map((i) => i.id + i.updated_at).join('|');
+  const key = P + st.workspace + items.map((i) => i.id + i.updated_at + JSON.stringify(i.x || '')).join('|');
   if (document.activeElement?.closest?.('#inbox') || key === keys.inbox) return;
   keys.inbox = key;
   if (!items.length) {
     $('inbox').innerHTML = '<div class="empty">Nichts zu entscheiden. Die Worker haben alles, was sie brauchen.</div>';
     return;
   }
-  $('inbox').innerHTML = items.map((it) => `
-    <article class="card decide" data-id="${esc(it.id)}">
+  const release = meta().release;
+  const splitOf = (it) => meta().split.find((s) => (it.labels || []).includes(s.label));
+  $('inbox').innerHTML = items.map((it) => {
+    const split = splitOf(it);
+    const acts = xActions(it);
+    // eine Aktion mit primary ersetzt „Freigeben“ (z. B. „Aktivieren“)
+    const primary = acts.find((a) => a.primary);
+    return `
+    <article class="card decide ${primary ? 'xact' : ''}" data-id="${esc(it.id)}">
       <div class="card-head">
         <a href="#" class="id" data-issue="${esc(it.id)}">${esc(it.id)}</a>${prio(it.priority)}
         <span class="title">${esc(it.title)}</span>
         ${modOf(it) ? `<span class="tag">${esc(modOf(it))}</span>` : ''}
+        ${split ? `<span class="tag">${esc(split.label)}</span>` : ''}
         <span class="muted" style="font-size:12px">${esc(ago(it.updated_at))}</span>
       </div>
+      ${xInfo(it)}
       <details ${it.description && it.description.length < 400 ? 'open' : ''}>
         <summary>Beschreibung</summary><div class="text">${esc(it.description || '–')}</div>
       </details>
       ${it.notes ? `<details><summary>Notizen</summary><div class="text">${esc(it.notes)}</div></details>` : ''}
-      <textarea placeholder="Deine Entscheidung, z. B. „Nicht gewollt, nur bei eventsValid == 0 übernehmen“">${esc(drafts.get(it.id) || '')}</textarea>
+      <textarea placeholder="Deine Entscheidung, z. B. „Nicht gewollt, nur in diesem Fall übernehmen“">${esc(drafts.get(it.id) || '')}</textarea>
       <div class="actions">
-        <button class="primary" data-action="release" title="Notiz anhängen, Label human entfernen – ein Fix-Worker übernimmt">Freigeben an Fix</button>
+        ${acts.map((a) => xButton(a)).join('')}
+        ${primary ? '' : `<button class="primary" data-action="release" title="Notiz anhängen, Label human entfernen – ein Worker übernimmt">${esc(release)}</button>`}
         <button data-action="note" title="Nur Notiz anhängen, bleibt bei dir">Notiz</button>
         <button data-action="defer" title="Auf Eis legen (deferred)">Zurückstellen</button>
         <button class="danger" data-action="close" title="Erledigt oder nicht nötig – Text wird der Schließgrund">Schließen</button>
         <span class="msg"></span>
       </div>
-    </article>`).join('');
+    </article>`;
+  }).join('');
 }
 
 // ---- Board ----
 const filters = { q: '', mod: '', prio: '', tests: false, stale: false };
 function passes(it) {
-  if (filters.mod && modOf(it) !== filters.mod) return false;
+  if (filters.mod && groupOf(it) !== filters.mod) return false;
   if (filters.prio && !(it.priority <= Number(filters.prio))) return false;
   if (filters.tests && !(it.labels || []).includes('tests')) return false;
   if (filters.stale && !it.stale) return false;
@@ -461,19 +563,20 @@ function passes(it) {
 }
 
 function itemHtml(it, col) {
-  const prs = prByNum();
   const prNum = it.metadata?.pr;
-  const pr = prNum ? prs.get(String(prNum)) : null;
+  const pr = prFor(prNum, it.pr_repo);
   const wip = it.status === 'in_progress';
   const since = col === 'done' ? it.closed_at : (wip ? it.started_at : it.updated_at);
-  const drag = col !== 'fix' && col !== 'done' ? 'true' : 'false';
+  // die erste Phase (in Arbeit) claimen nur Worker
+  const drag = col !== meta().readyPhase && col !== 'done' ? 'true' : 'false';
   return `<div class="item ${it.stale ? 'stale' : ''}" draggable="${drag}" data-issue="${esc(it.id)}" title="${esc(it.title)}">
     <div style="display:flex;gap:6px;align-items:center"><span class="id">${esc(it.id)}</span>${prio(it.priority)}
       ${it.external_ref ? `<span class="muted" style="font-size:11px">${esc(it.external_ref)}</span>` : ''}
       ${it.stale ? '<span class="badge bad" title="Lease abgelaufen – Worker hängt oder ist weg">⚠ Lease</span>' : ''}</div>
     <div class="t">${esc(it.title)}</div>
+    ${xInfo(it)}
     <div class="meta">
-      ${modOf(it) ? `<span class="tag">${esc(modOf(it))}</span>` : ''}
+      ${groupOf(it) ? `<span class="tag">${esc(groupOf(it))}</span>` : ''}
       ${(it.labels || []).includes('tests') ? '<span class="tag tests">tests</span>' : ''}
       ${wip && it.assignee ? `<span class="tag w" style="--wc:${roleVar(it.assignee)}">${esc(it.assignee)}</span>` : ''}
       ${prNum ? `${ciDot(pr)}${pr ? `<a href="${esc(pr.url)}" target="_blank" rel="noopener">#${esc(prNum)}</a>` : `#${esc(prNum)}`}` : ''}
@@ -486,14 +589,14 @@ function itemHtml(it, col) {
 }
 
 function renderBoard() {
-  const key = JSON.stringify([filters, COLS.map(([k]) => st.columns[k].map((i) => [i.id, i.updated_at, i.stale])),
-    st.columns.deferred.map((i) => i.id), st.prs.map((p) => [p.number, p.ci, p.mergeable, p.isDraft])]);
+  const key = JSON.stringify([P, st.workspace, filters, COLS.map(([k]) => st.columns[k].map((i) => [i.id, i.updated_at, i.stale, i.x])),
+    st.columns.deferred.map((i) => i.id), st.prs.map((p) => [p.repo, p.number, p.ci, p.mergeable, p.isDraft])]);
   if (dragging || keys.board === key) return;
   keys.board = key;
   $('board').innerHTML = COLS.map(([k, label, c, hint]) => {
     const items = st.columns[k].filter(passes);
     const total = st.columns[k].length;
-    return `<section class="col" data-drop="${DROP_OK.has(k) ? k : ''}" style="--c:var(${c})">
+    return `<section class="col" data-drop="${DROP_OK.has(k) ? k : ''}" style="--c:${c}">
       <h3><span>${esc(label)}</span><span class="n">${items.length}${items.length !== total ? `/${total}` : ''}</span></h3>
       <div class="hint">${esc(hint)}</div>
       <div class="col-body">${items.map((it) => itemHtml(it, k)).join('') || '<div class="muted" style="padding:6px 8px;font-size:13px">leer</div>'}</div>
@@ -502,23 +605,25 @@ function renderBoard() {
   const def = st.columns.deferred.filter(passes);
   $('deferred-sum').textContent = `Zurückgestellt (${def.length})`;
   $('deferred').innerHTML = def.map((it) => itemHtml(it, 'deferred')).join('') || '<div class="muted" style="padding:6px">leer</div>';
-  // Modul-Filter aus den vorhandenen Labels
-  const mods = [...new Set(allIssues().map(modOf).filter(Boolean))].sort();
+  // Gruppen-Filter (Modul bzw. Label-Präfix des Workspaces) aus den vorhandenen Labels
+  const mods = [...new Set(allIssues().map(groupOf).filter(Boolean))].sort((a, b) => a.localeCompare(b, 'de'));
   const sel = $('f-mod');
-  if (sel.options.length - 1 !== mods.length) {
-    sel.innerHTML = '<option value="">alle Module</option>' + mods.map((m) => `<option ${m === filters.mod ? 'selected' : ''}>${esc(m)}</option>`).join('');
+  const modKey = JSON.stringify([P, st.workspace, mods]);
+  if (keys.mods !== modKey) {
+    keys.mods = modKey;
+    sel.innerHTML = `<option value="">${esc(meta().group.all)}</option>` + mods.map((m) => `<option ${m === filters.mod ? 'selected' : ''}>${esc(m)}</option>`).join('');
   }
 }
 
 function renderLists() {
-  const key = JSON.stringify([st.prs, st.merged]);
+  const key = JSON.stringify([P, st.prs, st.merged]);
   if (keys.lists === key) return;
   keys.lists = key;
-  const issueByPr = new Map(allIssues().filter((i) => i.metadata?.pr).map((i) => [String(i.metadata.pr), i]));
+  const issueByPr = new Map(allIssues().filter((i) => i.metadata?.pr).map((i) => [`${i.pr_repo || '.'}#${i.metadata.pr}`, i]));
   $('prs').innerHTML = st.prs.length ? st.prs.map((p) => {
-    const it = issueByPr.get(String(p.number));
+    const it = issueByPr.get(`${p.repo || '.'}#${p.number}`);
     return `<div class="row">${ciDot(p)}
-      <a class="id" href="${esc(p.url)}" target="_blank" rel="noopener">#${esc(p.number)}</a>
+      <a class="id" href="${esc(p.url)}" target="_blank" rel="noopener">#${esc(p.number)}</a>${repoTag(p.repo)}
       <span class="t" title="${esc(p.title)}">${esc(p.title)}</span>
       ${it ? `<a href="#" class="id" data-issue="${esc(it.id)}">${esc(it.id)}</a>` : ''}
       ${p.isDraft ? '<span class="tag">Draft</span>' : ''}
@@ -527,33 +632,135 @@ function renderLists() {
       <span class="muted diff">${esc(dur(ms(p.createdAt)))}</span></div>`;
   }).join('') : '<div class="row muted">keine</div>';
   $('merged').innerHTML = st.merged.length ? st.merged.map((p) => `<div class="row">
-    <a class="id" href="${esc(p.url)}" target="_blank" rel="noopener">#${esc(p.number)}</a>
+    <a class="id" href="${esc(p.url)}" target="_blank" rel="noopener">#${esc(p.number)}</a>${repoTag(p.repo)}
     <span class="t" title="${esc(p.title)}">${esc(p.title)}</span>
     <span class="muted diff">${esc(ago(p.mergedAt))}</span></div>`).join('')
     : '<div class="row muted">keine</div>';
 }
 
+// ---- Workspaces ----
+function renderSwitch() {
+  // nur ein Workspace (code): kein Umschalter
+  const list = Object.values(st.workspaces);
+  const html = list.length < 2 ? '' : list.map((w) => {
+    const n = st.attention?.[w.name] || 0;
+    return `<button data-ws="${esc(w.name)}" class="${w.name === st.workspace ? 'on' : ''}" title="${n ? `${n} warten auf dich` : ''}">${esc(w.label)}${n && w.name !== st.workspace ? `<span class="badge">${n}</span>` : ''}</button>`;
+  }).join('');
+  if (keys.switch !== html) { keys.switch = html; $('ws-switch').innerHTML = html; }
+  $('ws-switch').hidden = !html;
+  $('prs-wrap').hidden = !meta().prs;
+  $('runners-wrap').hidden = !st.project.runners;
+  // humanHint kommt aus beads.leitstand.mjs des Projekts (HTML), sonst der Standardtext
+  $('human-hint').innerHTML = meta().humanHint
+    || `Entscheidung eintragen und <b>${esc(meta().release)}</b>: Die Notiz landet am Issue, das Label <code>human</code> fällt weg, und der nächste Worker übernimmt. <b>Notiz</b> ergänzt nur. Karten vom Board lassen sich hierher ziehen.`;
+}
+async function switchWs(name) {
+  if (name === WS) return;
+  WS = name;
+  try { localStorage.setItem(wsKey(), name); } catch { /* nur Komfort */ }
+  const u = new URL(location.href);
+  if (name === 'code') u.searchParams.delete('ws'); else u.searchParams.set('ws', name);
+  history.replaceState(null, '', u);
+  filters.mod = '';
+  closeDrawer();
+  await reload();
+}
+// Zusatzlisten aus beads.leitstand.mjs (panels), z. B. „Neue Städte“
+function renderPanels() {
+  const key = JSON.stringify([P, st.panels]);
+  if (keys.panels === key) return;
+  keys.panels = key;
+  $('panels').innerHTML = (st.panels || []).map((p) => `<h2>${esc(p.title)} ${p.sub ? `<span class="sub muted">${esc(p.sub)}</span>` : ''}</h2>
+    <div class="list">${p.items.length ? p.items.map((i) => `<div class="row">
+      ${i.id ? `<a href="#" class="id" data-issue="${esc(i.id)}">${esc(i.id)}</a>` : ''}
+      <span class="t" title="${esc(i.title)}"><b>${esc(i.title)}</b>${i.text ? ` · ${esc(i.text)}` : ''}</span>
+      ${i.href ? `<a href="${esc(i.href)}" target="_blank" rel="noopener">${esc(i.linkText || 'öffnen')}</a>` : ''}
+      ${i.at ? `<span class="muted diff">${esc(ago(i.at))}</span>` : ''}</div>`).join('')
+    : '<div class="row muted">keine</div>'}</div>`).join('');
+}
+
+// ---- CI-Runner ----
+// Eigener Abruf (ssh zum Server), höchstens alle 30 s, außer nach ↻ oder einer Aktion
+let runners = null;
+let runnersAt = 0;
+let runnersOf = '';
+async function loadRunners(force = false) {
+  if (!st?.project?.runners) return;
+  if (runnersOf !== P) { runners = null; runnersAt = 0; runnersOf = P; renderRunners(); }
+  if (loadRunners.busy || (!force && Date.now() - runnersAt < 30_000)) return;
+  loadRunners.busy = true;
+  runnersAt = Date.now();
+  const slug = P;
+  try {
+    const r = await fetch(withP('/api/runners'));
+    if (r.status === 401) { location.href = '/login'; return; }
+    const res = await r.json().catch(() => ({}));
+    if (slug !== P) return;   // Antwort zu einem vorher gewählten Projekt
+    runners = r.ok ? res : { error: res.error || r.statusText };
+  } catch (e) {
+    runners = { error: e.message };
+  } finally { loadRunners.busy = false; }
+  renderRunners();
+}
+function runnerChip(r) {
+  const on = r.container === 'running';
+  const cls = r.container === 'missing' ? 'missing' : on && r.github === 'online' ? 'on' : on ? 'warn' : '';
+  const state = r.container === 'missing' ? 'nicht eingerichtet'
+    : on ? (r.github === 'online' ? 'an' : `an, GitHub ${r.github}`) : 'aus';
+  const btn = r.container === 'missing'
+    ? '<span class="muted" style="font-size:12px" title="scripts/beadskit/ci/runner-server setup">setup nötig</span>'
+    : on ? `<button class="small danger" data-ra="stop" data-n="${r.n}">Ausschalten</button>`
+      : `<button class="small" data-ra="start" data-n="${r.n}">Einschalten</button>`;
+  const j = r.job;
+  const job = j
+    ? `<div class="job" title="${esc(`${j.title}\n${j.branch}`)}">${j.url
+      ? `<a href="${esc(j.url)}" target="_blank" rel="noopener">${esc(j.name)}</a>` : esc(j.name)}
+      <span class="muted">· ${esc(j.branch)}${j.started ? ` · seit ${esc(dur(ms(j.started)))}` : ''}</span></div>`
+    : `<div class="job muted">${on ? 'wartet auf einen Job' : '–'}</div>`;
+  return `<div class="runner ${cls}${r.busy ? ' busy' : ''}"><div class="rhead"><span class="dot"></span>
+    <b>${esc(r.name)}</b><span class="muted">${esc(state)}</span>
+    ${r.busy ? '<span class="badge warn" title="arbeitet gerade an einem CI-Job">Job</span>' : ''}${btn}</div>${job}</div>`;
+}
+function renderRunners() {
+  if (runners?.error) {
+    $('runners').innerHTML = `<span class="msg bad">${esc(runners.error)}</span>`;
+    $('runners-n').textContent = '';
+    return;
+  }
+  const list = runners?.runners || [];
+  const on = list.filter((r) => r.container === 'running').length;
+  const queued = runners?.queued ? ` · ${runners.queued} Job${runners.queued === 1 ? '' : 's'} warten` : '';
+  $('runners-n').textContent = `${on} von ${list.length} an, ${list.filter((r) => r.busy).length} mit Job${queued} · Stand ${clock(runners?.at)}`;
+  $('runners').innerHTML = list.length ? list.map(runnerChip).join('') : '<span class="muted" style="font-size:13px">keine</span>';
+}
+
 // ---- Laden ----
 async function load() {
   try {
-    const r = await fetch(withP('/api/state'));
+    const slug = P;
+    let r = await fetch(withP(`/api/state?ws=${encodeURIComponent(WS || 'code')}`));
     if (r.status === 401) { location.href = '/login'; return; }
+    // unbekannter Workspace (alter Link, gespeicherter Name): zurück auf code
+    if (r.status === 400 && WS !== 'code') { WS = 'code'; r = await fetch(withP('/api/state')); }
     const next = await r.json();
     if (!r.ok) throw new Error(next.error || r.statusText);
-    if (next.project?.slug !== P) return;   // Antwort zu einem vorher gewählten Projekt
+    if (slug !== P || next.project?.slug !== P) return;   // Antwort zu einem vorher gewählten Projekt
     st = next;
-    ROLES = st.project.roles;
+    applyMeta();
     $('title').textContent = `${st.project.name} · Leitstand`;
     document.title = `${st.project.name} · Leitstand`;
+    renderSwitch();
     $('errors').innerHTML = st.errors?.length
       ? `<div class="error">Nicht erreichbar: ${st.errors.map(esc).join(', ')}. Die Anzeige ist dort unvollständig.</div>` : '';
     renderHead();
     renderWorkers();
-    renderInbox(st.columns.human);
+    renderInbox([...meta().split.flatMap((s) => st.columns[s.key] || []), ...st.columns.human]);
     renderBoard();
     renderLists();
+    renderPanels();
     if (drawer?.kind === 'worker') refreshWorkerDrawer();
     $('updated').textContent = `aktualisiert ${new Date(st.at).toLocaleTimeString('de-DE')}`;
+    loadRunners();
   } catch (e) {
     $('errors').innerHTML = `<div class="error">Server nicht erreichbar (${esc(e.message)}). Läuft <code>scripts/beadskit/leitstand/inbox.mjs</code>?</div>`;
   }
@@ -586,9 +793,13 @@ async function openIssue(id, focusClose = false) {
     return;
   }
   if (drawer?.id !== id) return;
-  const pr = it.metadata?.pr ? prByNum().get(String(it.metadata.pr)) : null;
+  const pr = prFor(it.metadata?.pr, it.pr_repo);
   const labels = it.labels || [];
   const closed = it.status === 'closed';
+  // Workspace des Issues, nicht der Ansicht: ein Link kann in einen anderen Workspace führen
+  const W = st.workspaces[it.ws] || meta();
+  const readyPhase = W.readyPhase;
+  const colTitle = (k) => W.cols.find(([c]) => c === k)?.[1] || k;
   const moveBtn = (to, label) => `<button class="small" data-move="${to}">${esc(label)}</button>`;
   // bd show liefert die verknüpften Issues mit id und dependency_type, bd list nur Kanten
   const link = (d) => ({ id: d.id || d.depends_on_id, type: d.dependency_type || d.type, status: d.status });
@@ -598,6 +809,7 @@ async function openIssue(id, focusClose = false) {
   $('d-title').innerHTML = `<span class="id">${esc(it.id)}</span> ${prio(it.priority)}<br>${esc(it.title)}`;
   $('d-body').innerHTML = `
     <div class="moves" style="margin-bottom:8px">${labels.map((l) => `<span class="tag">${esc(l)}</span>`).join('')}</div>
+    ${xLinks(it) || logoImg(it) ? `<div class="xinfo" style="margin-bottom:10px">${logoImg(it, 'big')}${xLinks(it)}</div>` : ''}
     <dl class="kv">
       <dt>Status</dt><dd>${esc(it.status)}${it.assignee ? ` · <span class="tag w" style="--wc:${roleVar(it.assignee)}">${esc(it.assignee)}</span>` : ''}</dd>
       <dt>Typ</dt><dd>${esc(it.issue_type)}${it.external_ref ? ` · ${esc(it.external_ref)}` : ''}${it.parent ? ` · Eltern <a href="#" data-issue="${esc(it.parent)}">${esc(it.parent)}</a>` : ''}</dd>
@@ -619,9 +831,9 @@ async function openIssue(id, focusClose = false) {
     <div class="form">
       <textarea id="i-text" placeholder="Notiz oder Begründung (beim Schließen Pflicht)">${esc(drafts.get(it.id) || '')}</textarea>
       <div class="moves">
-        ${!labels.includes('phase:fix') || labels.includes('human') || it.status !== 'open' ? moveBtn('ready', closed ? 'Wieder öffnen → Bereit' : '→ Bereit (Fix)') : ''}
-        ${!labels.includes('phase:verify') || closed ? moveBtn('verify', '→ Verify') : ''}
-        ${!labels.includes('phase:merge') || closed ? moveBtn('merge', '→ Merge') : ''}
+        ${closed ? '' : xActions(it).map((a) => xButton(a, 'small')).join('')}
+        ${!labels.includes(`phase:${readyPhase}`) || labels.includes('human') || it.status !== 'open' ? moveBtn('ready', closed ? 'Wieder öffnen → Bereit' : `→ ${colTitle('ready')} (phase:${readyPhase})`) : ''}
+        ${W.phases.slice(1).map((ph) => (!labels.includes(`phase:${ph}`) || closed ? moveBtn(ph, `→ ${colTitle(ph)}`) : '')).join('')}
         ${!labels.includes('human') ? moveBtn('human', '→ Wartet auf mich') : ''}
         ${it.status !== 'deferred' && !closed ? moveBtn('deferred', 'Zurückstellen') : ''}
         <button class="small" data-note>Nur Notiz</button>
@@ -658,7 +870,6 @@ async function issueAction(id, body, okText) {
 
 function workerHtml(w) {
   const a = w.activity || {};
-  const pr = prByNum();
   return `
     <dl class="kv">
       <dt>Status</dt><dd>${esc(w.status)} · ${w.kind === 'background' ? 'Hintergrund' : 'Terminal (iTerm)'}${w.drained ? ' · <span class="warn-t">Drain</span>' : ''}</dd>
@@ -670,15 +881,17 @@ function workerHtml(w) {
       <dt>Kontext</dt><dd>${esc(ktok(a.contextTokens))} Tokens · Output im Ausschnitt ${esc(ktok(a.outputTokens))}</dd>
       <dt>Issues</dt><dd>${(w.issues || []).map((i) => `<a href="#" data-issue="${esc(i.id)}">${esc(i.id)}</a> ${esc(i.title)}`).join('<br>') || '–'}</dd>
       <dt>PRs der Session</dt><dd>${(a.prs || []).map((p) => {
-        const x = pr.get(String(p.number));
+        const x = prFor(p.number);
         return `${ciDot(x)} <a href="${esc(p.url || x?.url || '#')}" target="_blank" rel="noopener">#${esc(p.number)}</a>`;
       }).join(' ') || '–'}</dd>
-      <dt>Öffnen</dt><dd class="mono">${w.kind === 'background' ? `scripts/beads/workers attach ${esc(w.name)}` : `iTerm-Tab ${esc(w.name)}`}</dd>
+      <dt>Öffnen</dt><dd class="mono">${w.kind === 'background' ? `scripts/beadskit/workers attach ${esc(w.name)}` : `iTerm-Tab ${esc(w.name)}`}</dd>
     </dl>
     <div class="actions" style="margin-top:12px">
+      <button data-restart="${esc(w.name)}" title="Mit frischem Kontext neu starten: nur idle, ohne Claim und Merge-Slot${w.kind === 'background' ? '' : ' (im iTerm-Tab per /exit)'}">Neu starten</button>
       ${w.kind === 'background'
-        ? `<button class="danger" data-stop="${esc(w.name)}">Stoppen</button><span class="msg" id="w-msg"></span>`
-        : '<span class="muted" style="font-size:13px">Terminal-Worker lassen sich nur im iTerm-Tab beenden.</span>'}
+        ? `<button class="danger" data-stop="${esc(w.name)}">Stoppen</button>`
+        : '<span class="muted" style="font-size:13px">Stoppen nur im iTerm-Tab.</span>'}
+      <span class="msg" id="w-msg"></span>
     </div>
     ${a.pending?.length ? `<h4>Wartende Nachrichten</h4>${a.pending.map((p) => `<div class="text">${esc(p.text)}<div class="muted">${esc(ago(p.at))}</div></div>`).join('')}` : ''}
     ${a.lastText ? `<h4>Letzte Ausgabe ${esc(clock(a.lastTextAt))}</h4><div class="text" style="max-height:300px">${esc(a.lastText)}</div>` : ''}
@@ -687,48 +900,115 @@ function workerHtml(w) {
     ${w.logs != null ? `<h4>Terminal-Ausgabe (claude logs)</h4><pre class="logs">${esc(w.logs)}</pre>` : ''}`;
 }
 
+// Worker-Detail: Reiter Chat (Verlauf + Eingabe, nur iTerm-Worker) und Details. Beide Teile
+// werden getrennt aktualisiert, damit ein angefangener Text im Eingabefeld stehen bleibt.
 async function openWorker(name) {
-  openDrawer('worker', name, `<span style="color:${roleVar(name)}">●</span> ${esc(name)}`, '<p class="muted">lädt …</p>');
-  await refreshWorkerDrawer(true);
+  const w = st?.workers.find((x) => x.name === name);
+  const tab = (() => { try { return localStorage.getItem('leitstand-wtab') || 'chat'; } catch { return 'chat'; } })();
+  openDrawer('worker', name, `<span style="color:${roleVar(name)}">●</span> ${esc(name)}`, `
+    <div class="wtabs"><button data-wtab="chat">Chat</button><button data-wtab="details">Details</button></div>
+    <div id="w-chat">
+      <div class="chat" id="chat-log"><p class="muted">lädt …</p></div>
+      ${w?.kind === 'background'
+        ? `<div class="chatbar muted" style="font-size:12.5px">Hintergrund-Worker: schreiben nur über <code>scripts/beadskit/workers attach ${esc(name)}</code>, oder unter Details „Neu starten“ (öffnet ihn als iTerm-Tab).</div>`
+        : `<form class="chatbar" id="chat-form" autocomplete="off">
+            <input id="chat-text" maxlength="4000" placeholder="Nachricht oder /befehl an ${esc(name)} …" aria-label="Nachricht an ${esc(name)}">
+            <button class="primary" type="submit">Senden</button><span class="msg" id="c-msg"></span></form>`}
+    </div>
+    <div id="w-details"><p class="muted">lädt …</p></div>`);
+  showWorkerTab(tab);
+  chatKey = '';
+  await Promise.all([refreshWorkerDrawer(true), refreshChat()]);
 }
+function showWorkerTab(tab) {
+  $('w-chat').hidden = tab !== 'chat';
+  $('w-details').hidden = tab !== 'details';
+  document.querySelectorAll('[data-wtab]').forEach((b) => b.classList.toggle('on', b.dataset.wtab === tab));
+  try { localStorage.setItem('leitstand-wtab', tab); } catch { /* nur Komfort */ }
+  if (tab === 'chat') $('d-body').scrollTop = $('d-body').scrollHeight;
+}
+
+let chatKey = '';
+function chatEntry(e) {
+  const when = `<span class="when">${esc(clock(e.at))}</span>`;
+  if (e.kind === 'tool') {
+    return `<details class="${e.error ? 'err' : ''}"><summary><span class="tool">${esc(e.name)}</span> ${esc(e.summary)}</summary>
+      <pre>${esc(e.input)}</pre>${e.result != null ? `<pre>${esc(e.result)}</pre>` : '<div class="muted">läuft …</div>'}</details>`;
+  }
+  if (e.kind === 'round') return `<div class="round">⟳ Runde ${esc(clock(e.at))}: ${esc(e.text)}</div>`;
+  if (e.kind === 'note') return `<div class="note">${esc(clock(e.at))} · ${esc(e.text)}</div>`;
+  return `<div class="b ${e.kind === 'user' ? 'user' : 'assistant'}">${when}${esc(e.text)}</div>`;
+}
+async function refreshChat() {
+  const name = drawer?.kind === 'worker' ? drawer.id : null;
+  if (!name || refreshChat.busy || $('w-chat')?.hidden) return;
+  refreshChat.busy = true;
+  try {
+    const r = await fetch(withP(`/api/worker/${encodeURIComponent(name)}/chat`));
+    const c = await r.json();
+    if (drawer?.kind !== 'worker' || drawer.id !== name) return;
+    const log = $('chat-log');
+    if (!r.ok) { log.innerHTML = `<div class="error">${esc(c.error)}</div>`; chatKey = ''; return; }
+    // offene Tool-Details nicht zuklappen: nur neu zeichnen, wenn sich etwas geändert hat
+    const last = c.entries.at(-1);
+    const key = `${c.sessionId}|${c.entries.length}|${last?.at}|${last?.result?.length ?? ''}`;
+    if (key === chatKey) return;
+    chatKey = key;
+    const body = $('d-body');
+    const atBottom = body.scrollHeight - body.scrollTop - body.clientHeight < 80;
+    const open = new Set([...log.querySelectorAll('details[open]')].map((d) => d.dataset.i));
+    log.innerHTML = c.entries.length ? c.entries.map(chatEntry).join('') : '<p class="muted">noch kein Verlauf</p>';
+    log.querySelectorAll('details').forEach((d, i) => { d.dataset.i = i; if (open.has(String(i))) d.open = true; });
+    if (atBottom) body.scrollTop = body.scrollHeight;
+  } catch (e) {
+    $('chat-log').innerHTML = `<div class="error">${esc(e.message)}</div>`;
+  } finally {
+    refreshChat.busy = false;
+  }
+}
+setInterval(() => { if (drawer?.kind === 'worker' && !document.hidden) refreshChat(); }, 3000);
 async function refreshWorkerDrawer(first = false) {
   const name = drawer?.id;
   if (!name || refreshWorkerDrawer.busy) return;
   // Nicht neu zeichnen, solange ein Stopp-Knopf scharf ist oder eine Meldung steht
-  if (!first && $('d-body').querySelector('[data-armed], #w-msg:not(:empty)')) return;
+  if (!first && $('w-details')?.querySelector('[data-armed], #w-msg:not(:empty)')) return;
   refreshWorkerDrawer.busy = true;
   try {
     const r = await fetch(withP(`/api/worker/${encodeURIComponent(name)}`));
     const w = await r.json();
     if (drawer?.kind !== 'worker' || drawer.id !== name) return;
-    if (!r.ok) { $('d-body').innerHTML = `<div class="error">${esc(w.error)}</div>`; return; }
+    if (!r.ok) { $('w-details').innerHTML = `<div class="error">${esc(w.error)}</div>`; return; }
     // Claims kennt nur der Gesamtstand
     w.issues = st?.workers.find((x) => x.name === name)?.issues || [];
     w.drained = !!st?.drain.roles[w.role];
     const top = $('d-body').scrollTop;
-    $('d-body').innerHTML = workerHtml(w);
+    $('w-details').innerHTML = workerHtml(w);
     $('d-body').scrollTop = top;
   } catch (e) {
-    $('d-body').innerHTML = `<div class="error">${esc(e.message)}</div>`;
+    $('w-details').innerHTML = `<div class="error">${esc(e.message)}</div>`;
   } finally {
     refreshWorkerDrawer.busy = false;
   }
 }
 
 function openCreate() {
-  const mods = st?.project?.modules || [];
-  openDrawer('create', null, 'Neues Issue', `
+  const m = meta();
+  const c = m.create;
+  const mods = c.modules ? st.project.modules || [] : [];
+  const labels = [...(m.name === 'code' ? [] : [`ws:${m.name}`]), `phase:${m.readyPhase}`];
+  openDrawer('create', null, esc(c.title), `
     <form class="form" id="create">
-      <label>Titel <input name="title" required minlength="5" maxlength="200" placeholder="Modul: was passiert, wann, warum es falsch ist"></label>
-      <label>Beschreibung <textarea name="description" rows="8" placeholder="Fundstelle, Schritte zum Nachstellen, erwartetes Verhalten"></textarea></label>
+      <label>Titel <input name="title" required minlength="5" maxlength="200" placeholder="${esc(c.titlePlaceholder)}"></label>
+      <label>Beschreibung <textarea name="description" rows="8" placeholder="${esc(c.descriptionPlaceholder)}"></textarea></label>
       <div class="inline">
         <label>Priorität <select name="priority">${[0, 1, 2, 3, 4].map((p) => `<option value="${p}" ${p === 2 ? 'selected' : ''}>P${p}</option>`).join('')}</select></label>
-        <label>Modul <select name="modul"><option value="">–</option>${mods.map((m) => `<option>${m}</option>`).join('')}</select></label>
-        <label>Typ <select name="type"><option>bug</option><option>feature</option><option>task</option><option>chore</option></select></label>
+        ${mods.length ? `<label>Modul <select name="modul"><option value="">–</option>${mods.map((x) => `<option>${esc(x)}</option>`).join('')}</select></label>` : ''}
+        ${c.fields.map((f) => `<label>${esc(f.label)} <input name="${esc(f.name)}" maxlength="60" placeholder="${esc(f.placeholder)}" title="Label ${esc(f.prefix)}…"></label>`).join('')}
+        <label>Typ <select name="type">${['bug', 'feature', 'task', 'chore'].map((t) => `<option ${t === c.type ? 'selected' : ''}>${t}</option>`).join('')}</select></label>
       </div>
       <label style="display:flex;gap:8px;align-items:center"><input type="checkbox" name="human" style="width:auto"> braucht erst meine Entscheidung (Label human)</label>
       <div class="actions"><button class="primary" type="submit">Anlegen</button><span class="msg" id="c-msg"></span></div>
-      <p class="muted" style="font-size:12.5px">Landet mit <code>phase:fix</code> in der Warteschlange; der nächste freie Fix-Worker nimmt es.</p>
+      <p class="muted" style="font-size:12.5px">Landet mit ${labels.map((l) => `<code>${esc(l)}</code>`).join(' und ')} in der Warteschlange; der nächste freie Worker nimmt es.</p>
     </form>`);
   $('create').title.focus();
 }
@@ -741,12 +1021,18 @@ document.addEventListener('click', async (e) => {
     e.preventDefault();
     return openIssue(issueLink.dataset.issue);
   }
+  const wt = e.target.closest('button[data-wtab]');
+  if (wt) { showWorkerTab(wt.dataset.wtab); if (wt.dataset.wtab === 'chat') { chatKey = ''; refreshChat(); } return; }
+
   const wcard = e.target.closest('.wcard');
   if (wcard && !e.target.closest('a,button')) return openWorker(wcard.dataset.worker);
 
+  const wsb = e.target.closest('button[data-ws]');
+  if (wsb) return switchWs(wsb.dataset.ws);
+
   const wa = e.target.closest('button[data-wa]');
   if (wa) {
-    const body = { action: wa.dataset.wa, role: wa.dataset.role, off: !!wa.dataset.off };
+    const body = { action: wa.dataset.wa, role: wa.dataset.role, off: !!wa.dataset.off, ws: st?.workspace };
     if (body.action === 'add' && !armed(wa, `${body.role} starten?`)) return;
     wa.disabled = true;
     try {
@@ -757,19 +1043,72 @@ document.addEventListener('click', async (e) => {
     return;
   }
 
-  const stop = e.target.closest('button[data-stop]');
-  if (stop) {
-    const force = !!stop.dataset.force;
-    if (!armed(stop, force ? 'Wirklich abbrechen?' : 'Wirklich stoppen?')) return;
-    const msg = $('w-msg');
-    stop.disabled = true;
+  const ra = e.target.closest('button[data-ra]');
+  if (ra) {
+    const action = ra.dataset.ra;
+    const n = ra.dataset.n === 'all' ? 'all' : Number(ra.dataset.n);
+    const force = !!ra.dataset.force;
+    const last = runners?.runners?.length || 0;
+    const ask = force ? 'Job abbrechen?' : {
+      stop: `${n === 'all' ? 'alle' : `Runner ${n}`} aus?`,
+      add: `Runner ${last + 1} anlegen?`,
+      delete: `Runner ${last} löschen?`,
+    }[action];
+    if (ask && !armed(ra, ask)) return;
+    if (action === 'add') toast('Runner wird angelegt, das dauert etwa eine Minute …');
+    ra.disabled = true;
     try {
-      const r = await post('/api/workers', { action: 'stop', name: stop.dataset.stop, force });
-      toast(r.output || 'gestoppt'); closeDrawer(); await reload();
+      const r = await post('/api/runners', { action: ra.dataset.ra, n, force });
+      toast(r.output?.split('\n').pop() || 'ok');
+      await loadRunners(true);
+    } catch (err) {
+      toast(err.message, true);
+      // verweigert (Job läuft oder letzter Runner): beim nächsten Klick mit --force
+      if (err.status === 409 && (action === 'stop' || action === 'delete') && !force && ra.isConnected) {
+        ra.dataset.force = '1'; ra.textContent = 'Trotzdem (--force)';
+      }
+    } finally { ra.disabled = false; }
+    return;
+  }
+
+  const rs = e.target.closest('button[data-restart]');
+  if (rs) {
+    const force = !!rs.dataset.force;
+    if (!armed(rs, force ? 'Wirklich mitten in der Arbeit?' : 'Wirklich neu starten?')) return;
+    const msg = $('w-msg');
+    rs.disabled = true;
+    msg.className = 'msg'; msg.textContent = 'startet neu …';
+    try {
+      const r = await post('/api/workers', { action: 'restart', name: rs.dataset.restart, force });
+      toast(r.output?.split('\n').pop() || 'neu gestartet'); closeDrawer(); await reload();
     } catch (err) {
       msg.className = 'msg bad'; msg.textContent = err.message;
       if (err.status === 409 && !force) {
+        rs.dataset.force = '1'; rs.textContent = 'Trotzdem neu starten (--force)';
+      }
+    } finally { rs.disabled = false; }
+    return;
+  }
+
+  const stop = e.target.closest('button[data-stop]');
+  if (stop) {
+    const force = !!stop.dataset.force;
+    const all = stop.dataset.stop === 'all';
+    if (!armed(stop, force ? (all ? 'Alle abbrechen?' : 'Wirklich abbrechen?') : (all ? 'Alle stoppen?' : 'Wirklich stoppen?'))) return;
+    // „Alle stoppen“ sitzt in der Kopfleiste, dort gibt es kein Meldungsfeld
+    const msg = all ? null : $('w-msg');
+    stop.disabled = true;
+    try {
+      const r = await post('/api/workers', { action: 'stop', name: stop.dataset.stop, force });
+      toast(r.output || 'gestoppt');
+      if (all) { delete stop.dataset.force; delete stop.dataset.armed; } else closeDrawer();
+      await reload();
+    } catch (err) {
+      if (msg) { msg.className = 'msg bad'; msg.textContent = err.message; } else toast(err.message, true);
+      if (err.status === 409 && !force) {
         stop.dataset.force = '1'; stop.textContent = 'Trotzdem stoppen (--force)';
+        // in der Kopfleiste nicht dauerhaft scharf lassen, sonst bleibt die Leiste eingefroren
+        if (all) setTimeout(() => { delete stop.dataset.force; stop.textContent = 'Alle stoppen'; }, 15_000);
       }
     } finally { stop.disabled = false; }
     return;
@@ -784,6 +1123,17 @@ document.addEventListener('click', async (e) => {
       if (to === 'done' && !text.trim()) { $('i-msg').className = 'msg bad'; $('i-msg').textContent = 'Bitte einen Grund eintragen'; return; }
       if (to === 'done' && !armed(mv, 'Wirklich schließen?')) return;
       return issueAction(id, { action: 'move', to, text }, `${id} → ${mv.textContent.trim()}`);
+    }
+    const act = e.target.closest('button[data-xaction]');
+    if (act) {
+      if (!armed(act, act.dataset.confirm)) return;
+      act.disabled = true;
+      $('i-msg').className = 'msg'; $('i-msg').textContent = 'läuft …';
+      try {
+        await post('/api/action', { id, action: act.dataset.xaction, text });
+        toast(`${id}: erledigt`); closeDrawer(); await reload();
+      } catch (err) { $('i-msg').className = 'msg bad'; $('i-msg').textContent = err.message; act.disabled = false; }
+      return;
     }
     if (e.target.closest('button[data-unclaim]')) {
       if (!armed(e.target.closest('button'), 'Wirklich Claim lösen?')) return;
@@ -802,18 +1152,42 @@ document.addEventListener('change', (e) => {
   if (e.target.id === 'i-prio' && drawer?.kind === 'issue') {
     issueAction(drawer.id, { action: 'priority', value: Number(e.target.value) }, `${drawer.id}: Priorität P${e.target.value}`);
   }
+  if (e.target.id === 'autorestart') {
+    const n = Number(e.target.value);
+    post('/api/workers', n ? { action: 'autorestart', threshold: n } : { action: 'autorestart', off: true })
+      .then((r) => toast(r.output?.split('\n')[0] || 'gespeichert'), (err) => toast(err.message, true))
+      .finally(reload);
+  }
 });
 document.addEventListener('input', (e) => {
   if (e.target.id === 'i-text' && drawer?.id) drafts.set(drawer.id, e.target.value);
 });
 document.addEventListener('submit', async (e) => {
+  if (e.target.id === 'chat-form') {
+    e.preventDefault();
+    const input = $('chat-text');
+    const msg = $('c-msg');
+    const text = input.value.trim();
+    if (!text || !drawer?.id) return;
+    const btn = e.target.querySelector('button');
+    btn.disabled = true;
+    msg.className = 'msg'; msg.textContent = 'sendet …';
+    try {
+      await post('/api/workers', { action: 'send', name: drawer.id, text });
+      input.value = ''; msg.textContent = 'gesendet';
+      setTimeout(() => { if (msg.textContent === 'gesendet') msg.textContent = ''; refreshChat(); }, 1500);
+    } catch (err) {
+      msg.className = 'msg bad'; msg.textContent = err.message;
+    } finally { btn.disabled = false; input.focus(); }
+    return;
+  }
   if (e.target.id === 'start') {
     e.preventDefault();
     const counts = Object.fromEntries(ROLES.map((r) => [r, Number(e.target[r].value)]));
     const msg = $('s-msg');
     msg.className = 'msg'; msg.textContent = 'startet …';
     try {
-      const r = await post('/api/workers', { action: 'start', counts });
+      const r = await post('/api/workers', { action: 'start', ws: st.workspace, counts });
       toast(r.output || 'gestartet'); closeDrawer(); await reload();
     } catch (err) { msg.className = 'msg bad'; msg.textContent = err.message; }
     return;
@@ -824,6 +1198,7 @@ document.addEventListener('submit', async (e) => {
   const body = Object.fromEntries(f);
   body.human = f.has('human');
   body.priority = Number(body.priority);
+  body.ws = st?.workspace;
   const msg = $('c-msg');
   msg.className = 'msg'; msg.textContent = 'legt an …';
   try {
@@ -840,7 +1215,7 @@ document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && drawer) 
 $('new-issue').onclick = openCreate;
 $('logout').onclick = async () => { await post('/logout', {}).catch(() => {}); location.href = '/login'; };
 document.addEventListener('click', (e) => { if (e.target.id === 'start-open') openStart(); });
-$('refresh').onclick = reload;
+$('refresh').onclick = () => { loadRunners(true); return reload(); };
 
 // Inbox-Entscheidungen
 $('inbox').addEventListener('input', (e) => {
@@ -848,19 +1223,22 @@ $('inbox').addEventListener('input', (e) => {
   if (card && e.target.tagName === 'TEXTAREA') drafts.set(card.dataset.id, e.target.value);
 });
 $('inbox').addEventListener('click', async (e) => {
-  const btn = e.target.closest('button[data-action]');
+  const btn = e.target.closest('button[data-action], button[data-xaction]');
   if (!btn) return;
   e.stopPropagation();
   const card = btn.closest('.card');
   const id = card.dataset.id;
   const action = btn.dataset.action;
+  const xaction = btn.dataset.xaction;
   const text = card.querySelector('textarea').value;
   const msg = card.querySelector('.msg');
   if (action === 'close' && !armed(btn, 'Wirklich schließen?')) return;
+  if (xaction && !armed(btn, btn.dataset.confirm)) return;
   card.querySelectorAll('button').forEach((b) => (b.disabled = true));
   msg.className = 'msg'; msg.textContent = 'speichert …';
   try {
-    await post('/api/decide', { id, action, text });
+    if (xaction) await post('/api/action', { id, action: xaction, text });
+    else await post('/api/decide', { id, action, text });
     drafts.delete(id);
     document.activeElement?.blur();
     msg.textContent = 'gespeichert';
@@ -903,17 +1281,15 @@ document.addEventListener('drop', (e) => {
   zone.classList.remove('drop-ok');
   if (from === to) return;
   if (to === 'done') return openIssue(id, true);
-  issueAction(id, { action: 'move', to }, `${id} → ${to === 'ready' ? 'Bereit' : to === 'human' ? 'Wartet auf dich' : to}`);
+  issueAction(id, { action: 'move', to }, `${id} → ${COLS.find(([k]) => k === to)?.[1] || (to === 'human' ? 'Wartet auf dich' : to)}`);
 });
 
-// Filter (pro Browser gemerkt)
-const FILTER_DEFAULTS = { ...filters };
-const fkey = () => `leitstand-filter-${P}`;
+// Filter (pro Browser und Projekt gemerkt)
+const fkey = () => `leitstand-filter:${P}`;
 function loadFilters() {
-  Object.assign(filters, FILTER_DEFAULTS);
+  Object.assign(filters, { q: '', mod: '', prio: '', tests: false, stale: false });
   try { Object.assign(filters, JSON.parse(localStorage.getItem(fkey()) || '{}')); } catch {}
   $('f-q').value = filters.q; $('f-prio').value = filters.prio; $('f-tests').checked = filters.tests; $('f-stale').checked = filters.stale;
-  $('f-mod').innerHTML = '<option value="">alle Module</option>';
 }
 for (const [id, k, prop] of [['f-q', 'q', 'value'], ['f-mod', 'mod', 'value'], ['f-prio', 'prio', 'value'], ['f-tests', 'tests', 'checked'], ['f-stale', 'stale', 'checked']]) {
   $(id).addEventListener('input', () => {
@@ -936,12 +1312,14 @@ async function loadProjects() {
   } catch { /* Fehler zeigt load() */ }
   renderProjects();
 }
-function selectProject(slug) {
+function selectProject(slug, first = false) {
   if (!PROJECTS.some((p) => p.slug === slug)) slug = PROJECTS[0]?.slug || '';
   if (slug === P) return;
   P = slug;
   try { localStorage.setItem('leitstand-project', P); } catch {}
-  if (location.hash.slice(1) !== P) history.replaceState(null, '', `#${P}`);
+  if (location.hash.slice(1) !== P) history.replaceState(null, '', `${first ? location.search : location.pathname}#${P}`);
+  // Workspace: beim ersten Laden ?ws=, sonst der zuletzt gewählte des Projekts
+  if (!first || !WS) { try { WS = localStorage.getItem(wsKey()) || 'code'; } catch { WS = 'code'; } }
   st = null;
   if (drawer) closeDrawer();
   loadFilters();
@@ -962,7 +1340,7 @@ window.addEventListener('hashchange', () => selectProject(decodeURIComponent(loc
     $('errors').innerHTML = '<div class="error">Keine Projekte. Ein Projekt erscheint hier, sobald dort einmal <code>scripts/beadskit/workers</code> lief (Liste: <code>~/.config/beadskit/projects.txt</code>).</div>';
     return;
   }
-  selectProject(want);
+  selectProject(want, true);
 })();
 setInterval(() => { if ($('auto').checked && !document.hidden && P) load(); }, 8000);
 setInterval(() => { if (!document.hidden) loadProjects(); }, 30000);

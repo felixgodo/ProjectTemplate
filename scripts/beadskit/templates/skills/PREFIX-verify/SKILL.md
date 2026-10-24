@@ -27,6 +27,9 @@ In dieser Reihenfolge:
    prüft seinen eigenen Fix.
 3. **Tests**: sonst Abschnitt 4.
 
+Hat das Issue `metadata.repo` (weiteres Repo aus `BK_REPOS`), PR, CI und Merge dort prüfen
+(`gh … -R <owner/name>`, Worktree im anderen Repo, siehe `worker-regeln.md`, „Mehrere Repos“).
+
 ## 2. Unabhängig prüfen
 ```bash
 gh pr view <pr> --json title,body,headRefName,baseRefName,mergeable,statusCheckRollup
