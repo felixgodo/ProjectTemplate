@@ -3,11 +3,16 @@
 // „Wartet auf dich“ (Issues mit Label human) mit Entscheidungsfeld, Worker-Karten (was jede
 // Claude-Session gerade tut, aus ihrem Transkript), Kanban-Board je Workspace, PRs mit CI-Stand,
 // CI-Runner. Steuert Issues (verschieben, Priorität, Unclaim, anlegen), Worker (start, add, drain,
-// stop, restart, Chat: Verlauf lesen, Nachricht in den iTerm-Tab senden) und die CI-Runner auf dem
+// stop, restart, Chat: Verlauf lesen, Nachricht ins Terminal senden) und die CI-Runner auf dem
 // Server (an/aus, hinzufügen, löschen). Mit `workers autorestart` startet der Server Worker mit
 // großem Kontext zwischen zwei Runden selbst neu (Prüfung jede Minute, siehe planRestarts).
 // Liest und schreibt nur über scripts/beadskit/{bdw,workers,ci/runner-server}, `claude agents|logs`,
 // `gh` und die Transkripte unter ~/.claude/projects (nur lesend).
+//
+// Zwei Rechner (~/.config/beadskit/hosts.conf, siehe ProjectTemplate/scripts/remote): Der Leitstand
+// läuft auf dem Leitrechner und holt die Worker des anderen Rechners per ssh (on-host +
+// host-agent.mjs im selben Projekt dort); Start, Stopp, Neustart und Nachrichten laufen auf dem
+// Rechner des Workers. beads ist ohnehin gemeinsam (eine Datenbank auf dem Leitrechner).
 //
 // Ein Prozess für alle Projekte: Die Liste steht in ~/.config/beadskit/projects.txt (ein Pfad je
 // Zeile; `workers` trägt sein Projekt bei jedem Aufruf ein). Jede Projekt-Route nimmt ?p=<slug>.
@@ -309,9 +314,11 @@ export function planCreate({ title, description, priority, modul, type, human, .
 
 /**
  * Argumente für scripts/beadskit/workers. `ws` (Standard code) bestimmt, welche Rollen start, add
- * und drain annehmen. drain mit role 'all' = globaler Drain, role 'ws' = alle Rollen des Workspaces.
+ * und drain annehmen. drain mit role 'all' = globaler Drain, role 'ws' = alle Rollen des Workspaces,
+ * role 'host' = alle Worker des Rechners `host` (einer aus `hosts`). Wo die Aktion läuft, sagt
+ * routeWorkerAction.
  */
-export function planWorkerAction({ action, role, name, force, off, counts, threshold, text, ws }, workspaces) {
+export function planWorkerAction({ action, role, name, force, off, counts, threshold, text, ws, host }, workspaces, hosts = []) {
   const w = ws ?? 'code';
   if (typeof w !== 'string' || !Object.hasOwn(workspaces, w)) throw new Error('unbekannter Workspace');
   const roles = workspaces[w].roles;
@@ -332,6 +339,11 @@ export function planWorkerAction({ action, role, name, force, off, counts, thres
       if (!roles.includes(role)) throw new Error('unbekannte Rolle');
       return ['add', role];
     case 'drain': {
+      // role 'host': nur die Worker eines Rechners (zwei Rechner)
+      if (role === 'host') {
+        if (typeof host !== 'string' || !hosts.includes(host)) throw new Error('unbekannter Rechner');
+        return ['drain', '--host', host, ...(off ? ['--off'] : [])];
+      }
       const what = role === 'all' ? [] : role === 'ws' ? ['--ws', w] : roles.includes(role) ? [role] : null;
       if (!what) throw new Error('unbekannte Rolle');
       return ['drain', ...what, ...(off ? ['--off'] : [])];
@@ -506,6 +518,119 @@ export function parseWorkers(agents, wtDir, workspaces) {
     .sort((a, b) => a.name.localeCompare(b.name, 'de', { numeric: true }));
 }
 
+const HOST_RE = /^[a-z0-9]{1,20}$/;
+
+/**
+ * Zwei Rechner (~/.config/beadskit/hosts.conf, Zeilen NAME=wert): Leitrechner, dieser Rechner und
+ * je Rechner ssh-Ziel (HOST_<h>_SSH, Standard der Name) und Projektordner (HOST_<h>_ROOT). null
+ * ohne LEADER oder SELF: dann gibt es nur diesen Rechner.
+ */
+export function parseHostsConf(text) {
+  const v = {};
+  for (const line of String(text || '').split('\n')) {
+    const m = /^([A-Za-z0-9_]+)=(.*)$/.exec(line.trim());
+    if (m) v[m[1]] = m[2].replace(/^"(.*)"$/, '$1');
+  }
+  if (!HOST_RE.test(v.LEADER || '') || !HOST_RE.test(v.SELF || '')) return null;
+  const names = String(v.HOSTS || '').split(/\s+/).filter((h) => HOST_RE.test(h));
+  for (const h of [v.LEADER, v.SELF]) if (!names.includes(h)) names.push(h);
+  return {
+    leader: v.LEADER,
+    self: v.SELF,
+    hosts: [...new Set(names)].map((name) => {
+      const ssh = v[`HOST_${name}_SSH`];
+      const root = v[`HOST_${name}_ROOT`];
+      return {
+        name,
+        // nur ein Ziel wie pc, felix@pc oder pc.tail1234.ts.net, nie eine ssh-Option
+        ssh: /^[A-Za-z0-9][A-Za-z0-9._@-]*$/.test(ssh || '') ? ssh : name,
+        root: typeof root === 'string' && root.startsWith('/') ? root.replace(/\/+$/, '') : null,
+      };
+    }),
+  };
+}
+
+/** Derselbe Projektordner auf einem anderen Rechner: Präfix tauschen; null, wenn root nicht darunter liegt. */
+export function mapRoot(root, from, to) {
+  if (typeof root !== 'string' || !from || !to) return null;
+  if (root === from) return to;
+  return root.startsWith(`${from}/`) ? `${to}${root.slice(from.length)}` : null;
+}
+
+/** Ein Wort für die Shell auf der Gegenseite: ssh fügt alle Argumente zu einer Befehlszeile zusammen. */
+export function shQuote(s) {
+  return `'${String(s).replace(/'/g, "'\\''")}'`;
+}
+
+/**
+ * Befehlszeile für ssh: scripts/beadskit/on-host lädt die Umgebung des Rechners (PATH für node, bd,
+ * claude), wechselt in den Projektordner und führt <cmd> (relativ zum Projekt) mit den Argumenten aus.
+ */
+export function remoteCommand(root, cmd, args = []) {
+  return [`${root}/scripts/beadskit/on-host`, root, cmd, ...args].map(shQuote).join(' ');
+}
+
+/**
+ * Worker aller Rechner in einer Liste: perHost = [{ host, ok, error, leader, self, workers }]. Jeder
+ * Worker trägt seinen Rechner, den Workspace bestimmt dieser Leitstand aus der Rolle. Ein Rechner,
+ * der nicht antwortet, steht mit Fehler in hosts; die übrigen bleiben.
+ */
+export function mergeHostWorkers(perHost, workspaces) {
+  const workers = [];
+  const hosts = [];
+  for (const h of Array.isArray(perHost) ? perHost : []) {
+    const ok = !!h.ok && Array.isArray(h.workers);
+    hosts.push({ name: h.host, ok, error: ok ? null : String(h.error || 'nicht erreichbar').slice(-300), leader: !!h.leader, self: !!h.self });
+    if (!ok) continue;
+    for (const w of h.workers) {
+      if (w && typeof w.name === 'string' && typeof w.role === 'string') workers.push({ ...w, ws: wsOfRole(w.role, workspaces), host: h.host });
+    }
+  }
+  workers.sort((a, b) => a.name.localeCompare(b.name, 'de', { numeric: true }));
+  return { workers, hosts };
+}
+
+/**
+ * Markierungen aus `bd kv list` (zwei Rechner): beadskit.drain, .drain-<rolle>, .drain@<rechner>,
+ * .autorestart (Schwelle in Tokens).
+ */
+export function parseMarkers(kv, roles = [], hosts = []) {
+  const o = kv && typeof kv === 'object' ? kv : {};
+  const has = (k) => Object.hasOwn(o, `beadskit.${k}`);
+  const all = has('drain');
+  const n = Number(o['beadskit.autorestart']);
+  return {
+    drain: {
+      all,
+      roles: Object.fromEntries(roles.map((r) => [r, all || has(`drain-${r}`)])),
+      hosts: Object.fromEntries(hosts.map((h) => [h, has(`drain@${h}`)])),
+    },
+    threshold: Number.isInteger(n) && n > 0 ? n : null,
+  };
+}
+
+/**
+ * Auf welchen Rechnern eine Worker-Aktion läuft. start/add: der gewählte (Standard dieser),
+ * stop --all: alle erreichbaren, stop/restart/send: der, auf dem der Worker läuft, drain und
+ * autorestart: dieser (die Markierungen liegen in der gemeinsamen Datenbank).
+ */
+export function routeWorkerAction({ action, name, host }, { hosts = [], self = null, workers = [] } = {}) {
+  if (!hosts.length) return [null];
+  const names = hosts.map((h) => h.name);
+  if (action === 'start' || action === 'add') {
+    const h = host ?? self;
+    if (!names.includes(h)) throw new Error('unbekannter Rechner');
+    return [h];
+  }
+  if (action === 'stop' && name === 'all') return hosts.filter((h) => h.ok !== false).map((h) => h.name);
+  if (['stop', 'restart', 'send'].includes(action)) {
+    const w = workers.find((x) => x.name === name);
+    if (!w) throw new Error(`Worker ${name} läuft auf keinem Rechner`);
+    return [w.host];
+  }
+  return [self];
+}
+
 /**
  * Worker, die der Auto-Neustart jetzt neu starten soll: idle zwischen zwei Runden, kein Issue in
  * Arbeit, nicht Halter des Merge-Slots, kein Drain, keine wartende Nachricht, Kontext über der
@@ -577,12 +702,14 @@ export function normalizeConfig(cfg) {
     workspaces,
     repos: repos.some((r) => r.key === '.') ? repos : [{ key: '.', path: cfg.root }, ...repos],
     runners: cfg.runners === true,
+    // zwei Rechner: Markierungen in bd kv statt in Dateien
+    markers: cfg.markers === 'kv' ? 'kv' : 'file',
   };
 }
 
 /** Öffentlicher Teil einer Projekt-Config für die Seite (ohne lokale Pfade). */
 export function publicConfig(cfg) {
-  const { root, drain, autorestart, repos, ...rest } = cfg;
+  const { root, drain, autorestart, repos, markers, ...rest } = cfg;
   return { ...rest, repos: repos.map((r) => r.key) };
 }
 
@@ -819,6 +946,41 @@ const exists = (p) => access(p).then(() => true, () => false);
 const stripAnsi = (s) => s.replace(/\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b\][^\x07]*(\x07|\x1b\\)/g, '');
 const cmdOutput = (e) => stripAnsi(`${e.stdout || ''}${e.stderr || ''}`).trim() || e.message;
 
+/** Chatverlauf eines Workers dieses Rechners aus dem Ende seines Transkripts (die api-request-Blobs sind groß). */
+export async function workerChatOf(w) {
+  const file = transcriptPath(w.cwd, w.sessionId);
+  const entries = file ? chatTranscript(await readTail(file, 8 * 1024 * 1024), { cwd: w.cwd, limit: 250 }) : [];
+  return { name: w.name, kind: w.kind, status: w.status, sessionId: w.sessionId, entries };
+}
+
+/** Ausführliche Aktivität eines Workers dieses Rechners, bei Hintergrund-Workern dazu `claude logs`. */
+export async function workerDetailOf(w, root) {
+  const activity = await sessionSummary(w, { bytes: 1024 * 1024, toolLimit: 80, textLimit: 4000 });
+  let logs = null;
+  if (w.kind === 'background' && w.session) {
+    try {
+      const { stdout } = await run('claude', ['logs', w.session], { cwd: root, timeout: 10_000, maxBuffer: 8 * 1024 * 1024 });
+      logs = stripAnsi(stdout).slice(-20_000);
+    } catch (e) {
+      logs = `claude logs fehlgeschlagen: ${(e.stderr || e.message || '').trim()}`;
+    }
+  }
+  return { ...w, activity, logs };
+}
+
+/** Worker dieses Rechners mit Kurzfassung ihrer Aktivität; null, wenn `claude agents` nicht antwortet. */
+export async function localWorkers(root, workspaces) {
+  const agents = await json('claude', ['agents', '--json'], root);
+  if (!agents) return null;
+  return Promise.all(parseWorkers(agents, join(root, '.claude/worktrees'), workspaces)
+    .map(async (w) => ({ ...w, activity: await sessionSummary(w) })));
+}
+
+// ssh ohne Rückfrage, kurzer Verbindungsaufbau, eine gemeinsame Verbindung je Rechner (das Board
+// fragt alle paar Sekunden)
+const SSH_OPTS = ['-o', 'BatchMode=yes', '-o', 'ConnectTimeout=5', '-o', 'ServerAliveInterval=10',
+  '-o', 'ControlMaster=auto', '-o', 'ControlPersist=10m', '-o', `ControlPath=${join(homedir(), '.ssh', 'bk-%C')}`];
+
 const loginHtml = (password) => `<!doctype html>
 <html lang="de"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Leitstand</title><style>
@@ -833,10 +995,10 @@ p{margin:0;color:var(--muted);font-size:13px}.bad{color:var(--bad)}</style></hea
 ${password
     ? `<input type="text" name="user" placeholder="Benutzer" autocomplete="username" autocapitalize="none" spellcheck="false" required autofocus>
 <input type="password" name="password" placeholder="Passwort" autocomplete="current-password" required>
-<button>Anmelden</button><p id="m">Passwort ändern: <code>scripts/beadskit/leitstand/leitstand-remote password</code> auf dem Mac.</p>`
+<button>Anmelden</button><p id="m">Passwort ändern: <code>scripts/beadskit/leitstand/leitstand-remote password</code> auf dem Rechner des Leitstands.</p>`
     : `<input type="text" name="username" value="leitstand" autocomplete="username" hidden>
 <input type="password" name="token" placeholder="Zugangs-Token" autocomplete="current-password" required autofocus>
-<button>Anmelden</button><p id="m">Token: <code>scripts/beadskit/leitstand/leitstand-remote token</code> auf dem Mac.</p>`}</form>
+<button>Anmelden</button><p id="m">Token: <code>scripts/beadskit/leitstand/leitstand-remote token</code> auf dem Rechner des Leitstands.</p>`}</form>
 <script>
 document.getElementById('f').onsubmit = async (e) => {
   e.preventDefault();
@@ -975,22 +1137,75 @@ function startServer(token, selfRoot) {
     };
   }
 
-  async function drainState(cfg) {
+  // Zwei Rechner: hosts.conf, kurz zwischengespeichert; null bei einem Rechner
+  let hostsCache = { at: 0, conf: null };
+  async function hostsConf() {
+    if (Date.now() - hostsCache.at > CONFIG_TTL_MS) {
+      let conf = null;
+      try { conf = parseHostsConf(await readFile(join(CONF_DIR, 'hosts.conf'), 'utf8')); } catch { /* ein Rechner */ }
+      hostsCache = { at: Date.now(), conf };
+    }
+    return hostsCache.conf;
+  }
+
+  /**
+   * Führt <cmd> (relativ zum Projekt) auf einem Rechner aus: hier direkt, sonst per ssh über on-host
+   * im selben Projekt auf dem anderen Rechner (Ordner über HOST_<h>_ROOT umgerechnet).
+   */
+  async function onHost(conf, host, root, cmd, args, { timeout = 30_000 } = {}) {
+    const opts = { timeout, maxBuffer: 64 * 1024 * 1024 };
+    if (!conf || !host || host === conf.self) return run(join(root, cmd), args, { cwd: root, ...opts });
+    const self = conf.hosts.find((h) => h.name === conf.self);
+    const h = conf.hosts.find((x) => x.name === host);
+    if (!h) throw new Error(`unbekannter Rechner ${host}`);
+    const there = mapRoot(root, self?.root, h.root);
+    if (!there) throw new Error(`${root} liegt nicht unter HOST_${conf.self}_ROOT, Ordner auf ${host} unbekannt (hosts.conf)`);
+    return run('ssh', [...SSH_OPTS, h.ssh, remoteCommand(there, cmd, args)], opts);
+  }
+
+  // Worker je Rechner; die anderen Rechner liefern über host-agent.mjs (5 s zwischengespeichert)
+  const remoteCache = new Map();
+  async function hostWorkers(p, conf) {
+    if (!conf) {
+      const workers = await localWorkers(p.cfg.root, p.workspaces);
+      return [{ host: 'local', self: true, leader: true, ok: !!workers, error: workers ? null : 'claude agents', workers }];
+    }
+    return Promise.all(conf.hosts.map(async (h) => {
+      const base = { host: h.name, self: h.name === conf.self, leader: h.name === conf.leader };
+      if (base.self) {
+        const workers = await localWorkers(p.cfg.root, p.workspaces);
+        return { ...base, ok: !!workers, error: workers ? null : 'claude agents', workers };
+      }
+      const key = `${h.name}:${p.cfg.slug}`;
+      const hit = remoteCache.get(key);
+      if (hit && Date.now() - hit.at < 5_000) return hit.value;
+      let value;
+      try {
+        const { stdout } = await onHost(conf, h.name, p.cfg.root, 'scripts/beadskit/leitstand/host-agent.mjs', ['workers'], { timeout: 15_000 });
+        value = { ...base, ok: true, workers: JSON.parse(stdout) };
+      } catch (e) {
+        value = { ...base, ok: false, error: e.code === 'ETIMEDOUT' || e.killed ? 'keine Antwort' : cmdOutput(e) };
+      }
+      remoteCache.set(key, { at: Date.now(), value });
+      return value;
+    }));
+  }
+
+  // Drain-Markierungen und Schwelle des Auto-Neustarts (null wenn aus): Dateien oder bd kv
+  async function markers(cfg, conf) {
+    if (cfg.markers === 'kv') {
+      const kv = await tools(cfg).bd(['kv', 'list']);
+      return parseMarkers(kv, cfg.roles, conf ? conf.hosts.map((h) => h.name) : []);
+    }
     const all = cfg.drain ? await exists(cfg.drain) : false;
     const roles = {};
     for (const r of cfg.roles) roles[r] = all || (cfg.drain ? await exists(`${cfg.drain}-${r}`) : false);
-    return { all, roles };
-  }
-
-  // Schwelle des Auto-Neustarts in Tokens, null wenn aus
-  async function autoThreshold(cfg) {
-    if (!cfg.autorestart) return null;
+    let threshold = null;
     try {
-      const n = Number((await readFile(cfg.autorestart, 'utf8')).trim());
-      return Number.isInteger(n) && n > 0 ? n : null;
-    } catch {
-      return null;
-    }
+      const n = cfg.autorestart ? Number((await readFile(cfg.autorestart, 'utf8')).trim()) : NaN;
+      if (Number.isInteger(n) && n > 0) threshold = n;
+    } catch { /* aus */ }
+    return { drain: { all, roles, hosts: {} }, threshold };
   }
 
   async function projectList() {
@@ -1001,33 +1216,41 @@ function startServer(token, selfRoot) {
     }));
   }
 
-  const withActivity = (p, agents, issues, drain) => Promise.all(parseWorkers(agents, tools(p.cfg).wtDir, p.workspaces).map(async (w) => ({
-    ...w,
-    drained: !!drain.roles[w.role],
-    activity: await sessionSummary(w),
-    issues: issues.filter((i) => i.assignee === w.name && i.status === 'in_progress')
-      .map((i) => ({ id: i.id, title: i.title, pr: i.metadata?.pr ?? null, repo: repoOfIssue(i, p.cfg.repos) })),
-  })));
+  // Worker aller Rechner mit Drain und ihren Issues in Arbeit
+  const withIssues = (p, perHost, issues, drain) => {
+    const { workers, hosts } = mergeHostWorkers(perHost, p.workspaces);
+    return {
+      hosts,
+      workers: workers.map((w) => ({
+        ...w,
+        drained: !!drain.roles[w.role] || !!drain.hosts?.[w.host],
+        issues: issues.filter((i) => i.assignee === w.name && i.status === 'in_progress')
+          .map((i) => ({ id: i.id, title: i.title, pr: i.metadata?.pr ?? null, repo: repoOfIssue(i, p.cfg.repos) })),
+      })),
+    };
+  };
 
   // Eine Runde Auto-Neustart eines Projekts; ohne vollständige Lage (beads, Slot, Agents) wird nichts angefasst
   async function autoRestartTick(p) {
-    const threshold = await autoThreshold(p.cfg);
+    const conf = await hostsConf();
+    const { threshold, drain } = await markers(p.cfg, conf);
     if (!threshold) return;
-    const { root, bd, workersCmd } = tools(p.cfg);
-    const [issues, slot, agents, drain] = await Promise.all([
-      bd(['list', '--status', 'in_progress']), bd(['merge-slot', 'check']),
-      json('claude', ['agents', '--json'], root), drainState(p.cfg),
+    const { root, bd } = tools(p.cfg);
+    const [issues, slot, perHost] = await Promise.all([
+      bd(['list', '--status', 'in_progress']), bd(['merge-slot', 'check']), hostWorkers(p, conf),
     ]);
-    if (!issues || !slot || !agents) return;
+    // Worker eines Rechners, der nicht antwortet, fehlen einfach; die übrigen gehen weiter
+    if (!issues || !slot) return;
     const rs = restartsOf(p.cfg.slug);
-    const workers = await withActivity(p, agents, issues, drain);
+    const { workers } = withIssues(p, perHost, issues, drain);
     for (const name of planRestarts(workers, { threshold, slotHolder: slot.holder || null, lastRestart: rs.last })) {
       rs.last.set(name, Date.now());
-      const tokens = workers.find((w) => w.name === name)?.activity?.contextTokens;
+      const w = workers.find((x) => x.name === name);
+      const tokens = w?.activity?.contextTokens;
       let ok = true;
       let output;
       try {
-        const r = await run(workersCmd, ['restart', name], { cwd: root, timeout: 120_000 });
+        const r = await onHost(conf, w?.host, root, 'scripts/beadskit/workers', ['restart', name], { timeout: 120_000 });
         output = stripAnsi(`${r.stdout}${r.stderr}`).trim();
       } catch (e) {
         ok = false;
@@ -1061,14 +1284,14 @@ function startServer(token, selfRoot) {
   async function state(p, wsName = 'code') {
     const { cfg, ext, workspaces } = p;
     const ws = workspaces[wsName];
-    const { root, bd } = tools(cfg);
-    const [issues, slot, agents, pr, drain, threshold] = await Promise.all([
+    const { bd } = tools(cfg);
+    const conf = await hostsConf();
+    const [issues, slot, perHost, pr, { drain, threshold }] = await Promise.all([
       bd(['list', '--all', '-n', '0']),
       bd(['merge-slot', 'check']),
-      json('claude', ['agents', '--json'], root),
+      hostWorkers(p, conf),
       ws.prs ? pullRequests(cfg) : Promise.resolve({ prs: [], merged: [], ok: true }),
-      drainState(cfg),
-      autoThreshold(cfg),
+      markers(cfg, conf),
     ]);
     const now = Date.now();
     const columns = groupIssues(issues || [], ws, workspaces, now);
@@ -1081,7 +1304,7 @@ function startServer(token, selfRoot) {
     }
     // Claims aller Workspaces: die Worker-Karten zeigen auch Worker des anderen Workspaces
     const live = (issues || []).filter((i) => isBoardIssue(i) && i.status === 'in_progress');
-    const workers = await withActivity(p, agents, live, drain);
+    const { workers, hosts } = withIssues(p, perHost, live, drain);
     // offene Entscheidungen je Workspace, für den Umschalter
     const attention = Object.fromEntries(Object.keys(workspaces).map((w) => [w, 0]));
     for (const i of issues || []) {
@@ -1113,46 +1336,37 @@ function startServer(token, selfRoot) {
       columns,
       panels,
       metrics: metrics(columns, ws, pr.merged, now),
-      slot: slot ? { available: !!slot.available, holder: slot.holder || null } : null,
+      slot: slot ? { available: !!slot.available, holder: slot.holder || null,
+        host: workers.find((w) => w.name === slot.holder)?.host ?? null } : null,
       drain,
       autorestart: { threshold, recent: restartsOf(cfg.slug).recent.slice(0, 5) },
       workers,
+      // zwei Rechner: Name, erreichbar, Leitrechner, dieser; leer bei einem Rechner
+      hosts: conf ? hosts : [],
       prs: pr.prs,
       merged: pr.merged.slice(0, 10),
       auth: !!token,
-      errors: [issues ? null : 'beads', agents ? null : 'claude agents', pr.ok ? null : 'gh'].filter(Boolean),
+      errors: [issues ? null : 'beads', pr.ok ? null : 'gh',
+        ...hosts.filter((h) => !h.ok).map((h) => (conf ? `Rechner ${h.name}: ${h.error}` : h.error))].filter(Boolean),
       at: new Date().toISOString(),
     };
   }
 
+  // Worker auf irgendeinem Rechner; null, wenn er nirgends läuft
   async function findWorker(p, name) {
-    const agents = await json('claude', ['agents', '--json'], p.cfg.root);
-    return parseWorkers(agents, tools(p.cfg).wtDir, p.workspaces).find((x) => x.name === name) || null;
+    const conf = await hostsConf();
+    return mergeHostWorkers(await hostWorkers(p, conf), p.workspaces).workers.find((x) => x.name === name) || null;
   }
 
-  // Chatverlauf eines Workers aus dem Ende seines Transkripts (die api-request-Blobs sind groß)
-  async function workerChat(p, name) {
+  // Chat bzw. Detail: auf diesem Rechner direkt, sonst über host-agent.mjs dort
+  async function workerView(p, name, what) {
     const w = await findWorker(p, name);
     if (!w) return null;
-    const file = transcriptPath(w.cwd, w.sessionId);
-    const entries = file ? chatTranscript(await readTail(file, 8 * 1024 * 1024), { cwd: w.cwd, limit: 250 }) : [];
-    return { name: w.name, kind: w.kind, status: w.status, sessionId: w.sessionId, entries };
-  }
-
-  async function workerDetail(p, name) {
-    const w = await findWorker(p, name);
-    if (!w) return null;
-    const activity = await sessionSummary(w, { bytes: 1024 * 1024, toolLimit: 80, textLimit: 4000 });
-    let logs = null;
-    if (w.kind === 'background' && w.session) {
-      try {
-        const { stdout } = await run('claude', ['logs', w.session], { cwd: p.cfg.root, timeout: 10_000, maxBuffer: 8 * 1024 * 1024 });
-        logs = stripAnsi(stdout).slice(-20_000);
-      } catch (e) {
-        logs = `claude logs fehlgeschlagen: ${(e.stderr || e.message || '').trim()}`;
-      }
-    }
-    return { ...w, activity, logs };
+    const conf = await hostsConf();
+    if (!conf || w.host === conf.self) return what === 'chat' ? workerChatOf(w) : workerDetailOf(w, p.cfg.root);
+    const { stdout } = await onHost(conf, w.host, p.cfg.root, 'scripts/beadskit/leitstand/host-agent.mjs', [what, name], { timeout: 20_000 });
+    const out = JSON.parse(stdout);
+    return out ? { ...out, host: w.host } : null;
   }
 
   const send = (res, code, body, type = 'application/json; charset=utf-8', extra = {}) => {
@@ -1273,13 +1487,13 @@ function startServer(token, selfRoot) {
       if (req.method === 'GET' && path.startsWith('/api/worker/') && path.endsWith('/chat')) {
         const name = decodeURIComponent(path.slice('/api/worker/'.length, -'/chat'.length));
         if (!re.test(name)) return send(res, 400, { error: 'unbekannter Worker' });
-        const c = await workerChat(p, name);
+        const c = await workerView(p, name, 'chat');
         return c ? send(res, 200, c) : send(res, 404, { error: 'Worker läuft nicht' });
       }
       if (req.method === 'GET' && path.startsWith('/api/worker/')) {
         const name = decodeURIComponent(path.slice('/api/worker/'.length));
         if (!re.test(name)) return send(res, 400, { error: 'unbekannter Worker' });
-        const data = await workerDetail(p, name);
+        const data = await workerView(p, name, 'detail');
         return data ? send(res, 200, data) : send(res, 404, { error: 'Worker läuft nicht' });
       }
       if (req.method === 'GET' && path === '/api/runners') {
@@ -1348,14 +1562,32 @@ function startServer(token, selfRoot) {
         return runSteps(res, t, steps);
       }
       if (path === '/api/workers') {
+        const conf = await hostsConf();
         let args;
-        try { args = planWorkerAction(body, workspaces); } catch (e) { return send(res, 400, { error: e.message }); }
+        let targets;
         try {
-          const r = await run(t.workersCmd, args, { cwd: t.root, timeout: 120_000 });
-          return send(res, 200, { ok: true, output: stripAnsi(`${r.stdout}${r.stderr}`).trim() });
+          args = planWorkerAction(body, workspaces, conf ? conf.hosts.map((h) => h.name) : []);
+          const needs = ['stop', 'restart', 'send'].includes(body.action);
+          const perHost = conf && needs ? await hostWorkers(p, conf) : [];
+          const { workers, hosts } = mergeHostWorkers(perHost, workspaces);
+          targets = routeWorkerAction(body, { hosts: conf ? (needs ? hosts : conf.hosts) : [], self: conf?.self, workers });
         } catch (e) {
-          return send(res, 409, { error: cmdOutput(e) });
+          return send(res, 400, { error: e.message });
         }
+        const out = [];
+        let failed = false;
+        for (const host of targets) {
+          const label = conf && targets.length > 1 ? `[${host}] ` : '';
+          try {
+            const r = await onHost(conf, host, t.root, 'scripts/beadskit/workers', args, { timeout: 120_000 });
+            out.push(`${label}${stripAnsi(`${r.stdout}${r.stderr}`).trim()}`);
+          } catch (e) {
+            failed = true;
+            out.push(`${label}${cmdOutput(e)}`);
+          }
+          remoteCache.clear();
+        }
+        return failed ? send(res, 409, { error: out.join('\n').trim() }) : send(res, 200, { ok: true, output: out.join('\n').trim() });
       }
       if (path === '/api/runners') {
         if (!cfg.runners) return send(res, 404, { error: 'keine eigenen CI-Runner' });
@@ -1382,7 +1614,7 @@ function startServer(token, selfRoot) {
     try {
       for (const cfg of await projects.all()) {
         try {
-          if (await autoThreshold(cfg)) await autoRestartTick(await projects.get(cfg.slug));
+          if ((await markers(cfg, await hostsConf())).threshold) await autoRestartTick(await projects.get(cfg.slug));
         } catch (e) { console.error(`Auto-Neustart ${cfg.slug}: ${e.message}`); }
       }
     } finally { ticking = false; }

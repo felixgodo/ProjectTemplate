@@ -1,0 +1,21 @@
+#!/bin/sh
+# Einstieg für Befehle, die ein anderer Rechner per ssh hier ausführt (Leitstand, `pc`):
+#
+#   on-host <projektordner> <befehl relativ zum Projekt | Programm> [argumente…]
+#
+# ssh ohne Login-Shell kennt den PATH von Homebrew bzw. ~/.local/bin nicht (node, bd, claude, jq);
+# ~/.config/beadskit/env setzt ihn (legen scripts/remote/setup-*.sh an). Danach im Projektordner
+# ausführen; ein Befehl mit / gilt relativ zum Projekt, sonst als Programm aus dem PATH.
+# Teil des beadskit aus dem ProjectTemplate – nicht im Projekt ändern.
+set -eu
+[ $# -ge 2 ] || { sed -n '4p' "$0" >&2; exit 2; }
+env_file=${BEADSKIT_HOME:-$HOME/.config/beadskit}/env
+# shellcheck source=/dev/null
+[ ! -f "$env_file" ] || . "$env_file"
+cd "$1"
+shift
+case $1 in
+  /*) ;;
+  */*) cmd=./$1; shift; set -- "$cmd" "$@" ;;
+esac
+exec "$@"

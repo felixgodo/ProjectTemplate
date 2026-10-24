@@ -12,6 +12,9 @@ Protokoll sind die Review-Dateien unter `reviews/` (siehe CLAUDE.md), der Weg na
   Worktree-Namen als Actor, sonst laufen alle Sessions unter demselben Namen.
 - Die Datenbank liegt im Haupt-Checkout (`.beads/`), Worktrees finden sie selbst, der
   Dolt-Server startet bei Bedarf. Prüfen: `bdw context` zeigt `beads dir: …/.beads` des Haupt-Checkouts.
+  Mit zwei Rechnern liegt sie auf dem Leitrechner; `.beads/` zeigt nur dorthin, und Worker
+  beider Rechner teilen sich dieselben Issues, Claims und denselben Merge-Slot. Antwortet bd
+  nicht (Leitrechner aus, Netz weg), nichts claimen und die Runde beenden.
 - Abhängigkeiten im Worktree nachinstallieren, bevor Prüfkommandos laufen (siehe CLAUDE.md).
 
 ## Status-Modell in beads

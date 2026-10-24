@@ -1,0 +1,138 @@
+#!/usr/bin/env bash
+# `pc` auf dem Mac (setup-mac.sh legt ~/.local/bin/pc an): dasselbe Projekt auf dem Linux-Rechner.
+# Im Projektordner aufgerufen, arbeitet jeder Befehl im gleichen Projekt auf dem PC (Ordner über
+# HOST_<h>_ROOT in ~/.config/beadskit/hosts.conf umgerechnet), sonst in ~/IdeaProjects dort.
+#
+#   pc                               Shell auf dem PC im selben Projekt
+#   pc workers <…>                   scripts/beadskit/workers auf dem PC (z. B. pc workers start fix=2)
+#   pc attach [name]                 tmux-Session der Worker (bzw. Fenster name); Ctrl+B D: zurück
+#   pc dev <…>                       ./dev.sh auf dem PC (start, stop, status, logs …)
+#   pc forward <port…>               Ports des PCs hier auf localhost (pc forward 5200 8100), Ctrl+C beendet
+#   pc run <befehl…>                 beliebiger Befehl im Projekt auf dem PC
+#   pc drain-host [rechner] [--off]  nur die Worker eines Rechners auslaufen lassen (Standard mac)
+#   pc leitstand [open|install|status|logs]   gemeinsamer Leitstand auf dem PC; install richtet hier den Link ein
+#   pc doctor                        beide Rechner prüfen: Versionen, Datenbank, Leitstand, Dienste
+#
+# Teil von ProjectTemplate/scripts/remote.
+set -euo pipefail
+
+HERE=$(cd "$(dirname "$(readlink -f "$0" 2>/dev/null || echo "$0")")" && pwd)
+TEMPLATE=$(cd "$HERE/../.." && pwd)
+CONF=${BEADSKIT_HOME:-$HOME/.config/beadskit}
+# shellcheck source=versions.conf
+. "$HERE/versions.conf"
+[ -f "$CONF/hosts.conf" ] || { echo "erst scripts/remote/setup-mac.sh" >&2; exit 1; }
+conf() { sed -n "s/^$1=//p" "$CONF/hosts.conf" | tr -d '"' | head -n 1; }
+MAC_ROOT=$(conf HOST_mac_ROOT)
+PC_ROOT=$(conf "HOST_${PC_NAME}_ROOT")
+PC_SSH=$(conf "HOST_${PC_NAME}_SSH")
+PC_SSH=${PC_SSH:-$PC_NAME}
+PORT=${PORT:-3738}
+
+usage() { sed -n '6,15s/^# \{0,1\}//p' "$0"; exit "${1:-2}"; }
+
+# Hauptcheckout des Projekts hier (auch aus einem Worktree) und derselbe Ordner auf dem PC
+here_root=""
+if gd=$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null); then here_root=$(dirname "$gd"); fi
+there_root=$PC_ROOT
+case $here_root in
+  "$MAC_ROOT"/*) there_root=$PC_ROOT${here_root#"$MAC_ROOT"} ;;
+esac
+in_project() { [ "$there_root" != "$PC_ROOT" ] || { echo "nicht in einem Projekt unter $MAC_ROOT" >&2; exit 2; }; }
+
+q() { printf '%q ' "$@"; }
+# Befehl im Projekt auf dem PC über on-host (PATH, Projektordner); -t für Programme mit Terminal
+on_pc() {
+  local tty=() onhost="$PC_ROOT/ProjectTemplate/scripts/beadskit/on-host"
+  [ ! -t 0 ] || tty=(-t)
+  exec ssh ${tty[@]+"${tty[@]}"} "$PC_SSH" "$(q "$onhost" "$there_root" "$@")"
+}
+
+leitstand() {
+  case ${1:-open} in
+    open) open "http://127.0.0.1:$PORT" ;;
+    install)
+      # erst der Leitstand auf dem PC (mit Rückkanal zum Server), dann hier nur noch der Link dorthin
+      ssh -t "$PC_SSH" "$(q "$PC_ROOT/ProjectTemplate/scripts/beadskit/leitstand/leitstand-remote" install)"
+      "$TEMPLATE/scripts/beadskit/leitstand/leitstand-remote" install --helper
+      ;;
+    status|logs) ssh -t "$PC_SSH" "$(q "$PC_ROOT/ProjectTemplate/scripts/beadskit/leitstand/leitstand-remote" "$1")"
+      "$TEMPLATE/scripts/beadskit/leitstand/leitstand-remote" "$1" ;;
+    *) usage ;;
+  esac
+}
+
+doctor() {
+  local rc=0 v here there
+  ok() { printf '  \033[32m✓\033[0m %s\n' "$*"; }
+  bad() { printf '  \033[33m!\033[0m %s\n' "$*"; rc=1; }
+  echo "== Verbindung"
+  if ssh -o BatchMode=yes -o ConnectTimeout=8 "$PC_SSH" true 2>/dev/null; then ok "ssh $PC_SSH"; else bad "ssh $PC_SSH geht nicht"; return 1; fi
+  mac_ssh=$(conf HOST_mac_SSH)
+  ssh "$PC_SSH" "ssh -o BatchMode=yes -o ConnectTimeout=8 $(q "$mac_ssh") true" 2>/dev/null && ok "$PC_NAME → $mac_ssh" ||
+    bad "$PC_NAME erreicht den Mac nicht ($mac_ssh): Entfernte Anmeldung an? setup-mac.sh"
+  echo "== Versionen (Mac / $PC_NAME)"
+  for v in "bd version" "dolt version" "node -v" "claude --version" "gh --version" "tmux -V"; do
+    here=$($v 2>/dev/null | head -n 1 | grep -oE '[0-9]+(\.[0-9]+)+' | head -n 1 || true)
+    there=$(ssh "$PC_SSH" ". ~/.config/beadskit/env; $v" 2>/dev/null | head -n 1 | grep -oE '[0-9]+(\.[0-9]+)+' | head -n 1 || true)
+    case $v in
+      tmux*) [ -n "$there" ] && ok "tmux $there auf $PC_NAME" || bad "tmux fehlt auf $PC_NAME" ;;
+      bd*|dolt*) [ -n "$here" ] && [ "$here" = "$there" ] && ok "${v%% *} $here" || bad "${v%% *}: Mac ${here:-fehlt}, $PC_NAME ${there:-fehlt} (müssen gleich sein)" ;;
+      *) [ -n "$there" ] && ok "${v%% *}: Mac ${here:-–}, $PC_NAME $there" || bad "${v%% *} fehlt auf $PC_NAME" ;;
+    esac
+  done
+  echo "== beads-Datenbank auf $PC_NAME:$DOLT_PORT"
+  ssh "$PC_SSH" 'systemctl --user is-active beads-dolt' >/dev/null 2>&1 && ok "beads-dolt läuft" || bad "beads-dolt läuft nicht (ssh $PC_NAME journalctl --user -u beads-dolt)"
+  nc -z -G 5 "$PC_NAME" "$DOLT_PORT" >/dev/null 2>&1 && ok "vom Mac erreichbar" || bad "$PC_NAME:$DOLT_PORT vom Mac nicht erreichbar (Tailscale, ufw)"
+  if [ -n "$here_root" ] && [ -f "$here_root/.beads/metadata.json" ]; then
+    if [ "$(jq -r '.dolt_server_host // ""' "$here_root/.beads/metadata.json")" = "$PC_NAME" ]; then
+      (cd "$here_root" && bd dolt test >/dev/null 2>&1) && ok "$(basename "$here_root"): Mac verbunden" || bad "$(basename "$here_root"): bd dolt test auf dem Mac scheitert"
+      ssh "$PC_SSH" "$(q "$PC_ROOT/ProjectTemplate/scripts/beadskit/on-host" "$there_root" bd dolt test)" >/dev/null 2>&1 &&
+        ok "$(basename "$here_root"): $PC_NAME verbunden" || bad "$(basename "$here_root"): bd dolt test auf $PC_NAME scheitert"
+    else
+      bad "$(basename "$here_root"): Datenbank noch auf dem Mac (scripts/remote/migrate-beads.sh)"
+    fi
+  fi
+  echo "== Leitstand"
+  code=$(curl -s -o /dev/null -w '%{http_code}' -m 5 "http://127.0.0.1:$PORT/api/projects" || true)
+  case $code in 200|401) ok "http://127.0.0.1:$PORT antwortet ($code)" ;; *) bad "http://127.0.0.1:$PORT antwortet nicht (pc leitstand install)" ;; esac
+  if pgrep -f 'leitstand/inbox\.mjs' >/dev/null; then bad "ein Leitstand läuft auch auf dem Mac (leitstand-remote install --helper ersetzt ihn durch den Link)"; fi
+  ssh "$PC_SSH" 'systemctl is-enabled suspend.target' 2>/dev/null | grep -q masked && ok "$PC_NAME schläft nie" || bad "$PC_NAME kann schlafen (setup-linux.sh nosleep)"
+  ssh "$PC_SSH" 'loginctl show-user "$USER" -p Linger --value' 2>/dev/null | grep -q yes && ok "Dienste ohne Anmeldung" || bad "linger aus (setup-linux.sh nosleep)"
+  return "$rc"
+}
+
+[ $# -gt 0 ] || exec ssh -t "$PC_SSH" "cd $(q "$there_root") && exec \$SHELL -l"
+cmd=$1
+shift
+case $cmd in
+  help|-h|--help) usage 0 ;;
+  workers) in_project; on_pc scripts/beadskit/workers "$@" ;;
+  attach)
+    in_project
+    if [ $# -ge 1 ]; then on_pc scripts/beadskit/workers attach "$1"; fi
+    slug=$(cd "$here_root" && scripts/beadskit/workers config | jq -r .slug)
+    exec ssh -t "$PC_SSH" "tmux attach -t $(q "=bk-$slug")"
+    ;;
+  dev) in_project; on_pc ./dev.sh "$@" ;;
+  run) [ $# -ge 1 ] || usage; on_pc "$@" ;;
+  forward)
+    [ $# -ge 1 ] || usage
+    args=()
+    for p in "$@"; do
+      case $p in ''|*[!0-9]*) echo "Port: $p" >&2; exit 2 ;; esac
+      args+=(-L "127.0.0.1:$p:127.0.0.1:$p")
+      echo "http://localhost:$p → $PC_NAME:$p"
+    done
+    exec ssh -N -o ExitOnForwardFailure=yes "${args[@]}" "$PC_SSH"
+    ;;
+  drain-host)
+    in_project
+    host=mac off=()
+    for a in "$@"; do case $a in --off) off=(--off) ;; *) host=$a ;; esac; done
+    exec "$here_root/scripts/beadskit/workers" drain --host "$host" ${off[@]+"${off[@]}"}
+    ;;
+  leitstand) leitstand "$@" ;;
+  doctor) doctor ;;
+  *) usage ;;
+esac

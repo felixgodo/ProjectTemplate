@@ -1,17 +1,24 @@
 #!/bin/sh
-# Fernzugang zum beads-Leitstand: Der Mac (auf dem die Claude-Worker laufen) hält einen
-# SSH-Rückkanal zum Server offen; nginx auf dem Server nimmt HTTPS mit Basic-Auth an und
-# reicht durch den Tunnel an den Leitstand auf dem Mac weiter, der zusätzlich ein Token-Login
-# verlangt. caffeinate hält den Mac wach. Alle Befehle (start, add, drain, stop) laufen auf dem Mac.
+# Fernzugang zum beads-Leitstand: Der Rechner, auf dem der Leitstand läuft (Mac oder Linux-PC),
+# hält einen SSH-Rückkanal zum Server offen; nginx auf dem Server nimmt HTTPS an und reicht durch
+# den Tunnel an den Leitstand weiter, der ein Login verlangt. Auf dem Mac hält caffeinate wach,
+# unter Linux sind Ruhezustände abgeschaltet (scripts/remote/setup-linux.sh). Dienste: launchd auf
+# dem Mac, systemd --user unter Linux.
 #
 #   leitstand-remote token [--new]   Login-Token anzeigen bzw. neu erzeugen
 #   leitstand-remote password [benutzer] [--off]   Login mit Benutzer (Standard admin) und Passwort
-#   leitstand-remote install         launchd-Dienste anlegen und starten (Leitstand, Tunnel, caffeinate)
+#   leitstand-remote install [--helper [--awake]] [--dry-run]   Dienste anlegen und starten
 #   leitstand-remote uninstall       Dienste stoppen und entfernen
 #   leitstand-remote status          Dienste, lokaler Leitstand, Tunnel-Ende auf dem Server
 #   leitstand-remote logs            letzte Zeilen der Dienst-Logs
 #   leitstand-remote server-setup [--basic-auth]   nginx-Vorlage, Domain + Let's Encrypt auf dem Server
 #   leitstand-remote basic-auth      Basic-Auth-Zugang anzeigen
+#
+# install: Leitstand (server), Rückkanal zum Server (tunnel), auf dem Mac caffeinate (awake).
+# Zwei Rechner (hosts.conf, ProjectTemplate/scripts/remote): der Leitrechner macht install, der
+# andere install --helper: nur ein ssh -L zum Leitrechner (link), damit http://127.0.0.1:3738 auch
+# dort den gemeinsamen Leitstand zeigt; --awake hält einen Mac dabei wach. Eigene server- und
+# tunnel-Dienste dieses Rechners entfernt --helper. --dry-run zeigt nur die Dienst-Dateien.
 #
 # Einstellungen per Umgebung (Standard in Klammern): LEITSTAND_SSH_HOST (server),
 # LEITSTAND_PUBLIC_URL (https://leitstand.felix-go.de), LEITSTAND_REMOTE_PORT (13738),
@@ -20,7 +27,7 @@
 # Die Einstellungen lassen sich auch dauerhaft in ~/.config/beadskit/remote.conf setzen (Shell-
 # Zuweisungen wie LEITSTAND_PUBLIC_URL=…); die Umgebung hat Vorrang.
 #
-# Token, Passwort und Basic-Auth liegen in ~/.config/beadskit (nur auf dem Mac). Der Leitstand ist
+# Token, Passwort und Basic-Auth liegen in ~/.config/beadskit (auf dem Leitrechner). Der Leitstand ist
 # einer für alle Projekte (Liste in ~/.config/beadskit/projects.txt) und läuft aus dem
 # Haupt-Checkout ($ROOT) des Projekts, aus dem install aufgerufen wurde.
 # Teil des beadskit aus dem ProjectTemplate – nicht im Projekt ändern.
@@ -49,13 +56,25 @@ AUTH_FILE=$CONF/leitstand-basicauth
 PASSWORD_FILE=${LEITSTAND_PASSWORD_FILE:-$CONF/leitstand-password}
 AGENTS=$HOME/Library/LaunchAgents
 LOGS=$HOME/Library/Logs/beads-leitstand
+UNITS=${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user
 LABEL=eu.beadskit.leitstand
 # Dienste früherer, projekteigener Leitstände; install entfernt sie
 LEGACY_LABELS=${LEITSTAND_LEGACY_LABELS:-eu.spot.leitstand}
-SERVICES="server tunnel awake"
+SERVICES="server tunnel awake link"
+# BK_UNAME nur für Tests
+PLATFORM=${BK_UNAME:-$(uname)}
+DRY=0
+
+# Leitrechner und sein ssh-Ziel aus hosts.conf (zwei Rechner), leer bei einem Rechner
+hosts_val() { sed -n "s/^$1=//p" "$CONF/hosts.conf" 2>/dev/null | tr -d '"' | head -n 1; }
+LEADER=$(hosts_val LEADER)
+SELF=$(hosts_val SELF)
+LEADER_SSH=""
+[ -z "$LEADER" ] || LEADER_SSH=$(hosts_val "HOST_${LEADER}_SSH")
+[ -n "$LEADER_SSH" ] || LEADER_SSH=$LEADER
 
 usage() {
-  sed -n '7,15s/^# \{0,1\}//p' "$0" >&2
+  sed -n '8,16s/^# \{0,1\}//p' "$0" >&2
   exit 2
 }
 
@@ -80,11 +99,48 @@ cmd_token() {
   cat "$TOKEN_FILE"; echo
 }
 
+# Schreibt den Dienst $1 (Arbeitsverzeichnis $2, danach Programm mit Argumenten): launchd-plist
+# auf dem Mac, systemd-User-Unit unter Linux. Mit --dry-run nur ausgeben.
+service() {
+  if [ "$PLATFORM" = Darwin ]; then plist "$@"; else unit "$@"; fi
+}
+
+# systemd: ein Wort in Anführungszeichen (\, " und % maskiert)
+sd_quote() { printf '"%s"' "$(printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g; s/%/%%/g')"; }
+
+unit() {
+  name=$1 dir=$2
+  shift 2
+  exec_line=""
+  for a in "$@"; do exec_line="$exec_line${exec_line:+ }$(sd_quote "$a")"; done
+  # KillMode=process: ein Neustart des Leitstands beendet nur ihn, nicht von ihm gestartete
+  # Worker (die laufen ohnehin in eigenen Scopes, siehe workers)
+  text="[Unit]
+Description=beadskit Leitstand: $name
+After=network-online.target
+
+[Service]
+WorkingDirectory=$dir
+ExecStart=$exec_line
+Environment=$(sd_quote "PATH=$PATH") $(sd_quote "HOME=$HOME") $(sd_quote "PORT=$LOCAL_PORT")
+Environment=$(sd_quote "LEITSTAND_PUBLIC_URL=$PUBLIC_URL") $(sd_quote "LEITSTAND_TOKEN_FILE=$TOKEN_FILE")
+Restart=always
+RestartSec=15
+KillMode=process
+
+[Install]
+WantedBy=default.target"
+  if [ "$DRY" = 1 ]; then printf '# %s\n%s\n\n' "$UNITS/$LABEL.$name.service" "$text"; return; fi
+  mkdir -p "$UNITS"
+  printf '%s\n' "$text" >"$UNITS/$LABEL.$name.service"
+}
+
 # Schreibt ein LaunchAgent-plist: $1 Name, $2 Arbeitsverzeichnis, danach das Programm mit Argumenten
 plist() {
   name=$1 dir=$2
   shift 2
   file="$AGENTS/$LABEL.$name.plist"
+  [ "$DRY" = 0 ] || file=/dev/stdout
   {
     cat <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
@@ -112,7 +168,46 @@ EOF
 </dict></plist>
 EOF
   } >"$file"
-  plutil -lint "$file" >/dev/null
+  [ "$DRY" = 1 ] || plutil -lint "$file" >/dev/null
+}
+
+# Dienst (neu) starten, stoppen und entfernen, Zustand als "<zustand>[ (pid N)]" bzw. leer
+svc_start() {
+  if [ "$PLATFORM" = Darwin ]; then
+    launchctl bootout "gui/$(id -u)/$LABEL.$1" 2>/dev/null || true
+    launchctl bootstrap "gui/$(id -u)" "$AGENTS/$LABEL.$1.plist"
+  else
+    systemctl --user daemon-reload
+    systemctl --user enable "$LABEL.$1.service" >/dev/null 2>&1
+    systemctl --user restart "$LABEL.$1.service"
+  fi
+}
+
+svc_remove() {
+  if [ "$PLATFORM" = Darwin ]; then
+    [ -e "$AGENTS/$LABEL.$1.plist" ] || return 0
+    launchctl bootout "gui/$(id -u)/$LABEL.$1" 2>/dev/null || true
+    rm -f "$AGENTS/$LABEL.$1.plist"
+  else
+    [ -e "$UNITS/$LABEL.$1.service" ] || return 0
+    systemctl --user disable --now "$LABEL.$1.service" >/dev/null 2>&1 || true
+    rm -f "$UNITS/$LABEL.$1.service"
+    systemctl --user daemon-reload
+  fi
+}
+
+svc_state() {
+  if [ "$PLATFORM" = Darwin ]; then
+    out=$(launchctl print "gui/$(id -u)/$LABEL.$1" 2>/dev/null) || return 0
+    state=$(printf '%s\n' "$out" | awk -F'= ' '/^\tstate = /{print $2; exit}')
+    pid=$(printf '%s\n' "$out" | awk -F'= ' '/^\tpid = /{print $2; exit}')
+  else
+    [ -e "$UNITS/$LABEL.$1.service" ] || return 0
+    state=$(systemctl --user show -p ActiveState --value "$LABEL.$1.service" 2>/dev/null)
+    pid=$(systemctl --user show -p MainPID --value "$LABEL.$1.service" 2>/dev/null)
+    [ "$pid" != 0 ] || pid=""
+  fi
+  echo "${state:-?}${pid:+ (pid $pid)}"
 }
 
 # Setzt Benutzer und Passwort für die Login-Seite (statt Token). Das Passwort wird zweimal
@@ -179,48 +274,74 @@ remove_legacy() {
   done
 }
 
+# Helfer (zwei Rechner, nicht der Leitrechner): nur der Link zum Leitstand auf dem Leitrechner
+install_helper() {
+  awake=$1
+  [ -n "$LEADER" ] || { echo "--helper braucht LEADER in $CONF/hosts.conf" >&2; exit 1; }
+  [ "$LEADER" != "$SELF" ] || { echo "$SELF ist der Leitrechner: install ohne --helper" >&2; exit 1; }
+  [ "$DRY" = 1 ] || mkdir -p "$AGENTS" "$LOGS"
+  # gleicher Port auf beiden Seiten: der Leitstand prüft den Host-Header (127.0.0.1:<port>)
+  service link "$HOME" "$(command -v ssh)" -N -o BatchMode=yes -o ExitOnForwardFailure=yes \
+    -o ServerAliveInterval=30 -o ServerAliveCountMax=3 \
+    -L "127.0.0.1:$LOCAL_PORT:127.0.0.1:$LOCAL_PORT" "$LEADER_SSH"
+  services='link'
+  if [ "$awake" = 1 ] && [ "$PLATFORM" = Darwin ]; then
+    service awake "$HOME" /usr/bin/caffeinate -i -s
+    services="$services awake"
+  fi
+  [ "$DRY" = 0 ] || return 0
+  for s in server tunnel; do svc_remove "$s"; done
+  [ "$awake" = 1 ] || svc_remove awake
+  for s in $services; do svc_start "$s"; done
+  echo "Link zum Leitstand auf $LEADER ($LEADER_SSH) gestartet: http://127.0.0.1:$LOCAL_PORT"
+  echo "Prüfen: $0 status"
+}
+
 cmd_install() {
-  migrate_legacy
-  remove_legacy
-  [ -s "$TOKEN_FILE" ] || { echo "kein Token, erst: $0 token --new" >&2; exit 1; }
-  for bin in node claude gh bd jq; do
-    command -v "$bin" >/dev/null || { echo "$bin nicht im PATH; die Worker brauchen es" >&2; exit 1; }
+  helper=0 awake=0
+  for arg in "$@"; do
+    case $arg in --helper) helper=1 ;; --awake) awake=1 ;; --dry-run) DRY=1 ;; *) usage ;; esac
   done
-  mkdir -p "$AGENTS" "$LOGS"
-  plist server "$ROOT" "$(command -v node)" "$ROOT/scripts/beadskit/leitstand/inbox.mjs"
+  if [ "$helper" = 1 ]; then install_helper "$awake"; return; fi
+  if [ "$DRY" = 0 ]; then
+    migrate_legacy
+    [ "$PLATFORM" != Darwin ] || remove_legacy
+    [ -s "$TOKEN_FILE" ] || { echo "kein Token, erst: $0 token --new" >&2; exit 1; }
+    for bin in node claude gh bd jq ssh; do
+      command -v "$bin" >/dev/null || { echo "$bin nicht im PATH; die Worker brauchen es" >&2; exit 1; }
+    done
+    [ "$PLATFORM" != Darwin ] || mkdir -p "$AGENTS" "$LOGS"
+  fi
+  service server "$ROOT" "$(command -v node)" "$ROOT/scripts/beadskit/leitstand/inbox.mjs"
   # -R nur auf dem Loopback des Servers; nginx dort ist der einzige Weg von außen
-  plist tunnel "$HOME" /usr/bin/ssh -N -o BatchMode=yes -o ExitOnForwardFailure=yes \
+  service tunnel "$HOME" "$(command -v ssh)" -N -o BatchMode=yes -o ExitOnForwardFailure=yes \
     -o ServerAliveInterval=30 -o ServerAliveCountMax=3 \
     -R "127.0.0.1:$REMOTE_PORT:127.0.0.1:$LOCAL_PORT" "$SSH_HOST"
-  # -i: kein Leerlauf-Schlaf, -s: kein System-Schlaf am Netzteil. Zugeklappt schläft ein
-  # MacBook ohne externen Monitor trotzdem.
-  plist awake "$HOME" /usr/bin/caffeinate -i -s
-  for s in $SERVICES; do
-    launchctl bootout "gui/$(id -u)/$LABEL.$s" 2>/dev/null || true
-    launchctl bootstrap "gui/$(id -u)" "$AGENTS/$LABEL.$s.plist"
-  done
+  services="server tunnel"
+  if [ "$PLATFORM" = Darwin ]; then
+    # -i: kein Leerlauf-Schlaf, -s: kein System-Schlaf am Netzteil. Zugeklappt schläft ein
+    # MacBook ohne externen Monitor trotzdem.
+    service awake "$HOME" /usr/bin/caffeinate -i -s
+    services="$services awake"
+  fi
+  [ "$DRY" = 0 ] || return 0
+  svc_remove link
+  for s in $services; do svc_start "$s"; done
   echo "Dienste gestartet. Lokal: http://127.0.0.1:$LOCAL_PORT  ·  von außen: $PUBLIC_URL"
   echo "Prüfen: $0 status"
 }
 
 cmd_uninstall() {
-  for s in $SERVICES; do
-    launchctl bootout "gui/$(id -u)/$LABEL.$s" 2>/dev/null || true
-    rm -f "$AGENTS/$LABEL.$s.plist"
-  done
+  for s in $SERVICES; do svc_remove "$s"; done
   echo "Dienste entfernt (Token und Logs bleiben)."
 }
 
 cmd_status() {
   for s in $SERVICES; do
-    if out=$(launchctl print "gui/$(id -u)/$LABEL.$s" 2>/dev/null); then
-      state=$(printf '%s\n' "$out" | awk -F'= ' '/^\tstate = /{print $2; exit}')
-      pid=$(printf '%s\n' "$out" | awk -F'= ' '/^\tpid = /{print $2; exit}')
-      printf '%-7s %s%s\n' "$s" "${state:-?}" "${pid:+ (pid $pid)}"
-    else
-      printf '%-7s nicht installiert\n' "$s"
-    fi
+    st=$(svc_state "$s")
+    printf '%-7s %s\n' "$s" "${st:-nicht installiert}"
   done
+  [ -z "$LEADER" ] || echo "Zwei Rechner: dieser $SELF, Leitrechner $LEADER"
   code=$(curl -s -o /dev/null -w '%{http_code}' -m 5 "http://127.0.0.1:$LOCAL_PORT/login" || true)
   echo "Leitstand lokal: HTTP ${code:-keine Antwort} (200 = Login-Seite)"
   code=$(ssh -o BatchMode=yes -o ConnectTimeout=8 "$SSH_HOST" \
@@ -233,13 +354,22 @@ cmd_status() {
   else
     echo "Login: Token (Passwort setzen: $0 password)"
   fi
-  pmset -g assertions 2>/dev/null | grep -q 'caffeinate' && echo "caffeinate: hält wach" || echo "caffeinate: aus"
+  if [ "$PLATFORM" = Darwin ]; then
+    pmset -g assertions 2>/dev/null | grep -q 'caffeinate' && echo "caffeinate: hält wach" || echo "caffeinate: aus"
+  else
+    echo "Ruhezustand: $(systemctl is-enabled suspend.target 2>/dev/null || echo ?) (masked = aus)"
+    echo "Dienste ohne Anmeldung: $(loginctl show-user "$(id -un)" -p Linger --value 2>/dev/null || echo ?) (yes = an)"
+  fi
 }
 
 cmd_logs() {
   for s in $SERVICES; do
     echo "== $s"
-    tail -n 15 "$LOGS/$s.log" 2>/dev/null || echo "(leer)"
+    if [ "$PLATFORM" = Darwin ]; then
+      tail -n 15 "$LOGS/$s.log" 2>/dev/null || echo "(leer)"
+    else
+      journalctl --user -u "$LABEL.$s.service" -n 15 --no-pager 2>/dev/null || echo "(leer)"
+    fi
   done
 }
 
@@ -311,7 +441,7 @@ EOF
 
 cat > \$TPL/leitstand.stpl <<EOF
 # Leitstand (beadskit leitstand-remote): Rate-Limit (Basic-Auth nur mit --basic-auth),
-# Proxy in den SSH-Rückkanal 127.0.0.1:\$RPORT zum Mac. Der Leitstand verlangt dahinter ein
+# Proxy in den SSH-Rückkanal 127.0.0.1:\$RPORT zum Leitrechner. Der Leitstand verlangt dahinter ein
 # Login (Token oder Benutzer/Passwort) und sperrt IPs nach Fehlversuchen (X-Real-IP).
 server {
 	listen      %ip%:%proxy_ssl_port% ssl;
@@ -386,7 +516,7 @@ shift
 case $sub in
   token) cmd_token "$@" ;;
   password) cmd_password "$@" ;;
-  install) cmd_install ;;
+  install) cmd_install "$@" ;;
   uninstall) cmd_uninstall ;;
   status) cmd_status ;;
   logs) cmd_logs ;;

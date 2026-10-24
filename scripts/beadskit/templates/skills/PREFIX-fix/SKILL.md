@@ -29,7 +29,14 @@ Gehören weitere Repos zum Projekt (`BK_REPOS`), zuerst `scripts/beadskit/worker
 nennt es ein anderes Repo, dort arbeiten (`worker-regeln.md`, „Mehrere Repos“).
 ```bash
 git fetch origin
-git switch -c fix/<id> origin/{{BASE}}      # bei Nacharbeit: git switch fix/<id> && git rebase origin/{{BASE}}
+git switch -c fix/<id> origin/{{BASE}}
+```
+Bei Nacharbeit (der Branch kann von einem Worker auf dem anderen Rechner stammen, der lokale
+Stand ist dann alt oder fehlt):
+```bash
+git fetch origin
+git switch fix/<id> 2>/dev/null || git switch -c fix/<id> origin/fix/<id>
+git reset --hard origin/fix/<id> && git rebase origin/{{BASE}}
 ```
 
 ## 3. Beheben

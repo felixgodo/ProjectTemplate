@@ -5,15 +5,19 @@
 
 java_major() { java -version 2>&1 | head -n1 | sed -E 's/.*"([0-9]+).*/\1/' || true; }
 
-# JAVA_HOME auf JAVA_VERSION setzen, falls mehrere JDKs installiert sind (macOS), und prüfen,
-# dass das aktive Java nicht älter ist.
+# JAVA_HOME auf JAVA_VERSION setzen, falls mehrere JDKs installiert sind (macOS: java_home,
+# Linux: /usr/lib/jvm/java-<version>-*), und prüfen, dass das aktive Java nicht älter ist.
 dk_use_java() {
   [ -n "$JAVA_VERSION" ] || return 0
-  local jh v
+  local jh="" v d
   if [ -x /usr/libexec/java_home ]; then
     jh="$(/usr/libexec/java_home -v "$JAVA_VERSION" 2>/dev/null || true)"
-    if [ -n "$jh" ]; then export JAVA_HOME="$jh"; PATH="$jh/bin:$PATH"; export PATH; fi
+  else
+    for d in /usr/lib/jvm/java-"$JAVA_VERSION"-* /usr/lib/jvm/jdk-"$JAVA_VERSION"*; do
+      if [ -x "$d/bin/java" ]; then jh="$d"; break; fi
+    done
   fi
+  if [ -n "$jh" ]; then export JAVA_HOME="$jh"; PATH="$jh/bin:$PATH"; export PATH; fi
   command -v java >/dev/null 2>&1 || die "Java nicht gefunden – das Projekt braucht JDK $JAVA_VERSION."
   v="$(java_major)"
   case "$v" in
@@ -55,7 +59,12 @@ dk_docker_running() { docker info >/dev/null 2>&1; }
 
 dk_require_docker() {
   need docker
-  dk_docker_running || die "Docker läuft nicht. Docker Desktop starten und erneut versuchen."
+  dk_docker_running && return 0
+  if [ "$(uname)" = Darwin ]; then die "Docker läuft nicht. Docker Desktop starten und erneut versuchen."; fi
+  if docker info 2>&1 | grep -qi 'permission denied'; then
+    die "Kein Zugriff auf Docker: Benutzer in die Gruppe docker (sudo usermod -aG docker \$USER), dann neu anmelden."
+  fi
+  die "Docker läuft nicht: sudo systemctl start docker"
 }
 
 # Startet die Compose-Dienste und wartet, bis sie bereit sind: mit Hook project_infra_ready, bis
