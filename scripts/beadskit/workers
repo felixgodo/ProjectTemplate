@@ -643,11 +643,13 @@ cmd_restart() {
 
   if [ "$force" = 0 ]; then
     [ "$status" = idle ] || { echo "$target ist $status, nicht idle: Neustart erst zwischen zwei Runden" >&2; exit 1; }
-    list=$(cd "$ROOT" && "$KIT/bdw" list --status in_progress --json 2>/dev/null) || list=""
-    claims=$(printf '%s' "$list" | jq -r --arg n "$target" '[.[] | select(.assignee == $n) | .id] | join(" ")' 2>/dev/null) ||
+    # Exit-Status von bdw selbst prüfen: jq endet auf leerer Eingabe mit 0, das hieße "keine Claims"
+    list=$(cd "$ROOT" && "$KIT/bdw" list --status in_progress --json 2>/dev/null) && [ -n "$list" ] &&
+      claims=$(printf '%s' "$list" | jq -er --arg n "$target" '[.[] | select(.assignee == $n) | .id] | join(" ")' 2>/dev/null) ||
       { echo "beads antwortet nicht, Claims von $target unbekannt: kein Neustart" >&2; exit 1; }
     [ -z "$claims" ] || { echo "$target hat noch $claims in Arbeit: kein Neustart" >&2; exit 1; }
-    holder=$( (cd "$ROOT" && "$KIT/bdw" merge-slot check --json 2>/dev/null) | jq -r '.holder // ""' 2>/dev/null) ||
+    slot=$(cd "$ROOT" && "$KIT/bdw" merge-slot check --json 2>/dev/null) && [ -n "$slot" ] &&
+      holder=$(printf '%s' "$slot" | jq -er '.holder // ""' 2>/dev/null) ||
       { echo "Merge-Slot unbekannt: kein Neustart" >&2; exit 1; }
     [ "$holder" != "$target" ] || { echo "$target hält den Merge-Slot: kein Neustart" >&2; exit 1; }
   fi

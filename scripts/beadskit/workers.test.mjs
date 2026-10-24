@@ -57,8 +57,16 @@ function testRepo() {
   mkdirSync(join(r, 'scripts/beadskit'), { recursive: true });
   copyFileSync(script, join(r, 'scripts/beadskit/workers'));
   writeFileSync(join(r, 'beads.project.sh'), PROJECT);
-  // bdw-Ersatz: show liefert Labels aus FAKE_LABELS
-  writeFileSync(join(r, 'scripts/beadskit/bdw'), '#!/bin/sh\n[ "$1" = show ] && printf \'[{"id":"%s","labels":%s}]\' "$2" "${FAKE_LABELS:-[]}"\n');
+  // bdw-Ersatz: show liefert Labels aus FAKE_LABELS, list und merge-slot FAKE_LIST/FAKE_SLOT;
+  // FAKE_BDW_FAIL lässt jeden Aufruf scheitern (beads antwortet nicht)
+  writeFileSync(join(r, 'scripts/beadskit/bdw'), `#!/bin/sh
+[ -z "$FAKE_BDW_FAIL" ] || exit 1
+case $1 in
+  show) printf '[{"id":"%s","labels":%s}]' "$2" "\${FAKE_LABELS:-[]}" ;;
+  list) printf '%s' "\${FAKE_LIST:-[]}" ;;
+  merge-slot) [ -n "$FAKE_SLOT" ] && printf '%s' "$FAKE_SLOT" || printf '{"available":true}' ;;
+esac
+`);
   chmodSync(join(r, 'scripts/beadskit/bdw'), 0o755);
   git(dir, 'init', '-q', r);
   git(r, 'add', '.');
@@ -240,6 +248,29 @@ test('add --ws prüft die Rollen, add verweigert bei Rollen-Drain', () => {
   assert.equal(d.status, 1);
   assert.match(d.stderr, /Drain aktiv für club-test/);
   clearMarkers(testRepo());
+});
+
+test('restart: kein Neustart bei Claim, Merge-Slot oder wenn beads nicht antwortet', () => {
+  const { root, workers } = testRepo();
+  clearMarkers(testRepo());
+  const agents = [live('aaaa0001', 'fix-3')];
+  const restart = (extra) => workers(root, ['restart', 'fix-3', '--dry-run'], agents, extra);
+  const ok = restart({});
+  assert.equal(ok.status, 0, ok.stderr);
+  assert.match(ok.stdout, /claude stop aaaa0001/);
+  const claimed = restart({ FAKE_LIST: '[{"id":"spot-1","assignee":"fix-3"}]' });
+  assert.equal(claimed.status, 1);
+  assert.match(claimed.stderr, /spot-1 in Arbeit/);
+  const slot = restart({ FAKE_SLOT: '{"available":false,"holder":"fix-3"}' });
+  assert.equal(slot.status, 1);
+  assert.match(slot.stderr, /hält den Merge-Slot/);
+  const down = restart({ FAKE_BDW_FAIL: '1' });
+  assert.equal(down.status, 1);
+  assert.match(down.stderr, /beads antwortet nicht/);
+  // Claims lesbar, nur der Merge-Slot nicht
+  const noSlot = restart({ FAKE_SLOT: 'kaputt' });
+  assert.equal(noSlot.status, 1);
+  assert.match(noSlot.stderr, /Merge-Slot unbekannt/);
 });
 
 test('config: Workspaces, Rollen, Prompts, Farben und Repos als JSON; Projekt wird registriert', () => {
