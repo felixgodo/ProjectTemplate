@@ -9,6 +9,8 @@
 #   runner-pool set-token             Token von stdin auf den Server (Fine-grained PAT, siehe unten)
 #   runner-pool status [--json]       Plätze, laufende Runner mit Job, wartende Jobs je Projekt
 #   runner-pool size <n>              Plätze (1–8), gilt ab der nächsten Runde
+#   runner-pool limit <label> <n|off> Projekt höchstens n Plätze (1–8), off: keine Grenze
+#   runner-pool pause|resume <label>  Projekt bekommt keine neuen Runner (laufende Jobs laufen zu Ende)
 #   runner-pool start|stop            Dienst an/aus (stop: laufende Jobs laufen zu Ende)
 #   runner-pool start|stop mysql|mariadb [--force]  CI-Datenbank an/aus (stop verweigert bei laufendem Job)
 #   runner-pool logs                  letzte Zeilen des Dienstes
@@ -44,6 +46,7 @@ VERSION=$RUNNER_VERSION
 DIR=
 OPT=/opt/beadskit-runner-pool
 CONF=/etc/beadskit-ci/pool.conf
+LIMITS=/etc/beadskit-ci/projects.json
 UNIT=beadskit-runner-pool.service
 MAX=8
 case $SLOTS_DEFAULT in [1-8]) ;; *) echo "RUNNER_POOL_SLOTS ungültig: '$SLOTS_DEFAULT' (1–8)" >&2; exit 1 ;; esac
@@ -54,7 +57,7 @@ printf '%s' "$MEM" | grep -Eq '^[1-9][0-9]*[kmg]?$' || { echo "RUNNER_MEM ungül
 case $IDLE in '' | *[!0-9]*) echo "RUNNER_POOL_IDLE ungültig: '$IDLE'" >&2; exit 1 ;; esac
 
 usage() {
-  sed -n '8,15s/^# \{0,1\}//p' "$0" >&2
+  sed -n '8,17s/^# \{0,1\}//p' "$0" >&2
   exit 2
 }
 
@@ -223,7 +226,7 @@ cmd_status_json() {
   rm -f "$tmp"
   jq -n --argjson s "$st" --argjson u "${usage:-"{}"}" '{
     service: $s.service, token: $s.token, slots: ($s.slotsConf // $s.slots // null), at: ($s.at // null),
-    repos: ($s.repos // []), queued: ($s.queued // {}),
+    repos: ($s.repos // []), queued: ($s.queued // {}), limits: ($s.limits // null),
     runners: [($s.runners // [])[] | . + {cpu: ($u.containers[.name].cpu // null), mem: ($u.containers[.name].mem // null)}],
     mysql: (if ($s.mysqlState // "missing") == "missing" then null
       else {container: $s.mysqlState, cpu: ($u.containers.mysql.cpu // null), mem: ($u.containers.mysql.mem // null)} end),
@@ -237,6 +240,7 @@ cmd_status() {
   cmd_status_json | jq -r '
     "Pool: \(.service)\(if .token then "" else " (Token fehlt)" end), \([.runners[] | select(.busy)] | length) von \(.slots // "?") Plätzen mit Job",
     (.runners[] | "  \(.name)\t\(.repo)\t\(if .job then "\(.job.name) · \(.job.branch)" elif .busy then "Job" else "wartet auf Job" end)"),
+    ((.limits // {}) | to_entries[] | "  \(.key): \(if .value.paused then "pausiert" elif .value.max then "höchstens \(.value.max) Plätze" else "ohne Grenze" end)"),
     (if (.queued | length) > 0 then "Wartend: \(.queued | to_entries | map("\(.key) \(.value)") | join(", "))" else "Wartend: keine" end),
     (if .mysql then "CI-MySQL: \(.mysql.container)" else empty end),
     (if .mariadb then "CI-MariaDB: \(.mariadb.container)" else empty end),
@@ -248,6 +252,39 @@ cmd_size() {
   case $1 in [1-8]) ;; *) echo "Plätze: 1–$MAX" >&2; exit 2 ;; esac
   remote "sed -i 's/^SLOTS=.*/SLOTS=$1/' $CONF && grep -q '^SLOTS=$1\$' $CONF"
   echo "Pool: $1 Plätze."
+}
+
+# Grenze je Projekt in $LIMITS ändern: $1 Label, $2 jq-Ausdruck auf den Eintrag des Labels.
+# Das Label muss in REPOS stehen; leere Einträge fallen weg. Wirkt ab der nächsten Runde.
+set_limit() {
+  case $1 in '' | -* | *[!a-z0-9-]*) echo "Label ungültig: '$1'" >&2; exit 2 ;; esac
+  remote bash -s <<EOF
+set -eu
+grep -Eq '^REPOS=.*:$1( |")' $CONF 2>/dev/null || { echo "Projekt '$1' ist nicht im Pool (runner-pool setup?)" >&2; exit 1; }
+cur=\$(jq -c 'if type == "object" then . else {} end' $LIMITS 2>/dev/null || echo '{}')
+jq --arg l '$1' '.[\$l] = ((.[\$l] // {}) | $2) | with_entries(select(.value | length > 0))' <<<"\$cur" >$LIMITS.tmp
+chmod 644 $LIMITS.tmp && mv $LIMITS.tmp $LIMITS
+EOF
+}
+
+cmd_limit() {
+  [ $# -eq 2 ] || usage
+  case $2 in
+    off) set_limit "$1" 'del(.max)'; echo "Pool: $1 ohne Grenze." ;;
+    [1-8]) set_limit "$1" ".max = $2"; echo "Pool: $1 höchstens $2 Plätze." ;;
+    *) echo "Plätze: 1–$MAX oder off" >&2; exit 2 ;;
+  esac
+}
+
+cmd_pause() {
+  [ $# -eq 1 ] || usage
+  if [ "$cmd" = pause ]; then
+    set_limit "$1" '.paused = true'
+    echo "Pool: $1 pausiert, laufende Jobs laufen zu Ende."
+  else
+    set_limit "$1" 'del(.paused)'
+    echo "Pool: $1 läuft wieder."
+  fi
 }
 
 # Bricht ab, wenn ein Pool-Runner gerade einen Job hat (dessen DB-Tests brauchen die Datenbank)
@@ -311,6 +348,8 @@ case $cmd in
     esac
     ;;
   size) cmd_size "$@" ;;
+  limit) cmd_limit "$@" ;;
+  pause | resume) cmd_pause "$@" ;;
   start) cmd_start "$@" ;;
   stop) cmd_stop "$@" ;;
   logs) cmd_logs ;;
