@@ -548,7 +548,8 @@ function askHtml(w, { compact = false } = {}) {
     ? `<div class="opts">${a.options.map((o) => `<button data-press="${esc(o.key)}" data-worker-name="${esc(w.name)}"
         class="${o.label.startsWith('No') || o.label.startsWith('Nein') ? '' : 'primary'}" title="Taste ${esc(o.key)} an ${esc(w.name)} senden">
         <span class="k">${esc(o.key)}</span>${esc(o.label)}</button>`).join('')}
-        <button data-press="Escape" data-worker-name="${esc(w.name)}" title="Abbrechen (Esc)">Esc</button></div>`
+        <button data-press="Escape" data-worker-name="${esc(w.name)}" title="Abbrechen (Esc)">Esc</button>
+        <span class="muted" style="font-size:12px;align-self:center">Tastatur: ${a.options.length > 1 ? `1–${a.options.length}` : '1'} oder Esc, dann dieselbe Taste bzw. Enter zum Senden</span></div>`
     : `<p class="muted" style="font-size:13px;margin:6px 0 0">Keine Auswahl erkannt. Antwort über den Chat des Workers oder im Terminal.</p>`;
   const detail = [a.command?.length ? `<details ${compact ? '' : 'open'}><summary>Befehl</summary><pre>${esc(a.command.join('\n'))}</pre></details>` : '',
     a.context?.length ? `<pre>${esc(a.context.join('\n'))}</pre>` : '',
@@ -1312,6 +1313,26 @@ document.addEventListener('submit', async (e) => {
 $('d-close').onclick = closeDrawer;
 $('scrim').onclick = closeDrawer;
 document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && drawer) closeDrawer(); });
+
+// Tastatur für Rückfragen (oberste Karte bzw. die im offenen Worker-Detail): 1–9 oder Esc schaltet
+// den Knopf scharf, dieselbe Taste oder Enter sendet. Nicht beim Tippen in Feldern; Esc mit offenem
+// Detail schließt erst das Detail.
+document.addEventListener('keydown', (e) => {
+  if (e.metaKey || e.ctrlKey || e.altKey || e.target.closest?.('input, textarea, select, [contenteditable]')) return;
+  const card = (drawer?.kind === 'worker' && document.querySelector('#w-ask .card.ask')) || (!drawer && document.querySelector('#asks .card.ask'));
+  if (!card) return;
+  if (e.key === 'Enter') {
+    const armedBtn = card.querySelector('button[data-press][data-armed]');
+    if (armedBtn) { e.preventDefault(); armedBtn.click(); }
+    return;
+  }
+  const key = e.key === 'Escape' ? 'Escape' : /^[1-9]$/.test(e.key) ? e.key : null;
+  const btn = key && card.querySelector(`button[data-press="${key}"]`);
+  if (!btn || (key === 'Escape' && drawer)) return;
+  e.preventDefault();
+  btn.focus();
+  btn.click();
+});
 $('new-issue').onclick = openCreate;
 $('logout').onclick = async () => { await post('/logout', {}).catch(() => {}); location.href = '/login'; };
 document.addEventListener('click', (e) => { if (e.target.id === 'start-open') openStart(); });
