@@ -117,6 +117,18 @@
   .inbox { display: grid; gap: 12px; border-radius: 12px; }
   .card { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 14px 16px; }
   .card.decide { border-left: 4px solid var(--accent); }
+  /* Rückfrage eines Workers: oben auf der Seite, bis sie beantwortet ist */
+  .asks { display: grid; gap: 10px; margin: 0 0 16px; }
+  .asks:empty { display: none; }
+  .card.ask { border: 2px solid var(--warn); background: color-mix(in srgb, var(--warn) 8%, var(--panel)); }
+  .card.ask .card-head { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  .card.ask .q { font-size: 15px; font-weight: 700; margin: 6px 0 8px; }
+  .card.ask .dot { width: 10px; height: 10px; border-radius: 50%; background: var(--warn); animation: pulse 1.2s infinite; }
+  .card.ask pre { margin: 6px 0; padding: 8px 10px; border-radius: 8px; background: var(--bg); font-size: 12px; white-space: pre-wrap; max-height: 220px; overflow: auto; }
+  .card.ask .opts { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
+  .card.ask .opts button { text-align: left; max-width: 100%; white-space: normal; }
+  .card.ask .opts button .k { font-weight: 700; margin-right: 6px; }
+  .badge.ask { background: var(--warn); color: #fff; font-weight: 700; animation: pulse 1.6s infinite; }
   .card-head { display: flex; gap: 10px; align-items: baseline; flex-wrap: wrap; }
   .id { font: 600 12.5px ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--muted); }
   .title { font-weight: 600; flex: 1 1 320px; }
@@ -241,6 +253,7 @@
   <div id="errors"></div>
   <div class="kpis" id="kpis"></div>
   <div class="controls" id="controls"></div>
+  <div class="asks" id="asks"></div>
 
   <h2>Worker <span class="sub muted" id="workers-n"></span></h2>
   <div class="roles" id="roles"></div>
@@ -483,6 +496,7 @@ function workerCard(w) {
       <span class="badge">${w.kind === 'background' ? 'bg' : 'Terminal'}</span>
       ${hosts().length ? `<span class="badge" title="Rechner">${esc(w.host)}</span>` : ''}
       ${w.drained ? '<span class="badge warn">Drain</span>' : ''}
+      ${w.ask ? '<span class="badge ask" title="Wartet auf deine Antwort (oben auf der Seite)">❓ Frage</span>' : ''}
       ${a.pending?.length ? `<span class="badge warn" title="Nachrichten in der Warteschlange">✉ ${a.pending.length}</span>` : ''}
       <span class="right"><span class="${busy ? '' : 'muted'}">${esc(busy ? w.status : 'idle')}</span></span>
     </div>
@@ -526,8 +540,46 @@ function renderWorkers() {
 }
 
 // ---- Inbox ----
+// Rückfragen der Worker (status waiting): Frage, Befehl/Kontext, je Antwort ein Knopf
+function askHtml(w, { compact = false } = {}) {
+  const a = w.ask;
+  if (!a) return '';
+  const opts = a.options?.length
+    ? `<div class="opts">${a.options.map((o) => `<button data-press="${esc(o.key)}" data-worker-name="${esc(w.name)}"
+        class="${o.label.startsWith('No') || o.label.startsWith('Nein') ? '' : 'primary'}" title="Taste ${esc(o.key)} an ${esc(w.name)} senden">
+        <span class="k">${esc(o.key)}</span>${esc(o.label)}</button>`).join('')}
+        <button data-press="Escape" data-worker-name="${esc(w.name)}" title="Abbrechen (Esc)">Esc</button></div>`
+    : `<p class="muted" style="font-size:13px;margin:6px 0 0">Keine Auswahl erkannt. Antwort über den Chat des Workers oder im Terminal.</p>`;
+  const detail = [a.command?.length ? `<details ${compact ? '' : 'open'}><summary>Befehl</summary><pre>${esc(a.command.join('\n'))}</pre></details>` : '',
+    a.context?.length ? `<pre>${esc(a.context.join('\n'))}</pre>` : '',
+    !a.options?.length && a.screen ? `<pre>${esc(a.screen.join('\n'))}</pre>` : ''].join('');
+  return `<article class="card ask" data-ask="${esc(w.name)}">
+    ${compact ? '' : `<div class="card-head"><span class="dot"></span><b>${esc(w.name)}</b> fragt
+      ${hosts().length ? `<span class="badge">${esc(w.host)}</span>` : ''}
+      ${w.issues?.[0] ? `<a href="#" class="id" data-issue="${esc(w.issues[0].id)}">${esc(w.issues[0].id)}</a>` : ''}
+      <a href="#" data-open-worker="${esc(w.name)}" style="margin-left:auto;font-size:13px">Chat öffnen</a></div>`}
+    <div class="q">❓ ${esc(a.question || 'Wartet auf eine Eingabe')}</div>
+    ${detail}${opts}</article>`;
+}
+
+function renderAsks() {
+  const asks = (st.workers || []).filter((w) => w.ask);
+  // im offenen Worker-Detail dieselbe Frage über dem Chat
+  if (drawer?.kind === 'worker' && $('w-ask') && !$('w-ask').querySelector('[data-armed]')) {
+    const w = asks.find((x) => x.name === drawer.id);
+    const html = w ? askHtml(w, { compact: true }) : '';
+    if ($('w-ask').dataset.key !== html) { $('w-ask').dataset.key = html; $('w-ask').innerHTML = html; }
+  }
+  const key = JSON.stringify(asks.map((w) => [w.name, w.ask]));
+  // nicht neu zeichnen, solange ein Knopf scharf ist
+  if (key === keys.asks || $('asks').querySelector('[data-armed]')) return;
+  keys.asks = key;
+  $('asks').innerHTML = asks.map((w) => askHtml(w)).join('');
+}
+
 function renderInbox(items) {
-  $('human-n').textContent = items.length ? `(${items.length})` : '';
+  const asks = (st.workers || []).filter((w) => w.ask).length;
+  $('human-n').textContent = items.length || asks ? `(${items.length}${asks ? ` + ${asks} ${asks === 1 ? 'Rückfrage' : 'Rückfragen'} oben` : ''})` : '';
   // Nicht neu zeichnen, während getippt wird oder sich nichts geändert hat
   const key = P + st.workspace + items.map((i) => i.id + i.updated_at + JSON.stringify(i.x || '')).join('|');
   if (document.activeElement?.closest?.('#inbox') || key === keys.inbox) return;
@@ -776,6 +828,7 @@ async function load() {
     $('errors').innerHTML = st.errors?.length
       ? `<div class="error">Nicht erreichbar: ${st.errors.map(esc).join(', ')}. Die Anzeige ist dort unvollständig.</div>` : '';
     renderHead();
+    renderAsks();
     renderWorkers();
     renderInbox([...meta().split.flatMap((s) => st.columns[s.key] || []), ...st.columns.human]);
     renderBoard();
@@ -928,6 +981,7 @@ async function openWorker(name) {
   const tab = (() => { try { return localStorage.getItem('leitstand-wtab') || 'chat'; } catch { return 'chat'; } })();
   openDrawer('worker', name, `<span style="color:${roleVar(name)}">●</span> ${esc(name)}`, `
     <div class="wtabs"><button data-wtab="chat">Chat</button><button data-wtab="details">Details</button></div>
+    <div id="w-ask"></div>
     <div id="w-chat">
       <div class="chat" id="chat-log"><p class="muted">lädt …</p></div>
       ${w?.kind === 'background'
@@ -1044,6 +1098,24 @@ document.addEventListener('click', async (e) => {
   }
   const wt = e.target.closest('button[data-wtab]');
   if (wt) { showWorkerTab(wt.dataset.wtab); if (wt.dataset.wtab === 'chat') { chatKey = ''; refreshChat(); } return; }
+
+  const ow = e.target.closest('[data-open-worker]');
+  if (ow) { e.preventDefault(); return openWorker(ow.dataset.openWorker); }
+
+  // Antwort auf eine Rückfrage: erst scharf schalten, zweiter Klick sendet die Taste
+  const pr = e.target.closest('button[data-press]');
+  if (pr) {
+    const name = pr.dataset.workerName;
+    if (!armed(pr, `${pr.dataset.press} an ${name} senden?`)) return;
+    pr.disabled = true;
+    try {
+      const r = await post('/api/workers', { action: 'press', name, text: pr.dataset.press, ws: st?.workspace });
+      toast(r.output || 'gesendet');
+      keys.asks = '';
+      await reload();
+    } catch (err) { toast(err.message, true); } finally { pr.disabled = false; }
+    return;
+  }
 
   const wcard = e.target.closest('.wcard');
   if (wcard && !e.target.closest('a,button')) return openWorker(wcard.dataset.worker);

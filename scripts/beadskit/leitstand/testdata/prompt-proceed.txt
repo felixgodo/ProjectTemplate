@@ -1,0 +1,24 @@
+ │ 'spot-press/{plugins,themes}/*/frontend/test/*.test.mjs'",'''
+ │ b='''"test:press": "node --test                          
+ │ 'spot-press/{plugins,themes}/*/frontend/test/*.test.mjs'                    
+ │ scripts/link-scriptpress-sdk.test.mjs",'''                                
+ │ assert s.count(a)==1; s=s.replace(a,b)                                      
+ │ open(p,'w').write(s)                                                         
+ │ EOF                                                                      
+ │ rm node_modules/@scriptpress/sdk; ln -s ../../../ScriptPress/frontend/sdk    
+ │ node_modules/@scriptpress/sdk; ls node_modules/@scriptpress/sdk/ 2>&1 | head 
+ │ -1; node scripts/link-scriptpress-sdk.mjs; readlink                         
+ │ node_modules/@scriptpress/sdk; npm run test:press 2>&1 | tail -9             
+╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌
+ │ /home/felixoben/IdeaProjects/spot-mm/.claude/worktrees/fix-102/node_modules/
+ │ @scriptpress/sdk resolves through a symlink to
+ │ /home/felixoben/IdeaProjects/ScriptPress/frontend/sdk, which is outside the  
+ │ allowed working directories                                                  
+
+ Do you want to proceed?                                                      
+ ❯ 1. Yes                                                        
+   2. Yes, and always allow access to                                         
+      /home/felixoben/IdeaProjects/ScriptPress/frontend/sdk from this project   
+   3. No                            
+
+ Esc to cancel · Tab to amend                                           

@@ -54,6 +54,8 @@ scripts/beadskit/workers stop --all
 scripts/beadskit/workers restart fix-2                     # frischer Kontext, nur zwischen zwei Runden
 scripts/beadskit/workers autorestart --over 200k           # macht der Leitstand dann selbst
 scripts/beadskit/workers top                               # Live-Übersicht: Rechner (CPU, RAM, SSD …), Projekte, Worker
+scripts/beadskit/workers screen fix-2                       # Bildschirm des Terminals (z. B. eine Rückfrage)
+scripts/beadskit/workers press fix-2 2                     # Rückfrage mit Taste 2 beantworten (1–9, Escape, Enter)
 scripts/beadskit/workers send fix-2 -- /compact            # Zeile ins Terminal tippen (iTerm-Tab, tmux-Fenster)
 ```
 

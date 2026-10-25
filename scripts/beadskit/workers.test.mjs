@@ -560,3 +560,32 @@ esac
   assert.throws(() => process.kill(pid2, 0));
   assert.match(all.stdout, /stoppe club-add-1/);
 });
+
+test('screen und press: Bildschirm des tmux-Panes, eine Taste ohne Enter, nur erlaubte Tasten', () => {
+  const { root, workers } = testRepo();
+  writeFileSync(join(fakeBin, 'tmux'), `#!/bin/sh
+echo "tmux $*" >>"$FAKE_LOG"
+case $1 in
+  list-panes) echo "/dev/pts/7 %3" ;;
+  capture-pane) printf ' Do you want to proceed?\\n ❯ 1. Yes\\n   2. No\\n\\n\\n\\n' ;;
+esac
+`);
+  const term = [{ id: 's1', pid: 4242, kind: 'interactive', name: 'fix-3', status: 'waiting', cwd: testRepo().wt('fix-3') }];
+  const env = tmuxEnv({ FAKE_TTY: 'pts/7' });
+  const sc = workers(root, ['screen', 'fix-3'], term, env);
+  assert.equal(sc.status, 0, sc.stderr);
+  assert.equal(sc.stdout, ' Do you want to proceed?\n ❯ 1. Yes\n   2. No\n');
+  assert.ok(tmuxCalls(sc.calls).includes('capture-pane -p -J -t %3'));
+  assert.equal(workers(root, ['screen', 'fix-3', '--lines', '1'], term, env).stdout, '   2. No\n');
+
+  const pr = workers(root, ['press', 'fix-3', '2'], term, env);
+  assert.equal(pr.status, 0, pr.stderr);
+  assert.ok(tmuxCalls(pr.calls).includes('send-keys -t %3 2'));
+  assert.match(pr.stdout, /2 an fix-3 gesendet/);
+  assert.equal(workers(root, ['press', 'fix-3', 'x'], term, env).status, 2);
+  assert.equal(workers(root, ['press', 'fix-3', '2; rm'], term, env).status, 2);
+  // Hintergrund-Worker haben kein Terminal
+  const bg = workers(root, ['screen', 'fix-4'], [live('aaaa0001', 'fix-4')], env);
+  assert.equal(bg.status, 1);
+  assert.match(bg.stderr, /Hintergrund/);
+});

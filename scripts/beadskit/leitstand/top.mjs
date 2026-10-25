@@ -22,7 +22,7 @@ import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import {
   buildWorkspaces, CONF_DIR, groupIssues, isBoardIssue, localWorkers, mapRoot, mergeHostWorkers, normalizeConfig,
-  normalizeExt, parseHostsConf, parseMarkers, parseProjectList, prSummary, remoteCommand,
+  normalizeExt, parseHostsConf, parseMarkers, parseProjectList, parsePrompt, prSummary, remoteCommand,
 } from './inbox.mjs';
 import { systemStats } from './sysinfo.mjs';
 
@@ -169,7 +169,9 @@ function build(data, { width, color, now, multi, board, prs: prMax, texts, list:
   const summary = total.length
     ? `${total.length} Worker, ${total.filter((x) => x.status !== 'idle').length} aktiv · Σ Kontext ${ktok(total.reduce((n, x) => n + (x.activity?.contextTokens || 0), 0))}`
     : 'keine Worker';
-  out.push(`${p.bold(' beads · Übersicht')}${hosts}   ${p.dim(summary)}   ${p.dim(new Date(data.at).toLocaleTimeString('de-DE'))}`);
+  const asks = total.filter((x) => x.ask).length;
+  const askNote = asks ? `   ${p.yellow(p.bold(`❓ ${asks} ${asks === 1 ? 'Rückfrage wartet' : 'Rückfragen warten'} auf dich`))}` : '';
+  out.push(`${p.bold(' beads · Übersicht')}${hosts}   ${p.dim(summary)}${askNote}   ${p.dim(new Date(data.at).toLocaleTimeString('de-DE'))}`);
   out.push(rule);
   if (systems.length) {
     const sysNameW = Math.max(...systems.map((x) => x.name.length + (x.leader ? 2 : 0)));
@@ -226,7 +228,7 @@ function build(data, { width, color, now, multi, board, prs: prMax, texts, list:
         busy ? p.rgb(rgb, '●') : p.dim('○'),
         p.rgb(rgb, fit(wk.name, nameW)),
         multi ? p.dim(fit(wk.host, 4)) : null,
-        wk.drained ? p.yellow(fit('Drain', 7)) : busy ? fit(wk.status, 7) : p.dim(fit('idle', 7)),
+        wk.ask ? p.yellow(p.bold(fit('❓ Frage', 7))) : wk.drained ? p.yellow(fit('Drain', 7)) : busy ? fit(wk.status, 7) : p.dim(fit('idle', 7)),
         issue ? `${p.cyan(fit(issue.id, idW))}${fit(issue.title, issueW - idW - 1)}` : p.dim(fit(busy ? '' : 'wartet auf die nächste Runde', issueW - 1)),
         tool ? `${p.dim(fit(tool.name, 10))} ${fit(tool.summary, actW - 12)}` : p.dim(fit('–', actW - 1)),
         busy && quietMs > 30 * 60_000 ? p.red(fit(quiet, 6, true)) : busy && quietMs > 10 * 60_000 ? p.yellow(fit(quiet, 6, true)) : p.dim(fit(quiet, 6, true)),
@@ -234,8 +236,14 @@ function build(data, { width, color, now, multi, board, prs: prMax, texts, list:
         a.pending?.length ? p.yellow(`✉${a.pending.length}`) : null,
       ].filter((c) => c !== null);
       out.push(`   ${cells.join(' ')}`);
-      // was der Worker zuletzt gesagt hat, rechts Branch und PR
-      if (texts && busy && (a.lastText || a.branch)) {
+      // Rückfrage: immer anzeigen (blockiert den Worker), mit den Antworten
+      if (wk.ask) {
+        const opts = (wk.ask.options || []).map((o) => `${p.bold(o.key)} ${o.label}`).join(p.dim(' · '));
+        const q = `↳ ❓ ${wk.ask.question || 'wartet auf eine Eingabe'}  `;
+        out.push(`${' '.repeat(5 + nameW)}${p.yellow(q)}${fitAnsi(opts || p.dim('Antwort im Leitstand oder im Terminal'), w - 5 - nameW - plainLen(q))}`);
+        if (texts && wk.ask.context?.length) out.push(`${' '.repeat(7 + nameW)}${p.dim(fit(wk.ask.context.join(' '), w - 7 - nameW))}`);
+      } else if (texts && busy && (a.lastText || a.branch)) {
+        // was der Worker zuletzt gesagt hat, rechts Branch und PR
         const prNo = a.prs?.at(-1)?.number;
         const right = [a.branch ? branchShort(a.branch) : null, prNo ? `#${prNo}` : null].filter(Boolean).join(' · ');
         const indent = 5 + nameW;
@@ -377,6 +385,26 @@ async function slowData(root, cfg, workspaces, bd) {
   return value;
 }
 
+// Rückfrage eines wartenden Terminal-Workers: Bildschirm über `workers screen` auf seinem Rechner
+async function askFor(root, conf, w) {
+  const args = ['screen', w.name, '--lines', '40'];
+  try {
+    let stdout;
+    if (!conf || w.host === conf.self) {
+      ({ stdout } = await run(join(root, 'scripts/beadskit/workers'), args, { cwd: root, timeout: 10_000 }));
+    } else {
+      const self = conf.hosts.find((h) => h.name === conf.self);
+      const h = conf.hosts.find((x) => x.name === w.host);
+      const there = h && mapRoot(root, self?.root, h.root);
+      if (!there) return null;
+      ({ stdout } = await run('ssh', [...SSH_OPTS, h.ssh, remoteCommand(there, 'scripts/beadskit/workers', args)], { timeout: 10_000 }));
+    }
+    return parsePrompt(stdout) || { question: null, options: [], context: [] };
+  } catch {
+    return null;
+  }
+}
+
 async function projectData(root, conf) {
   const pc = await projectConfig(root);
   if (!pc) return null;
@@ -413,11 +441,12 @@ async function projectData(root, conf) {
       done: board(doneList).sort((a, b) => String(b.closed_at).localeCompare(String(a.closed_at))).slice(0, 8)
         .map((i) => ({ id: i.id, title: i.title, closed_at: i.closed_at, assignee: i.assignee })),
       errors: [byStatus ? null : 'beads antwortet nicht', ...hosts.filter((h) => !h.ok).map((h) => `${h.name}: ${h.error}`)].filter(Boolean),
-      workers: workers.map((w) => ({
+      workers: await Promise.all(workers.map(async (w) => ({
         ...w,
         drained: !!marks.drain.roles[w.role] || !!marks.drain.hosts[w.host],
         issues: live.filter((i) => i.assignee === w.name).map((i) => ({ id: i.id, title: i.title })),
-      })),
+        ask: w.status === 'waiting' && w.kind === 'terminal' ? await askFor(root, conf, w) : null,
+      }))),
     },
   };
 }
