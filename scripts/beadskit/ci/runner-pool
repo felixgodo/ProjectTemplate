@@ -10,14 +10,15 @@
 #   runner-pool status [--json]       Plätze, laufende Runner mit Job, wartende Jobs je Projekt
 #   runner-pool size <n>              Plätze (1–8), gilt ab der nächsten Runde
 #   runner-pool start|stop            Dienst an/aus (stop: laufende Jobs laufen zu Ende)
-#   runner-pool start|stop mysql [--force]  CI-MySQL an/aus (stop verweigert bei laufendem Job)
+#   runner-pool start|stop mysql|mariadb [--force]  CI-Datenbank an/aus (stop verweigert bei laufendem Job)
 #   runner-pool logs                  letzte Zeilen des Dienstes
 #   runner-pool remove                Dienst, Container, Netz, Volumes und Konfiguration löschen
 #
 # Projekte: alle aus ~/.config/beadskit/projects.txt (POOL_PROJECTS: Liste von Pfaden), deren
 # Workflows self-hosted nutzen. Label = BK_SLUG, Repo aus RUNNER_REPO oder `gh repo view`, ins
 # Image kommen die RUNNER_APT aller Projekte, die CI-MySQL (Host `mysql` im Netz beadskit-ci)
-# läuft, sobald ein Projekt RUNNER_MYSQL setzt. `setup` nach jeder Änderung daran erneut.
+# läuft, sobald ein Projekt RUNNER_MYSQL setzt, die CI-MariaDB (Host `mariadb`) bei RUNNER_MARIADB.
+# Beide: Daten im RAM, root-Passwort ci; Tests legen sich je Lauf eine eigene Datenbank an. `setup` nach jeder Änderung daran erneut.
 # Token: Fine-grained PAT, Zugriff auf genau diese Repos, Repository-Rechte Administration
 # (Read and write, für JIT-Runner) und Actions (Read). Er liegt nur auf dem Server
 # (/etc/beadskit-ci/token, 0600). Eingeben: `scripts/beadskit/ci/runner-pool set-token`, dann
@@ -61,19 +62,19 @@ remote() {
   ssh -o BatchMode=yes "$SSH_HOST" "$@"
 }
 
-# Projekte mit self-hosted-Workflows, eine Zeile je Projekt: repo<TAB>label<TAB>apt<TAB>mysql
+# Projekte mit self-hosted-Workflows, eine Zeile je Projekt: repo<TAB>label<TAB>apt<TAB>mysql<TAB>mariadb
 projects() {
   list=${POOL_PROJECTS:-$(grep -v '^#' "$HOME/.config/beadskit/projects.txt" 2>/dev/null || true)}
   for p in $list; do
     [ -f "$p/beads.project.sh" ] || continue
     grep -qs 'self-hosted' "$p"/.github/workflows/*.y*ml || continue
     (
-      BK_SLUG='' RUNNER_APT='' RUNNER_MYSQL='' RUNNER_REPO='' RUNNER_LABEL=''
+      BK_SLUG='' RUNNER_APT='' RUNNER_MYSQL='' RUNNER_MARIADB='' RUNNER_REPO='' RUNNER_LABEL=''
       # shellcheck source=/dev/null
       . "$p/beads.project.sh"
       repo=${RUNNER_REPO:-$(cd "$p" && gh repo view --json nameWithOwner --jq .nameWithOwner 2>/dev/null || true)}
       [ -n "$repo" ] && [ -n "$BK_SLUG" ] || { echo "übersprungen (Repo oder BK_SLUG unbekannt): $p" >&2; exit 0; }
-      printf '%s\t%s\t%s\t%s\n' "$repo" "${RUNNER_LABEL:-$BK_SLUG}" "$RUNNER_APT" "$RUNNER_MYSQL"
+      printf '%s\t%s\t%s\t%s\t%s\n' "$repo" "${RUNNER_LABEL:-$BK_SLUG}" "$RUNNER_APT" "$RUNNER_MYSQL" "$RUNNER_MARIADB"
     )
   done
 }
@@ -84,10 +85,12 @@ setup_script() {
   # RUNNER_APT aller Projekte, jedes Paket einmal
   EXTRA_APT=$(printf '%s\n' "$rows" | cut -f3 | tr ' ' '\n' | grep . | sort -u | tr '\n' ' ' || true)
   mysql=$(printf '%s\n' "$rows" | cut -f4 | grep . | sort -V | tail -n 1 || true)
+  mariadb=$(printf '%s\n' "$rows" | cut -f5 | grep . | sort -V | tail -n 1 || true)
   for r in $repos; do
     printf '%s' "$r" | grep -Eq '^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+:[a-z0-9-]+$' || { echo "Repo/Label ungültig: $r" >&2; exit 1; }
   done
   case $mysql in *[!0-9.]*) echo "RUNNER_MYSQL ungültig: '$mysql'" >&2; exit 1 ;; esac
+  case $mariadb in *[!0-9.]*) echo "RUNNER_MARIADB ungültig: '$mariadb'" >&2; exit 1 ;; esac
   for a in $EXTRA_APT; do
     case $a in *[!a-z0-9.+-]*) echo "RUNNER_APT-Paket ungültig: '$a'" >&2; exit 1 ;; esac
   done
@@ -101,20 +104,8 @@ DOCKERFILE
 docker build -q -t beadskit-runner:$VERSION -t beadskit-runner:latest . >/dev/null
 docker network inspect beadskit-ci >/dev/null 2>&1 || docker network create beadskit-ci >/dev/null
 EOF
-  if [ -n "$mysql" ]; then
-    cat <<EOF
-# CI-MySQL für DB-Tests (Host mysql im Netz beadskit-ci, Daten im RAM, root-Passwort ci)
-if [ "\$(docker inspect -f '{{.Config.Image}}' beadskit-ci-mysql 2>/dev/null || true)" != mysql:$mysql ]; then
-  docker rm -f beadskit-ci-mysql >/dev/null 2>&1 || true
-  docker run -d --name beadskit-ci-mysql --restart unless-stopped --network beadskit-ci --network-alias mysql \\
-    --cgroup-parent $SLICE --cpus 1 --cpu-shares 128 --memory 1g --tmpfs /var/lib/mysql \\
-    --security-opt no-new-privileges:true -e MYSQL_ROOT_PASSWORD=ci mysql:$mysql \\
-    --innodb-buffer-pool-size=256M --max-connections=200 >/dev/null
-fi
-EOF
-  else
-    echo "docker rm -f beadskit-ci-mysql >/dev/null 2>&1 || true"
-  fi
+  db_script mysql "$mysql" MYSQL_ROOT_PASSWORD
+  db_script mariadb "$mariadb" MARIADB_ROOT_PASSWORD
   cat <<EOF
 cat >runner-pool-daemon <<'DAEMON'
 $(cat "$(dirname "$0")/runner-pool-daemon")
@@ -158,6 +149,24 @@ fi
 EOF
 }
 
+# CI-Datenbank $1 (mysql|mariadb) in Version $2 im Netz beadskit-ci (Host $1, Daten im RAM,
+# root-Passwort ci); ohne Version wird sie entfernt. $3 = Variable für das root-Passwort im Image.
+db_script() {
+  if [ -n "$2" ]; then
+    cat <<EOF
+if [ "\$(docker inspect -f '{{.Config.Image}}' beadskit-ci-$1 2>/dev/null || true)" != $1:$2 ]; then
+  docker rm -f beadskit-ci-$1 >/dev/null 2>&1 || true
+  docker run -d --name beadskit-ci-$1 --restart unless-stopped --network beadskit-ci --network-alias $1 \\
+    --cgroup-parent $SLICE --cpus 1 --cpu-shares 128 --memory 1g --tmpfs /var/lib/mysql \\
+    --security-opt no-new-privileges:true -e $3=ci $1:$2 \\
+    --innodb-buffer-pool-size=256M --max-connections=200 >/dev/null
+fi
+EOF
+  else
+    echo "docker rm -f beadskit-ci-$1 >/dev/null 2>&1 || true"
+  fi
+}
+
 cmd_setup() {
   dry=
   for a in "$@"; do
@@ -192,17 +201,18 @@ st=\$(cat /run/beadskit-runner-pool/state.json 2>/dev/null || echo '{}')
 svc=\$(systemctl is-active $UNIT 2>/dev/null || true)
 [ -f /etc/systemd/system/$UNIT ] || svc=missing
 # docker inspect gäbe für einen fehlenden Container eine Leerzeile aus
-db=\$(docker ps -a --filter 'name=^beadskit-ci-mysql\$' --format '{{.State}}')
-[ -n "\$db" ] || db=missing
+state() { s=\$(docker ps -a --filter "name=^beadskit-ci-\$1\$" --format '{{.State}}'); echo "\${s:-missing}"; }
+db=\$(state mysql)
+mdb=\$(state mariadb)
 slots=\$(sed -n 's/^SLOTS=//p' $CONF 2>/dev/null || true)
 tok=\$([ -s /etc/beadskit-ci/token ] && echo true || echo false)
-jq -c --arg svc "\$svc" --arg db "\$db" --arg slots "\$slots" --argjson tok "\$tok" \\
-  '. + {service: \$svc, mysqlState: \$db, slotsConf: (\$slots | tonumber? // null), token: \$tok}' <<<"\$st"
+jq -c --arg svc "\$svc" --arg db "\$db" --arg mdb "\$mdb" --arg slots "\$slots" --argjson tok "\$tok" \\
+  '. + {service: \$svc, mysqlState: \$db, mariadbState: \$mdb, slotsConf: (\$slots | tonumber? // null), token: \$tok}' <<<"\$st"
 EOF
 }
 
 # {service, token, slots, repos, queued {label: n}, runners [{name, label, repo, slot, busy, github, job, cpu, mem}],
-#  mysql {container, cpu, mem} | null, slice, at}
+#  mysql und mariadb {container, cpu, mem} | null, slice, at}
 cmd_status_json() {
   tmp=$(mktemp)
   usage_script | remote bash -s >"$tmp" 2>/dev/null &
@@ -215,8 +225,10 @@ cmd_status_json() {
     service: $s.service, token: $s.token, slots: ($s.slotsConf // $s.slots // null), at: ($s.at // null),
     repos: ($s.repos // []), queued: ($s.queued // {}),
     runners: [($s.runners // [])[] | . + {cpu: ($u.containers[.name].cpu // null), mem: ($u.containers[.name].mem // null)}],
-    mysql: (if $s.mysqlState == "missing" then null
+    mysql: (if ($s.mysqlState // "missing") == "missing" then null
       else {container: $s.mysqlState, cpu: ($u.containers.mysql.cpu // null), mem: ($u.containers.mysql.mem // null)} end),
+    mariadb: (if ($s.mariadbState // "missing") == "missing" then null
+      else {container: $s.mariadbState, cpu: ($u.containers.mariadb.cpu // null), mem: ($u.containers.mariadb.mem // null)} end),
     slice: ($u.slice // null)
   }'
 }
@@ -227,6 +239,7 @@ cmd_status() {
     (.runners[] | "  \(.name)\t\(.repo)\t\(if .job then "\(.job.name) · \(.job.branch)" elif .busy then "Job" else "wartet auf Job" end)"),
     (if (.queued | length) > 0 then "Wartend: \(.queued | to_entries | map("\(.key) \(.value)") | join(", "))" else "Wartend: keine" end),
     (if .mysql then "CI-MySQL: \(.mysql.container)" else empty end),
+    (if .mariadb then "CI-MariaDB: \(.mariadb.container)" else empty end),
     (.slice | if . and .cpuPct then "CI gesamt (beadskit-ci.slice): \(.cpuPct) % CPU von \(if .cpus then "\(.cpus * 100) %" else "unbegrenzt" end)" else empty end)'
 }
 
@@ -237,11 +250,11 @@ cmd_size() {
   echo "Pool: $1 Plätze."
 }
 
-# Bricht ab, wenn ein Pool-Runner gerade einen Job hat (dessen DB-Tests brauchen die MySQL)
-guard_mysql() {
+# Bricht ab, wenn ein Pool-Runner gerade einen Job hat (dessen DB-Tests brauchen die Datenbank)
+guard_db() {
   busy=$(cmd_status_json | jq -r '[.runners[] | select(.busy) | .name] | join(", ")')
   if [ -n "$busy" ]; then
-    echo "$busy arbeitet gerade an einem Job, dessen DB-Tests ohne MySQL abbrächen. Trotzdem: --force" >&2
+    echo "$busy arbeitet gerade an einem Job, dessen DB-Tests ohne Datenbank abbrächen. Trotzdem: --force" >&2
     exit 1
   fi
 }
@@ -249,7 +262,7 @@ guard_mysql() {
 cmd_start() {
   case "$*" in
     '') remote "systemctl enable -q --now $UNIT" ;;
-    mysql) remote "docker start beadskit-ci-mysql >/dev/null" ;;
+    mysql | mariadb) remote "docker start beadskit-ci-$1 >/dev/null" ;;
     *) usage ;;
   esac
 }
@@ -257,8 +270,9 @@ cmd_start() {
 cmd_stop() {
   case "$*" in
     '') remote "systemctl stop $UNIT && systemctl disable -q $UNIT" ;;
-    mysql) guard_mysql; remote "docker stop beadskit-ci-mysql >/dev/null" ;;
-    'mysql --force' | '--force mysql') remote "docker stop beadskit-ci-mysql >/dev/null" ;;
+    mysql | mariadb) guard_db; remote "docker stop beadskit-ci-$1 >/dev/null" ;;
+    'mysql --force' | 'mariadb --force') remote "docker stop beadskit-ci-$1 >/dev/null" ;;
+    '--force mysql' | '--force mariadb') remote "docker stop beadskit-ci-$2 >/dev/null" ;;
     *) usage ;;
   esac
 }
@@ -273,7 +287,7 @@ set -u
 systemctl disable -q --now $UNIT 2>/dev/null || true
 ids=\$(docker ps -aq --filter label=beadskit.pool)
 [ -z "\$ids" ] || docker rm -f \$ids >/dev/null
-docker rm -f beadskit-ci-mysql >/dev/null 2>&1 || true
+docker rm -f beadskit-ci-mysql beadskit-ci-mariadb >/dev/null 2>&1 || true
 docker network rm beadskit-ci >/dev/null 2>&1 || true
 vols=\$(docker volume ls -q | grep '^beadskit-pool-' || true)
 [ -z "\$vols" ] || docker volume rm \$vols >/dev/null

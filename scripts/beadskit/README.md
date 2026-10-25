@@ -108,9 +108,11 @@ Job wird der Container gelöscht, ein Runner ohne Job nach 10 min. Die Workflows
 - Alle Container laufen in der systemd-Slice `beadskit-ci.slice` mit Gesamtdeckel
   (`RUNNER_CI_CPUS` Kerne, `RUNNER_CI_MEM`) und niedrigem CPU- und IO-Gewicht.
 - Je Platz gibt es Volumes für `_work/_tool` und `~/.cache`.
-- Die CI-MySQL (Host `mysql`) läuft, sobald ein Projekt `RUNNER_MYSQL` setzt.
+- Die CI-MySQL (Host `mysql`) läuft, sobald ein Projekt `RUNNER_MYSQL` setzt, die CI-MariaDB (Host
+  `mariadb`) bei `RUNNER_MARIADB`. Beide halten ihre Daten im RAM (root-Passwort `ci`), Tests legen
+  sich je Lauf eine eigene Datenbank an. Pool-Runner haben kein Docker, Testcontainers geht dort nicht.
 - Befehle: `scripts/beadskit/ci/runner-pool setup|set-token|status|size <n>|start|stop|logs|remove`,
-  dazu `start|stop mysql`.
+  dazu `start|stop mysql|mariadb`.
 - `setup` liest alle Projekte aus `~/.config/beadskit/projects.txt`, deren Workflows `self-hosted`
   nutzen, und vereint ihre `RUNNER_APT` in einem Image. Nach jeder Änderung daran `setup` erneut.
 - Token: Fine-grained PAT für diese Repos mit Administration (Read and write) und Actions (Read),
@@ -135,7 +137,7 @@ Job wird der Container gelöscht, ein Runner ohne Job nach 10 min. Die Workflows
 | `BK_WS_<ws>_NAME` / `_ROLES` / `_START` / `_PHASES` | Anzeigename, Rollen, Vorgabe, Phasen (`key:Titel`) | – |
 | `bk_color <rolle>` | iTerm-Tabfarbe `"r g b"` (Funktion, optional) | je Rolle |
 | `BK_REPOS` | weitere Repos `<schlüssel>:<pfad>`; Label `modul:<schlüssel>` → dort bearbeiten | leer |
-| `RUNNER_APT`, `RUNNER_MYSQL` | Zusatzpakete und MySQL-Version im Pool-Image (alle Projekte vereint) | leer |
+| `RUNNER_APT`, `RUNNER_MYSQL`, `RUNNER_MARIADB` | Zusatzpakete im Pool-Image (alle Projekte vereint), Version der CI-MySQL bzw. CI-MariaDB | leer |
 | `RUNNER_CPUS`, `RUNNER_MEM` (Umgebung von `runner-pool setup`) | Grenzen je Pool-Runner | `2`, `6g` |
 | `RUNNER_CI_CPUS`, `RUNNER_CI_MEM` (ebenso) | Deckel für alle CI-Container zusammen (Slice `beadskit-ci.slice`) | `4`, `24G` |
 

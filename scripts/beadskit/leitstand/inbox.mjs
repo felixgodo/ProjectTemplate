@@ -396,7 +396,7 @@ export function planWorkerAction({ action, role, name, force, off, counts, thres
 
 /**
  * Argumente für scripts/beadskit/ci/runner-pool: Plätze (size 1–8), Dienst an/aus (start/stop ohne
- * n) und CI-MySQL an/aus (n = mysql, stop mit --force trotz laufendem Job).
+ * n) und CI-Datenbank an/aus (n = mysql oder mariadb, stop mit --force trotz laufendem Job).
  */
 export function planRunnerAction({ action, n, force }) {
   if (action === 'size') {
@@ -405,8 +405,8 @@ export function planRunnerAction({ action, n, force }) {
   }
   if (action !== 'start' && action !== 'stop') throw new Error('unbekannte Aktion');
   if (n == null) return [action];
-  if (n !== 'mysql') throw new Error('nur der Pool oder mysql');
-  return [action, 'mysql', ...(action === 'stop' && force ? ['--force'] : [])];
+  if (n !== 'mysql' && n !== 'mariadb') throw new Error('nur der Pool, mysql oder mariadb');
+  return [action, n, ...(action === 'stop' && force ? ['--force'] : [])];
 }
 
 /**
@@ -447,12 +447,13 @@ export function parsePool(d) {
       }))
       .sort((a, b) => (a.slot ?? 99) - (b.slot ?? 99)),
     mysql: parseMysql(o.mysql),
+    mariadb: parseMysql(o.mariadb),
     slice: parseSlice(o.slice),
     at: str(o.at, null),
   };
 }
 
-/** CI-MySQL aus `runner-pool status --json` (container, cpu, mem) oder null, wenn es keine gibt. */
+/** CI-Datenbank (MySQL oder MariaDB) aus `runner-pool status --json` (container, cpu, mem) oder null, wenn es keine gibt. */
 export function parseMysql(m) {
   if (!m || typeof m !== 'object') return null;
   return { container: str(m.container, 'missing'), cpu: num(m.cpu), mem: num(m.mem) };
