@@ -467,6 +467,23 @@ export function groupIssues(issues, ws, workspaces, now = Date.now()) {
   return cols;
 }
 
+/**
+ * Issues, auf die ein Issue wartet (Abhängigkeit vom Typ blocks), aufgelöst über byId (id → Issue
+ * aus bd list): id, Titel, Status, Phase; offene zuerst. Versteht die Kanten aus bd list
+ * (depends_on_id/type) und bd show (id/dependency_type). Unbekannte IDs bleiben ohne Titel/Status.
+ */
+export function waitsOf(issue, byId) {
+  const out = [];
+  for (const d of issue?.dependencies || []) {
+    const id = d.depends_on_id || d.id;
+    if (!id || (d.type || d.dependency_type) !== 'blocks' || out.some((w) => w.id === id)) continue;
+    const b = byId.get(id);
+    const phase = (b?.labels || []).find((l) => l.startsWith('phase:'))?.slice(6) ?? null;
+    out.push({ id, title: b?.title ?? null, status: b?.status ?? null, phase });
+  }
+  return out.sort((a, b) => (a.status === 'closed') - (b.status === 'closed'));
+}
+
 /** Kennzahlen für die Kopfleiste: die Länge jeder Spalte unter ihrem Schlüssel plus Summen. */
 export function metrics(cols, ws, merged = [], now = Date.now()) {
   const day = today(new Date(now));
@@ -1497,8 +1514,11 @@ function startServer(token, selfRoot) {
     ]);
     const now = Date.now();
     const columns = groupIssues(issues || [], ws, workspaces, now);
+    const byId = new Map((issues || []).map((i) => [i.id, i]));
     for (const list of Object.values(columns)) {
       for (const it of list) {
+        const waits = waitsOf(it, byId);
+        if (waits.length) it.waits = waits;
         const x = cardExtras(it, ext);
         if (x) it.x = x;
         if (it.metadata?.pr) it.pr_repo = repoOfIssue(it, cfg.repos);

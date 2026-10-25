@@ -76,7 +76,8 @@ Projekt) → http://127.0.0.1:3738. Ein Prozess für alle Projekte; Umschalter o
 der Adresse), daneben der Umschalter der Workspaces. Die Liste steht in
 `~/.config/beadskit/projects.txt` – `workers` trägt sein Projekt bei jedem Aufruf ein. Der
 Leitstand zeigt Kennzahlen, Worker-Karten mit Detail (Chat aus dem Transkript, Senden in den
-iTerm-Tab, Neu starten), „Wartet auf dich“ (Label `human`), Kanban mit Drag & Drop je Workspace,
+iTerm-Tab, Neu starten), „Wartet auf dich“ (Label `human`; hängt ein Issue per `blocks` an einem anderen, zeigt die Kachel
+„wartet auf <id>“ mit Link und Stand bzw. „Abhängigkeit erledigt“, das Board ein Badge ⏳), Kanban mit Drag & Drop je Workspace,
 PRs mit CI-Stand (aller Repos aus `BK_REPOS`) und die CI-Runner, wenn das Projekt welche nutzt.
 Er steuert Issues und Worker als Actor `user` und startet mit `autorestart` Worker mit großem
 Kontext selbst neu. Tests: `node --test scripts/beadskit/leitstand/*.test.mjs`.

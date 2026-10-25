@@ -7,7 +7,7 @@ import {
   planIssueAction, planRestarts, planRunnerAction, planWorkerAction, prSummary, publicConfig, readBody, repoOfIssue,
   RESTART_COOLDOWN_MS, safeEqual, signSession, today, verifySession, hashPassword, parsePasswordLine, verifyPassword,
   workerRe, wsOfIssue, parseHostsConf, mapRoot, shQuote, remoteCommand, mergeHostWorkers, parseMarkers, routeWorkerAction,
-  parsePrompt, parseDecision, collectServers, collectSystems, QUICK,
+  parsePrompt, parseDecision, collectServers, collectSystems, QUICK, waitsOf,
 } from './inbox.mjs';
 import { readFileSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
@@ -868,4 +868,27 @@ test('buildWorkspaces: Schnellantworten mit Vorgaben, aus beads.leitstand.mjs ü
   const own = buildWorkspaces(CFG, { workspaces: { code: { quick: { chat: [' Los ', '', 7, 'x'.repeat(200)] } } } });
   assert.deepEqual(own.code.quick.chat, ['Los', 'x'.repeat(120)]);
   assert.deepEqual(own.code.quick.decide, QUICK.decide);
+});
+
+test('waitsOf: blocks-Abhängigkeiten mit Titel, Status und Phase, offene zuerst', () => {
+  const byId = new Map([
+    ['a-1', { id: 'a-1', title: 'Parser-Fix', status: 'closed', labels: ['phase:merge', 'modul:backend'] }],
+    ['a-2', { id: 'a-2', title: 'Logo', status: 'in_progress', labels: ['phase:fix'] }],
+    ['epic', { id: 'epic', title: 'Epic', status: 'open' }],
+  ]);
+  const it = { dependencies: [
+    { issue_id: 'x', depends_on_id: 'epic', type: 'parent-child' },
+    { issue_id: 'x', depends_on_id: 'a-1', type: 'blocks' },
+    { id: 'a-2', dependency_type: 'blocks' },
+    { issue_id: 'x', depends_on_id: 'a-1', type: 'blocks' },
+    { issue_id: 'x', depends_on_id: 'weg-9', type: 'blocks' },
+    { issue_id: 'x', depends_on_id: 'a-2', type: 'related' },
+  ] };
+  assert.deepEqual(waitsOf(it, byId), [
+    { id: 'a-2', title: 'Logo', status: 'in_progress', phase: 'fix' },
+    { id: 'weg-9', title: null, status: null, phase: null },
+    { id: 'a-1', title: 'Parser-Fix', status: 'closed', phase: 'merge' },
+  ]);
+  assert.deepEqual(waitsOf({}, byId), []);
+  assert.deepEqual(waitsOf({ dependencies: [{ depends_on_id: 'epic', type: 'parent-child' }] }, byId), []);
 });

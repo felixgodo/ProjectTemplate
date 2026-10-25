@@ -127,6 +127,10 @@
   /* Rückfrage eines Workers: oben auf der Seite, bis sie beantwortet ist */
   .asks { display: grid; gap: 10px; margin: 0 0 16px; }
   .asks:empty { display: none; }
+  .waits { margin: 2px 0 8px; padding: 5px 9px; border-radius: 6px; font-size: 13px;
+    border-left: 3px solid var(--warn); background: color-mix(in srgb, var(--warn) 10%, var(--panel)); }
+  .waits.done { border-left-color: var(--done); background: color-mix(in srgb, var(--done) 10%, var(--panel)); }
+  .waits .id { font-weight: 600; }
   .card.ask { border: 2px solid var(--warn); background: color-mix(in srgb, var(--warn) 8%, var(--panel)); }
   .card.ask .card-head { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
   .card.ask .q { font-size: 15px; font-weight: 700; margin: 6px 0 8px; }
@@ -581,6 +585,18 @@ function xInfo(it, cls = '') {
   const links = xLinks(it), logo = logoImg(it, cls), tags = (it.x?.tags || []).map((t) => `<span class="tag">${esc(t)}</span>`).join('');
   return links || logo || tags ? `<div class="xinfo">${logo}${tags}${links}</div>` : '';
 }
+// Abhängigkeiten (blocks): offene als „wartet auf“, sind alle erledigt, als Hinweis zum Entscheiden
+const waitState = (w) => (w.status === 'closed' ? 'erledigt' : w.phase ? `${w.status === 'in_progress' ? 'in Arbeit · ' : ''}phase:${w.phase}`
+  : w.status === 'in_progress' ? 'in Arbeit' : w.status || 'unbekannt');
+const openWaits = (it) => (it.waits || []).filter((w) => w.status !== 'closed');
+function waitsHtml(it) {
+  if (!it.waits?.length) return '';
+  const open = openWaits(it);
+  const list = (open.length ? open : it.waits).map((w) => `<a href="#" class="id" data-issue="${esc(w.id)}">${esc(w.id)}</a>
+    ${w.title ? esc(w.title) : ''} <span class="muted">· ${esc(waitState(w))}</span>`).join('<br>');
+  return open.length ? `<div class="waits">⏳ wartet auf ${list}</div>`
+    : `<div class="waits done">✓ Abhängigkeit erledigt: ${list}</div>`;
+}
 const xActions = (it) => it.x?.actions || [];
 const xButton = (a, cls = '') => `<button class="go ${cls}" data-xaction="${esc(a.key)}" data-confirm="${esc(a.confirm)}"
   ${a.disabled ? `disabled title="${esc(a.disabled)}"` : a.hint ? `title="${esc(a.hint)}"` : ''}>${esc(a.title)}</button>`;
@@ -784,7 +800,7 @@ function renderInbox(items) {
   const asks = (st.workers || []).filter((w) => w.ask).length;
   $('human-n').textContent = items.length || asks ? `(${items.length}${asks ? ` + ${asks} ${asks === 1 ? 'Rückfrage' : 'Rückfragen'} oben` : ''})` : '';
   // Nicht neu zeichnen, während getippt wird oder sich nichts geändert hat
-  const key = P + st.workspace + items.map((i) => i.id + i.updated_at + JSON.stringify(i.x || '')).join('|');
+  const key = P + st.workspace + items.map((i) => i.id + i.updated_at + JSON.stringify([i.x || '', i.waits || ''])).join('|');
   if (document.activeElement?.closest?.('#inbox') || key === keys.inbox) return;
   keys.inbox = key;
   if (!items.length) {
@@ -807,6 +823,7 @@ function renderInbox(items) {
         ${split ? `<span class="tag">${esc(split.label)}</span>` : ''}
         <span class="muted" style="font-size:12px">${esc(ago(it.updated_at))}</span>
       </div>
+      ${waitsHtml(it)}
       ${xInfo(it)}
       <details ${it.description && it.description.length < 400 ? 'open' : ''}>
         <summary>Beschreibung</summary><div class="text">${esc(it.description || '–')}</div>
@@ -856,6 +873,7 @@ function itemHtml(it, col) {
     <div style="display:flex;gap:6px;align-items:center"><span class="id">${esc(it.id)}</span>${prio(it.priority)}
       ${TOUCH && movable ? `<button class="small" style="margin-left:auto" data-move-issue="${esc(it.id)}" title="Verschieben" aria-label="Verschieben">⇄</button>` : ''}
       ${it.external_ref ? `<span class="muted" style="font-size:11px">${esc(it.external_ref)}</span>` : ''}
+      ${openWaits(it).length ? `<span class="badge warn" title="${esc(`wartet auf ${openWaits(it).map((w) => `${w.id} (${waitState(w)})`).join(', ')}`)}">⏳ ${esc(openWaits(it)[0].id)}${openWaits(it).length > 1 ? ` +${openWaits(it).length - 1}` : ''}</span>` : ''}
       ${it.stale ? '<span class="badge bad" title="Lease abgelaufen – Worker hängt oder ist weg">⚠ Lease</span>' : ''}</div>
     <div class="t">${esc(it.title)}</div>
     ${xInfo(it)}
@@ -873,7 +891,7 @@ function itemHtml(it, col) {
 }
 
 function renderBoard() {
-  const key = JSON.stringify([P, st.workspace, filters, COLS.map(([k]) => st.columns[k].map((i) => [i.id, i.updated_at, i.stale, i.x])),
+  const key = JSON.stringify([P, st.workspace, filters, COLS.map(([k]) => st.columns[k].map((i) => [i.id, i.updated_at, i.stale, i.x, i.waits])),
     st.columns.deferred.map((i) => i.id), st.prs.map((p) => [p.repo, p.number, p.ci, p.mergeable, p.isDraft])]);
   if (dragging || keys.board === key) return;
   keys.board = key;
