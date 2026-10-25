@@ -526,3 +526,37 @@ test('bdw: im Worktree immer das .beads/ des Haupt-Checkouts, Actor aus dem Work
   // ausdrücklich gesetzt gewinnt
   assert.equal(out(wt, { BEADS_DIR: '/x/.beads', BEADS_ACTOR: 'user' }), '/x/.beads|user');
 });
+
+test('stop beendet auch Terminal-Worker: SIGTERM, dann das tmux-Fenster; aktive nur mit --force', () => {
+  const { root, workers } = testRepo();
+  const spawnSleep = () => Number(execFileSync('sh', ['-c', 'sleep 60 >/dev/null 2>&1 & echo $!'], { encoding: 'utf8' }).trim());
+  const term = (name, pid, status = 'idle') => ({ id: `t-${name}`, pid, kind: 'interactive', name, status, cwd: testRepo().wt(name) });
+  // tmux kennt das Fenster fix-3 (list-windows gibt den Namen aus)
+  const env = tmuxEnv({ FAKE_TMUX_WINDOWS: 'fix-3' });
+  writeFileSync(join(fakeBin, 'tmux'), `#!/bin/sh
+echo "tmux $*" >>"$FAKE_LOG"
+case $1 in
+  has-session) [ -n "$FAKE_TMUX_UP" ] ;;
+  new-window) echo %9 ;;
+  list-panes) echo "/dev/pts/7 %3" ;;
+  list-windows) printf '%s\\n' $FAKE_TMUX_WINDOWS ;;
+esac
+`);
+  const busy = workers(root, ['stop', '--all'], [term('fix-3', 1, 'busy')], env);
+  assert.equal(busy.status, 1);
+  assert.match(busy.stderr, /noch aktiv: fix-3/);
+
+  const pid = spawnSleep();
+  const r = workers(root, ['stop', 'fix-3'], [term('fix-3', pid)], env);
+  assert.equal(r.status, 0, r.stderr);
+  assert.throws(() => process.kill(pid, 0));
+  assert.ok(tmuxCalls(r.calls).includes('kill-window -t =bk-spot:=fix-3'), r.calls.join('\n'));
+
+  // --all mischt Hintergrund- und Terminal-Worker
+  const pid2 = spawnSleep();
+  const all = workers(root, ['stop', '--all'], [live('aaaa0001', 'fix-4'), term('club-add-1', pid2)], env);
+  assert.equal(all.status, 0, all.stderr);
+  assert.ok(all.calls.includes('stop aaaa0001'));
+  assert.throws(() => process.kill(pid2, 0));
+  assert.match(all.stdout, /stoppe club-add-1/);
+});

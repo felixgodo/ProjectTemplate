@@ -426,7 +426,7 @@ function renderHead() {
     <label class="small muted" style="font-size:12.5px" title="${esc(`Startet idle Worker ohne Claim neu, sobald ihr Kontext über der Schwelle liegt (Prüfung jede Minute).${recent ? `\n\nZuletzt:\n${recent}` : ''}`)}">Auto-Neustart
       <select id="autorestart">${opts.map((n) => `<option value="${n}" ${n === (ar.threshold || 0) ? 'selected' : ''}>${n ? `ab ${ktok(n)}` : 'aus'}</option>`).join('')}</select></label>
     ${st.workers.length ? `<button class="small danger" data-stop="all"
-      title="Alle Hintergrund-Worker${hosts().length ? ' aller Rechner' : ''} stoppen; verweigert, solange einer arbeitet (besser erst auslaufen lassen)">Alle stoppen</button>` : ''}
+      title="Alle Worker${hosts().length ? ' aller Rechner' : ''} stoppen; verweigert, solange einer arbeitet (besser erst auslaufen lassen)">Alle stoppen</button>` : ''}
     <span class="muted" style="font-size:12.5px">${st.workers.length} Worker, ${st.workers.filter((w) => w.status !== 'idle').length} aktiv</span>`;
   // nur bei Änderung neu zeichnen, sonst schließt das Auto-Refresh eine offene Auswahl;
   // nicht, solange „Alle stoppen“ scharf ist oder auf --force wartet
@@ -911,9 +911,7 @@ function workerHtml(w) {
     </dl>
     <div class="actions" style="margin-top:12px">
       <button data-restart="${esc(w.name)}" title="Mit frischem Kontext neu starten: nur idle, ohne Claim und Merge-Slot${w.kind === 'background' ? '' : ' (im selben Terminal)'}">Neu starten</button>
-      ${w.kind === 'background'
-        ? `<button class="danger" data-stop="${esc(w.name)}">Stoppen</button>`
-        : '<span class="muted" style="font-size:13px">Stoppen nur im Terminal (iTerm-Tab bzw. tmux-Fenster).</span>'}
+      <button class="danger" data-stop="${esc(w.name)}" title="Session beenden; verweigert, solange der Worker arbeitet (besser erst auslaufen lassen)${w.kind === 'background' ? '' : '. Ein tmux-Fenster wird geschlossen, ein iTerm-Tab bleibt mit seiner Shell offen'}">Stoppen</button>
       <span class="msg" id="w-msg"></span>
     </div>
     ${a.pending?.length ? `<h4>Wartende Nachrichten</h4>${a.pending.map((p) => `<div class="text">${esc(p.text)}<div class="muted">${esc(ago(p.at))}</div></div>`).join('')}` : ''}
