@@ -1,7 +1,7 @@
 // node --test scripts/beadskit/leitstand/top.test.mjs
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { ago, bar, fit, gb, lastParagraph, renderOverview, spark, uptimeText } from './top.mjs';
+import { ago, bar, coreLine, fit, gb, lastParagraph, palette, renderOverview, spark, uptimeText } from './top.mjs';
 
 const now = Date.parse('2026-10-25T12:00:00Z');
 const worker = (name, extra = {}) => ({
@@ -53,7 +53,7 @@ const GB = 2 ** 30;
 const sysData = {
   ...data,
   systems: [
-    { name: 'pc', leader: true, ok: true, stats: { cpu: { percent: 95, cores: 16, load: [4.2, 3.1, 2] }, mem: { used: 18 * GB, total: 30 * GB },
+    { name: 'pc', leader: true, ok: true, stats: { cpu: { percent: 95, cores: 4, perCore: [5, 75, 100, null], load: [4.2, 3.1, 2] }, mem: { used: 18 * GB, total: 30 * GB },
       disk: { used: 17 * GB, total: 457 * GB }, tempC: 80, uptime: 3 * 3600, claude: 12, docker: 0 } },
     { name: 'mac', ok: false, error: 'ssh: timeout' },
   ],
@@ -73,12 +73,22 @@ test('bar, gb, uptimeText', () => {
 
 test('Rechnerzeilen: breit mit Temperatur, Uptime, Docker; offline mit Fehler; Listen nebeneinander', () => {
   const t = renderOverview(sysData, { width: 200, color: false, now });
-  assert.match(t, /● pc ★ +CPU ██████████ +95 % +80 °C +Load 4,2 3,1 2 \/16 +RAM ██████░░░░ 18,0\/30,0 GB +SSD 17,0\/457 GB +up 3 h +claude 12 +docker 0/);
+  assert.match(t, /● pc ★ +CPU ██████████ +95 % +80 °C +Load 4,2 3,1 2 \/4 +RAM ██████░░░░ 18,0\/30,0 GB +SSD 17,0\/457 GB +up 3 h +claude 12 +docker 0/);
   assert.match(t, /● mac +offline: ssh: timeout/);
   assert.match(t, /Wartet auf dich \(3\) +Zuletzt erledigt/);
   assert.match(t, /P1 spot-wxt\.18 +Prod-Zugang fehlt +\d\d:02 spot-7iq\.96 +Zeitzonen .*verify-101/);
   assert.match(t, /2 Worker, 1 aktiv · Σ Kontext 520k/);
   for (const line of t.split('\n')) assert.ok([...line].length <= 200, line);
+});
+
+test('coreLine: ein Zeichen je Kern, höchster Kern, Anzahl ≥ 90 %; ohne Werte keine Zeile', () => {
+  const p = palette(false);
+  assert.equal(coreLine(sysData.systems[0], { p, nameW: 4 }), '       Kerne  ▁▇█·   max 100 % (#2)   1 ≥ 90 %');
+  const calm = { ok: true, stats: { cpu: { perCore: [10, 20] } } };
+  assert.equal(coreLine(calm, { p, nameW: 2 }), '     Kerne  ▁▂   max 20 % (#1)');
+  assert.equal(coreLine({ ok: true, stats: { cpu: { percent: 5 } } }, { p, nameW: 2 }), null);
+  assert.equal(coreLine(sysData.systems[1], { p, nameW: 2 }), null);
+  assert.match(renderOverview(sysData, { width: 110, color: false, now }), /● pc ★ +CPU .*\n +Kerne  ▁▇█·/);
 });
 
 test('schmal (< 140): ohne Listen, Temperatur, Uptime und Docker', () => {
