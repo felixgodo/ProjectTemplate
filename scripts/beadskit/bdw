@@ -3,4 +3,12 @@
 # Sessions bleiben unterscheidbar (sonst alle unter git user.name).
 : "${BEADS_ACTOR:=$(basename "$(git rev-parse --show-toplevel 2>/dev/null || pwd)")}"
 export BEADS_ACTOR
+# Datenbank immer über das .beads/ des Haupt-Checkouts: Liegt .beads/metadata.json im Git, hat jeder
+# Worktree ein eigenes .beads/ ohne Port-Datei und ohne lokale Daten (bd verbände sich mit host:0
+# oder legte eine leere Datenbank an).
+if [ -z "${BEADS_DIR-}" ] && common=$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null) &&
+  [ -f "$(dirname "$common")/.beads/metadata.json" ]; then
+  BEADS_DIR=$(dirname "$common")/.beads
+  export BEADS_DIR
+fi
 exec bd "$@"

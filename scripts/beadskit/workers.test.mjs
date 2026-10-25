@@ -500,3 +500,29 @@ test('zwei Rechner: autorestart in bd kv, config mit Rechner-Angaben', () => {
   const single = JSON.parse(workers(root, ['config']).stdout);
   assert.deepEqual([single.leader, single.markers, single.hostBase], [null, 'file', 0]);
 });
+
+test('bdw: im Worktree immer das .beads/ des Haupt-Checkouts, Actor aus dem Worktree', () => {
+  const r = join(dir, 'bdwrepo');
+  mkdirSync(join(r, 'scripts/beadskit'), { recursive: true });
+  copyFileSync(join(here, 'bdw'), join(r, 'scripts/beadskit/bdw'));
+  mkdirSync(join(r, '.beads'));
+  writeFileSync(join(r, '.beads/metadata.json'), '{}');
+  git(dir, 'init', '-q', r);
+  git(r, 'add', '.');
+  git(r, '-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-qm', 'init');
+  const wt = join(r, '.claude/worktrees/fix-7');
+  git(r, 'worktree', 'add', '-q', wt);
+  // Ersatz für bd: gibt aus, welche Datenbank und welcher Actor ankämen
+  const bin = join(dir, 'bdbin');
+  mkdirSync(bin, { recursive: true });
+  writeFileSync(join(bin, 'bd'), '#!/bin/sh\necho "$BEADS_DIR|$BEADS_ACTOR"\n');
+  chmodSync(join(bin, 'bd'), 0o755);
+  const env = { ...process.env, PATH: `${bin}:${process.env.PATH}` };
+  delete env.BEADS_DIR;
+  delete env.BEADS_ACTOR;
+  const out = (cwd, extra = {}) => execFileSync(join(cwd, 'scripts/beadskit/bdw'), ['list'], { cwd, encoding: 'utf8', env: { ...env, ...extra } }).trim();
+  assert.equal(out(wt), `${realpathSync(r)}/.beads|fix-7`);
+  assert.equal(out(r), `${realpathSync(r)}/.beads|bdwrepo`);
+  // ausdrücklich gesetzt gewinnt
+  assert.equal(out(wt, { BEADS_DIR: '/x/.beads', BEADS_ACTOR: 'user' }), '/x/.beads|user');
+});

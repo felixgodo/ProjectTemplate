@@ -106,6 +106,9 @@ export function systemLine(sys, { p, wide, nameW }) {
   return ` ${p.green('●')} ${p.bold(fit(name, nameW))} ${parts.join('   ')}`;
 }
 
+/** Sichtbare Länge ohne Farbcodes. */
+const plainLen = (t) => [...t.replace(/\x1b\[[0-9;]*m/g, '')].length;
+
 const clock = (iso) => (Number.isFinite(Date.parse(iso))
   ? new Date(iso).toLocaleTimeString('de-DE', { hour: '2-digit', minute: '2-digit' }) : '–');
 
@@ -149,16 +152,22 @@ export function renderOverview(data, { width = 120, color = true, now = Date.now
   const actW = flex - issueW;
   for (const pr of data.projects) {
     const m = pr.metrics;
-    const facts = [
-      `${pr.workers.length} Worker${pr.workers.length ? ` (${pr.workers.filter((x) => x.status !== 'idle').length} aktiv)` : ''}`,
-      m ? p.dim(`offen ${m.open}`) : null,
-      m ? p.dim(`in Arbeit ${m.working}`) : null,
-      m && m.human ? p.yellow(`wartet auf dich ${m.human}`) : m ? p.dim('wartet auf dich 0') : null,
-      m ? p.dim(`erledigt 24 h ${m.done24h}`) : null,
-      pr.slot ? (pr.slot.available ? p.dim('Merge-Slot frei') : p.cyan(`Merge-Slot ${pr.slot.holder}`)) : null,
-      pr.workers.length ? p.dim(`Σ ${ktok(pr.workers.reduce((n, x) => n + (x.activity?.contextTokens || 0), 0))}`) : null,
+    // [Text, Rang]: passt die Zeile nicht, fallen die mit dem höchsten Rang zuerst weg
+    let facts = [
+      [`${pr.workers.length} Worker${pr.workers.length ? ` (${pr.workers.filter((x) => x.status !== 'idle').length} aktiv)` : ''}`, 0],
+      m ? [p.dim(`offen ${m.open}`), 4] : null,
+      m ? [p.dim(`in Arbeit ${m.working}`), 2] : null,
+      m && m.human ? [p.yellow(`wartet auf dich ${m.human}`), 0] : m ? [p.dim('wartet auf dich 0'), 3] : null,
+      m ? [p.dim(`erledigt 24 h ${m.done24h}`), 5] : null,
+      pr.slot ? [pr.slot.available ? p.dim('Merge-Slot frei') : p.cyan(`Merge-Slot ${pr.slot.holder}`), 1] : null,
+      pr.workers.length ? [p.dim(`Σ ${ktok(pr.workers.reduce((n, x) => n + (x.activity?.contextTokens || 0), 0))}`), 6] : null,
     ].filter(Boolean);
-    out.push(`${p.bold(` ${pr.name}`)}  ${facts.join(p.dim(' · '))}`);
+    const head = () => `${p.bold(` ${pr.name}`)}  ${facts.map((f) => f[0]).join(p.dim(' · '))}`;
+    while (plainLen(head()) > w && facts.length > 1) {
+      const worst = Math.max(...facts.map((f) => f[1]));
+      facts = facts.filter((f) => f[1] !== worst);
+    }
+    out.push(head());
     for (const e of pr.errors || []) out.push(`   ${p.red(`! ${e}`)}`);
     for (const wk of pr.workers) {
       const a = wk.activity || {};
@@ -189,7 +198,6 @@ export function renderOverview(data, { width = 120, color = true, now = Date.now
         ...(pr.human || []).map((i) => `${p.dim(`P${i.priority ?? '?'}`)} ${p.cyan(fit(i.id, idW))}${fit(i.title, half - idW - 4)}`)];
       const right = [p.dim('Zuletzt erledigt'),
         ...(pr.done || []).map((i) => `${p.dim(clock(i.closed_at))} ${p.cyan(fit(i.id, idW))}${fit(i.title, half - idW - 20)} ${p.dim(fit(i.assignee || '', 12))}`)];
-      const plainLen = (t) => [...t.replace(/\x1b\[[0-9;]*m/g, '')].length;
       for (let k = 0; k < Math.max(left.length, right.length); k++) {
         const l = left[k] ?? '';
         out.push(`   ${l}${' '.repeat(Math.max(1, half - plainLen(l)))} ${right[k] ?? ''}`);
