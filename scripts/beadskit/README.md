@@ -108,7 +108,9 @@ die Slice und setzt ihre Werte sofort. Neue Grenzen je Container übernimmt `set
 wenn kein Job läuft. Der erste `--recreate` nach 1.4.0 hängt die Container in die Slice ein.
 `delete <n>` löscht genau Runner n, Lücken in den Nummern sind erlaubt, `add` füllt die
 kleinste. Ohne `n` wird wie bisher der Runner mit der höchsten Nummer gelöscht. `status` und der
-Leitstand zeigen CPU und RAM je Runner und für die ganze Slice.
+Leitstand zeigen CPU und RAM je Runner und für die ganze Slice. Die CI-MySQL
+(`RUNNER_MYSQL`) hat dort eine eigene Zeile. `start|stop mysql` schaltet sie einzeln,
+`stop mysql` verweigert bei laufendem Job, `start|stop all` nimmt sie mit.
 
 ## beads.project.sh
 

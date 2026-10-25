@@ -7,8 +7,8 @@
 #
 #   runner-server setup [--dry-run] [--recreate]  Image bauen, Runner registrieren (kurzlebiges Token), alle starten
 #   runner-server status [--json]     Container auf dem Server und Status bei GitHub
-#   runner-server start <n…|all>      Runner einschalten, nimmt wieder Jobs an
-#   runner-server stop <n…|all> [--force]  Runner ausschalten
+#   runner-server start <n…|mysql|all>  Runner (oder die CI-MySQL) einschalten, nimmt wieder Jobs an
+#   runner-server stop <n…|mysql|all> [--force]  Runner (oder die CI-MySQL) ausschalten
 #   runner-server add                 einen Runner mehr (kleinste freie Nummer, höchstens 8)
 #   runner-server delete [n] [--force]  Runner n löschen (ohne n: den mit der höchsten Nummer)
 #   runner-server logs                letzte Zeilen der Runner-Logs
@@ -32,8 +32,11 @@
 # `status --json` nennt je Runner auch den laufenden Job, CPU (% eines Kerns) und RAM (Bytes), zählt
 # die wartenden Jobs und misst die Slice (cpuPct, Quota in Kernen, RAM).
 # Mit RUNNER_MYSQL (z. B. 8.0) läuft neben den Runnern der Dienst `mysql` (nur im Netz ci, Daten im
-# RAM, root-Passwort ci) für DB-Tests; `setup` startet ihn mit, `start`/`stop`/`add`/`delete` lassen
-# ihn in Ruhe. Gesteuert auch aus dem Leitstand (Abschnitt CI-Runner).
+# RAM, root-Passwort ci) für DB-Tests; `setup` und `start all` starten ihn mit, `stop all` hält ihn
+# mit an. Einzeln: `start mysql` / `stop mysql` (verweigert, solange ein Runner einen Job hat, weil
+# dessen DB-Tests abbrächen). `add`/`delete` lassen ihn in Ruhe. `status --json` meldet ihn unter
+# mysql (container, cpu, mem; null ohne RUNNER_MYSQL und ohne Container). Gesteuert auch aus dem
+# Leitstand (Abschnitt CI-Runner).
 #
 # Einstellungen per Umgebung (Standard in Klammern): RUNNER_SSH_HOST (server),
 # RUNNER_REPO (GitHub-Repo dieses Checkouts), RUNNER_LABEL (BK_SLUG), RUNNER_COUNT (Anzahl aus
@@ -301,9 +304,15 @@ cmd_status() {
 
 # Zustand je Runner als JSON-Liste: n, name, container (running, exited, … oder missing),
 # github (online, offline oder missing), busy
+# Zustand der Container als JSON-Objekt Dienst → State (running, exited, …)
+container_states() {
+  remote "cd $DIR 2>/dev/null && docker compose ps --all --format json || true" |
+    jq -s 'map({key: .Service, value: .State}) | from_entries'
+}
+
+# $1 = Ergebnis von container_states (optional, sonst neu gelesen)
 runner_state() {
-  containers=$(remote "cd $DIR 2>/dev/null && docker compose ps --all --format json || true" |
-    jq -s 'map({key: .Service, value: .State}) | from_entries')
+  containers=${1:-$(container_states)}
   github=$(gh api "repos/$REPO/actions/runners" --jq '[.runners[] | {key: .name, value: {status, busy}}] | from_entries')
   nums=$(runners | jq -s -c .)
   jq -n --argjson c "$containers" --argjson g "$github" --argjson nums "$nums" --arg label "$LABEL" '
@@ -373,16 +382,20 @@ cmd_status_json() {
   tmp=$(mktemp)
   usage_script | remote bash -s >"$tmp" 2>/dev/null &
   upid=$!
-  state=$(runner_state)
+  containers=$(container_states)
+  state=$(runner_state "$containers")
   jobs=$(active_jobs | jq -s .)
   wait "$upid" || true
   usage=$(jq -c . "$tmp" 2>/dev/null || true)
   rm -f "$tmp"
-  jq -n --argjson r "$state" --argjson j "$jobs" --argjson u "${usage:-"{}"}" '{
+  jq -n --argjson r "$state" --argjson j "$jobs" --argjson u "${usage:-"{}"}" --argjson c "$containers" \
+    --arg mysql "$MYSQL_VERSION" '{
     runners: [$r[] | .name as $name | . + {job: ([$j[] | select(.status == "in_progress" and .runner == $name)
       | {name, branch, title, url, started}][0] // null),
       cpu: ($u.containers["runner-\(.n)"].cpu // null), mem: ($u.containers["runner-\(.n)"].mem // null)}],
     queued: ([$j[] | select(.status != "in_progress")] | length),
+    mysql: (if $mysql != "" or $c.mysql then {container: ($c.mysql // "missing"),
+      cpu: ($u.containers.mysql.cpu // null), mem: ($u.containers.mysql.mem // null)} else null end),
     slice: ($u.slice // null)
   }'
 }
@@ -406,9 +419,18 @@ services() {
 }
 
 cmd_start() {
+  if [ "$*" = mysql ]; then
+    remote "cd $DIR && docker compose up -d --no-recreate mysql"
+    return
+  fi
   ns=$(pick "$@") || exit 2
   # shellcheck disable=SC2086
-  remote "cd $DIR && docker compose up -d --no-recreate$(services $ns)"
+  remote "cd $DIR && docker compose up -d --no-recreate$(services $ns)$(all_mysql "$@")"
+}
+
+# " mysql" bei `all`, wenn das Projekt eine CI-MySQL hat
+all_mysql() {
+  [ "$*" = all ] && [ -n "$MYSQL_VERSION" ] && printf ' mysql' || true
 }
 
 cmd_stop() {
@@ -419,11 +441,25 @@ cmd_stop() {
     shift
   done
   shift
+  if [ "$*" = mysql ]; then
+    [ -n "$force" ] || guard_mysql
+    remote "cd $DIR && docker compose stop mysql"
+    return
+  fi
   ns=$(pick "$@") || exit 2
   # shellcheck disable=SC2086
   [ -n "$force" ] || guard_stop $ns
   # shellcheck disable=SC2086
-  remote "cd $DIR && docker compose stop$(services $ns)"
+  remote "cd $DIR && docker compose stop$(services $ns)$(all_mysql "$@")"
+}
+
+# Bricht ab, wenn ein Runner einen Job hat (dessen DB-Tests brauchen die MySQL)
+guard_mysql() {
+  busy=$(runner_state | jq -r '[.[] | select(.busy) | .name] | join(", ")')
+  if [ -n "$busy" ]; then
+    echo "$busy arbeitet gerade an einem Job, dessen DB-Tests ohne MySQL abbrächen. Trotzdem: --force" >&2
+    exit 1
+  fi
 }
 
 # Bricht ab, wenn einer der Runner einen Job hat oder danach keiner mehr liefe

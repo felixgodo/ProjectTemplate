@@ -432,8 +432,8 @@
     <div class="roles" id="roles"></div>
 
     <div id="runners-wrap" hidden><h2>CI-Runner <span class="sub muted" id="runners-n"></span>
-      <button class="small" data-ra="start" data-n="all" title="Alle Runner auf dem Server einschalten">Alle an</button>
-      <button class="small" data-ra="stop" data-n="all" title="Alle Runner ausschalten (verweigert bei laufenden Jobs)">Alle aus</button>
+      <button class="small" data-ra="start" data-n="all" title="Alle Runner und die CI-MySQL auf dem Server einschalten">Alle an</button>
+      <button class="small" data-ra="stop" data-n="all" title="Alle Runner und die CI-MySQL ausschalten (verweigert bei laufenden Jobs)">Alle aus</button>
       <button class="small" data-ra="add" title="Einen Runner mehr anlegen und starten (kleinste freie Nummer, höchstens 8, dauert etwa eine Minute)">+ Runner</button>
       <button class="small danger" data-ra="delete" title="Den Runner mit der höchsten Nummer löschen (verweigert bei laufendem Job); einzelne Runner über „Löschen“ auf der Karte">− Runner</button></h2>
     <div class="runners" id="runners"><span class="muted" style="font-size:13px">lädt …</span></div></div>
@@ -1032,6 +1032,20 @@ function runnerChip(r) {
     <b>${esc(r.name)}</b><span class="muted">${esc(state)}</span>
     ${r.busy ? '<span class="badge warn" title="arbeitet gerade an einem CI-Job">Job</span>' : ''}${btn}</div>${job}${use}</div>`;
 }
+// CI-MySQL (RUNNER_MYSQL): eigene Zeile, An/Aus; stop verweigert der Server bei laufendem Job
+function mysqlChip(m) {
+  const on = m.container === 'running';
+  const state = m.container === 'missing' ? 'nicht eingerichtet' : on ? 'an' : 'aus';
+  const btn = m.container === 'missing'
+    ? '<span class="muted" style="font-size:12px" title="scripts/beadskit/ci/runner-server setup">setup nötig</span>'
+    : on ? '<button class="small danger" data-ra="stop" data-n="mysql" title="Nur ausschalten, wenn kein Job DB-Tests braucht">Ausschalten</button>'
+      : '<button class="small" data-ra="start" data-n="mysql">Einschalten</button>';
+  const use = on && (m.cpu != null || m.mem != null)
+    ? `<div class="use muted">CPU ${m.cpu != null ? `${Math.round(m.cpu)} %` : '?'} · RAM ${gib(m.mem)}</div>` : '';
+  return `<div class="runner ${on ? 'on' : m.container === 'missing' ? 'missing' : ''}"><div class="rhead"><span class="dot"></span>
+    <b>CI-MySQL</b><span class="muted">${esc(state)}</span><span class="rbtns">${btn}</span></div>
+    <div class="job muted">Datenbank für die DB-Tests der Runner</div>${use}</div>`;
+}
 const gib = (b) => (b != null ? `${(b / 2 ** 30).toFixed(1)} GiB` : '?');
 // „CI gesamt 380 % von 400 %, 9.1 GiB“: Auslastung der gemeinsamen Slice beadskit-ci.slice
 function sliceText(s) {
@@ -1049,7 +1063,8 @@ function renderRunners() {
   const on = list.filter((r) => r.container === 'running').length;
   const queued = runners?.queued ? ` · ${runners.queued} Job${runners.queued === 1 ? '' : 's'} warten` : '';
   $('runners-n').textContent = `${on} von ${list.length} an, ${list.filter((r) => r.busy).length} mit Job${queued}${sliceText(runners?.slice)} · Stand ${clock(runners?.at)}`;
-  $('runners').innerHTML = list.length ? list.map(runnerChip).join('') : '<span class="muted" style="font-size:13px">keine</span>';
+  const chips = [...list.map(runnerChip), ...(runners?.mysql ? [mysqlChip(runners.mysql)] : [])];
+  $('runners').innerHTML = chips.length ? chips.join('') : '<span class="muted" style="font-size:13px">keine</span>';
 }
 
 // ---- Laden ----
@@ -1431,11 +1446,11 @@ document.addEventListener('click', async (e) => {
   const ra = e.target.closest('button[data-ra]');
   if (ra) {
     const action = ra.dataset.ra;
-    const n = ra.dataset.n === 'all' ? 'all' : ra.dataset.n ? Number(ra.dataset.n) : undefined;
+    const n = ['all', 'mysql'].includes(ra.dataset.n) ? ra.dataset.n : ra.dataset.n ? Number(ra.dataset.n) : undefined;
     const force = !!ra.dataset.force;
     const nums = (runners?.runners || []).map((r) => r.n);
     const ask = force ? 'Job abbrechen?' : {
-      stop: `${n === 'all' ? 'alle' : `Runner ${n}`} aus?`,
+      stop: `${n === 'all' ? 'alle (mit CI-MySQL)' : n === 'mysql' ? 'CI-MySQL' : `Runner ${n}`} aus?`,
       add: 'Runner anlegen?',
       delete: `Runner ${n ?? (nums.length ? Math.max(...nums) : '?')} löschen?`,
     }[action];

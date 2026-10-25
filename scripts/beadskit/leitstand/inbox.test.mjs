@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import {
   buildWorkspaces, cardExtras, clientIp, groupIssues, isOwnHost, isPagePath, isSameOrigin, labelSlug, loginGuard, metrics,
-  normalizeConfig, normalizeExt, parseCookies, parseProjectList, parseRunners, parseSlice, parseWorkers, planCreate, planDecision,
+  normalizeConfig, normalizeExt, parseCookies, parseProjectList, parseMysql, parseRunners, parseSlice, parseWorkers, planCreate, planDecision,
   planIssueAction, planRestarts, planRunnerAction, planWorkerAction, prSummary, publicConfig, readBody, repoOfIssue,
   RESTART_COOLDOWN_MS, safeEqual, signSession, today, verifySession, hashPassword, parsePasswordLine, verifyPassword,
   workerRe, wsOfIssue, parseHostsConf, mapRoot, shQuote, remoteCommand, mergeHostWorkers, parseMarkers, routeWorkerAction,
@@ -97,6 +97,9 @@ test('planRunnerAction: start/stop für Nummer oder all, --force nur bei stop', 
   assert.deepEqual(planRunnerAction({ action: 'delete', n: 3, force: true }), ['delete', '3', '--force']);
   assert.deepEqual(planRunnerAction({ action: 'delete', n: 5 }), ['delete', '5']);
   for (const n of [0, 9, 'all', '3', 1.5]) assert.throws(() => planRunnerAction({ action: 'delete', n }), /1–8/);
+  assert.deepEqual(planRunnerAction({ action: 'stop', n: 'mysql', force: true }), ['stop', 'mysql', '--force']);
+  assert.deepEqual(planRunnerAction({ action: 'start', n: 'mysql' }), ['start', 'mysql']);
+  assert.throws(() => planRunnerAction({ action: 'delete', n: 'mysql' }), /1–8/);
   for (const n of [0, 9, 1.5, '3', '--force', undefined]) {
     assert.throws(() => planRunnerAction({ action: 'stop', n }), /1–8/);
   }
@@ -467,6 +470,12 @@ test('parseRunners: sortiert, füllt fehlende Felder mit dem Projekt-Slug, verwi
   ]);
   assert.equal(parseRunners([{ n: 1 }], 'regiehub')[0].name, 'regiehub-runner-1');
   assert.deepEqual(parseRunners(null), []);
+});
+
+test('parseMysql: Zustand, CPU und RAM der CI-MySQL, null ohne', () => {
+  assert.deepEqual(parseMysql({ container: 'running', cpu: 6.2, mem: 8e8, x: 1 }), { container: 'running', cpu: 6.2, mem: 8e8 });
+  assert.deepEqual(parseMysql({ cpu: 'x' }), { container: 'missing', cpu: null, mem: null });
+  assert.equal(parseMysql(null), null);
 });
 
 test('parseSlice: Zahlen der CI-Slice, null ohne Messwerte', () => {

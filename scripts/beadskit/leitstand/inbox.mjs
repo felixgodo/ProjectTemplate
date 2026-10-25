@@ -395,8 +395,8 @@ export function planWorkerAction({ action, role, name, force, off, counts, thres
 }
 
 /**
- * Argumente für scripts/beadskit/ci/runner-server: start/stop eines Runners (1–8) oder aller, add,
- * delete eines Runners (1–8) oder ohne Nummer den mit der höchsten.
+ * Argumente für scripts/beadskit/ci/runner-server: start/stop eines Runners (1–8), der CI-MySQL
+ * (mysql) oder aller, add, delete eines Runners (1–8) oder ohne Nummer den mit der höchsten.
  */
 export function planRunnerAction({ action, n, force }) {
   const one = (x) => Number.isInteger(x) && x >= 1 && x <= 8;
@@ -406,7 +406,7 @@ export function planRunnerAction({ action, n, force }) {
     return ['delete', ...(n != null ? [String(n)] : []), ...(force ? ['--force'] : [])];
   }
   if (action !== 'start' && action !== 'stop') throw new Error('unbekannte Aktion');
-  if (n !== 'all' && !one(n)) throw new Error('Runner: 1–8 oder all');
+  if (n !== 'all' && n !== 'mysql' && !one(n)) throw new Error('Runner: 1–8, mysql oder all');
   return [action, String(n), ...(action === 'stop' && force ? ['--force'] : [])];
 }
 
@@ -433,6 +433,12 @@ export function parseRunners(list, slug = 'runner') {
       mem: num(r.mem),
     }))
     .sort((a, b) => a.n - b.n);
+}
+
+/** CI-MySQL aus `runner-server status --json` (container, cpu, mem) oder null, wenn es keine gibt. */
+export function parseMysql(m) {
+  if (!m || typeof m !== 'object') return null;
+  return { container: str(m.container, 'missing'), cpu: num(m.cpu), mem: num(m.mem) };
 }
 
 /** Auslastung der CI-Slice aus `runner-server status --json`: cpuPct (% eines Kerns), cpus (Quota), mem (Bytes). */
@@ -1787,6 +1793,7 @@ function startServer(token, selfRoot) {
             runners: parseRunners(Array.isArray(d) ? d : d?.runners, cfg.slug),
             queued: Number.isInteger(d?.queued) ? d.queued : null,
             slice: parseSlice(d?.slice),
+            mysql: parseMysql(d?.mysql),
             at: new Date().toISOString(),
           });
         } catch (e) {
