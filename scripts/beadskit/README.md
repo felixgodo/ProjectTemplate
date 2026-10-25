@@ -53,6 +53,7 @@ scripts/beadskit/workers drain && scripts/beadskit/workers ls   # warten bis idl
 scripts/beadskit/workers stop --all
 scripts/beadskit/workers restart fix-2                     # frischer Kontext, nur zwischen zwei Runden
 scripts/beadskit/workers autorestart --over 200k           # macht der Leitstand dann selbst
+scripts/beadskit/workers top                               # Live-Übersicht aller Projekte und Worker im Terminal
 scripts/beadskit/workers send fix-2 -- /compact            # Zeile ins Terminal tippen (iTerm-Tab, tmux-Fenster)
 ```
 

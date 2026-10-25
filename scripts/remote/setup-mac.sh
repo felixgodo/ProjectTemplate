@@ -145,6 +145,8 @@ fi
 head1 "Befehl pc"
 ln -sf "$HERE/pc" "$HOME/.local/bin/pc"
 ok "~/.local/bin/pc → scripts/remote/pc (pc help)"
+ln -sf "$TEMPLATE/scripts/beadskit/leitstand/top.mjs" "$HOME/.local/bin/beads-top"
+ok "~/.local/bin/beads-top → Live-Übersicht aller Worker (q beendet)"
 
 head1 "Weiter"
 cat <<EOF

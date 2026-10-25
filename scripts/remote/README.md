@@ -71,6 +71,7 @@ pc forward 5200 8100                   # … und im Mac-Browser http://localhost
 pc drain-host mac                      # vor dem Zuklappen: nur die Mac-Worker auslaufen lassen
 pc drain-host mac --off
 pc leitstand                           # http://127.0.0.1:3738: Worker beider Rechner, Rechner-Badge je Karte
+beads-top                              # dasselbe als Live-Übersicht im Terminal (Mac und PC, q beendet)
 ```
 
 Im Leitstand: oben je Rechner ein Chip (★ = Leitrechner, rot = nicht erreichbar) mit eigenem

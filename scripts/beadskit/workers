@@ -17,6 +17,7 @@
 #   workers send <name> [--] <text>   Nachricht oder /befehl in das Terminal eines Workers tippen
 #   workers repo-for <issue-id>   Repo-Pfad, in dem das Issue bearbeitet wird (BK_REPOS)
 #   workers config              Projekt-Konfiguration als JSON (für den Leitstand)
+#   workers top [slug…] [--once]   Live-Übersicht aller Projekte und Worker im Terminal (q beendet)
 #
 # Teil des beadskit aus dem ProjectTemplate – nicht im Projekt ändern. Was projektspezifisch
 # ist (Name, Ziel-Branch, Rollen, Workspaces, Skills, Module, Repos), steht in beads.project.sh
@@ -286,7 +287,7 @@ worker_name() { echo "$1-$((BK_HOST_BASE + $2))"; }
 term_cmd() { echo "cd '$ROOT' && claude -w $2 -n $2 '$(prompt_for "$1")'"; }
 
 usage() {
-  sed -n '7,19s/^# \{0,1\}//p' "$0" >&2
+  sed -n '7,20s/^# \{0,1\}//p' "$0" >&2
   exit 2
 }
 
@@ -1057,5 +1058,6 @@ case $sub in
   send) cmd_send "$@" ;;
   repo-for) [ $# = 1 ] || usage; cmd_repo_for "$1" ;;
   config) cmd_config ;;
+  top) exec node "$KIT/leitstand/top.mjs" "$@" ;;
   *) usage ;;
 esac
