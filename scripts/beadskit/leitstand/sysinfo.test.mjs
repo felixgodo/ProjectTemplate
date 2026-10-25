@@ -1,7 +1,7 @@
 // node --test scripts/beadskit/leitstand/sysinfo.test.mjs
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { corePercents, cpuPercent, cpuTimes, launchdState, parseDf, parseMeminfo, parseVmStat, systemStats } from './sysinfo.mjs';
+import { corePercents, cpuPercent, cpuTimes, launchdState, parseDf, parseMeminfo, parseVmStat, pushHistory, systemStats } from './sysinfo.mjs';
 
 test('parseMeminfo: belegt = gesamt − verfügbar', () => {
   const t = 'MemTotal:       32114848 kB\nMemFree:        21457724 kB\nMemAvailable:   27938556 kB\n';
@@ -56,4 +56,17 @@ test('launchdState: running, anderer Zustand oder aus', () => {
   assert.equal(launchdState('gui/501/x = {\n\tactive count = 1\n\tstate = running\n'), 'running');
   assert.equal(launchdState('\tstate = not running\n'), 'not');
   assert.equal(launchdState(''), 'aus');
+});
+
+test('pushHistory: Verlauf je Rechner, gekappt, je Kern; Fehler bleiben ohne Verlauf', () => {
+  const map = new Map();
+  const sys = (pct) => ({ name: 'a', ok: true, stats: { cpu: { percent: pct, perCore: [pct, 100 - pct] }, mem: { used: 1, total: 4 } } });
+  for (let i = 0; i < 5; i++) pushHistory(map, sys(i * 10), 3, i);
+  const out = pushHistory(map, sys(50), 3, 5);
+  assert.deepEqual(out.history.at, [3, 4, 5]);
+  assert.deepEqual(out.history.cpu, [30, 40, 50]);
+  assert.deepEqual(out.history.mem, [25, 25, 25]);
+  assert.deepEqual(out.history.cores, [[30, 40, 50], [70, 60, 50]]);
+  const off = { name: 'b', ok: false, error: 'weg' };
+  assert.equal(pushHistory(map, off), off);
 });

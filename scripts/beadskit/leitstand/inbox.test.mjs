@@ -7,7 +7,7 @@ import {
   planIssueAction, planRestarts, planRunnerAction, planWorkerAction, prSummary, publicConfig, readBody, repoOfIssue,
   RESTART_COOLDOWN_MS, safeEqual, signSession, today, verifySession, hashPassword, parsePasswordLine, verifyPassword,
   workerRe, wsOfIssue, parseHostsConf, mapRoot, shQuote, remoteCommand, mergeHostWorkers, parseMarkers, routeWorkerAction,
-  parsePrompt, parseDecision,
+  parsePrompt, parseDecision, collectSystems, QUICK,
 } from './inbox.mjs';
 import { readFileSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
@@ -814,4 +814,22 @@ test('parseDecision: Block „Optionen:“, Hinweis „Entscheidung nötig“ mi
   assert.equal(parseDecision('Schritte:\n1. a\n2. b'), null);
   assert.equal(parseDecision('Optionen:\n1. nur eine'), null);
   assert.equal(parseDecision(''), null);
+});
+
+test('collectSystems: ein Rechner ohne hosts.conf, zwei mit; ein Fehler betrifft nur diesen', async () => {
+  const stats = { cpu: { percent: 12, perCore: [10, 14], cores: 2 } };
+  const one = await collectSystems(null, { self: 'mac', local: async () => stats, remote: async () => { throw new Error('nie'); } });
+  assert.deepEqual(one, [{ name: 'mac', leader: true, self: true, ok: true, stats }]);
+  const conf = { self: 'mac', leader: 'mac', hosts: [{ name: 'mac' }, { name: 'pc' }] };
+  const two = await collectSystems(conf, { local: async () => stats, remote: async () => { throw new Error('ssh: x\nConnection refused'); } });
+  assert.equal(two[0].ok, true);
+  assert.deepEqual(two[1], { name: 'pc', leader: false, self: false, ok: false, error: 'Connection refused' });
+});
+
+test('buildWorkspaces: Schnellantworten mit Vorgaben, aus beads.leitstand.mjs überschreibbar und gekürzt', () => {
+  const def = buildWorkspaces(CFG, {});
+  assert.deepEqual(def.code.quick, QUICK);
+  const own = buildWorkspaces(CFG, { workspaces: { code: { quick: { chat: [' Los ', '', 7, 'x'.repeat(200)] } } } });
+  assert.deepEqual(own.code.quick.chat, ['Los', 'x'.repeat(120)]);
+  assert.deepEqual(own.code.quick.decide, QUICK.decide);
 });

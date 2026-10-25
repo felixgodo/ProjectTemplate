@@ -2,7 +2,13 @@
 <html lang="de">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="apple-mobile-web-app-title" content="Leitstand">
+<meta name="theme-color" content="#f6f6f3" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#161614" media="(prefers-color-scheme: dark)">
 <title>Leitstand</title>
 <style>
   :root {
@@ -115,7 +121,8 @@
 
   /* Inbox */
   .inbox { display: grid; gap: 12px; border-radius: 12px; }
-  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 14px 16px; }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 14px 16px; min-width: 0; }
+  .inbox > *, .asks > *, .systems > *, .roles > * { min-width: 0; }
   .card.decide { border-left: 4px solid var(--accent); }
   /* Rückfrage eines Workers: oben auf der Seite, bis sie beantwortet ist */
   .asks { display: grid; gap: 10px; margin: 0 0 16px; }
@@ -241,59 +248,221 @@
   img.logo.big { width: 72px; height: 72px; }
   .card.decide.xact { border-left-color: var(--ok); }
   button.go { background: var(--ok); border-color: var(--ok); color: #fff; font-weight: 600; }
+  button[data-armed]:not(.danger) { background: color-mix(in srgb, var(--warn) 22%, var(--panel)); border-color: var(--warn); }
+
+  .head2 { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; min-width: 0; }
+  /* Menü ⋯ im Kopf (Auto-Refresh, Abmelden) */
+  .more { position: relative; margin: 0; }
+  .more > summary { list-style: none; color: var(--ink); font-size: 16px; line-height: 1; padding: 6px 10px;
+    border: 1px solid var(--line); border-radius: 8px; background: var(--panel); }
+  .more > summary::-webkit-details-marker { display: none; }
+  .more[open] > summary { border-color: var(--muted); }
+  .more .menu { position: absolute; right: 0; top: calc(100% + 6px); z-index: 9; background: var(--panel);
+    border: 1px solid var(--line); border-radius: 10px; box-shadow: var(--shadow); padding: 8px; display: grid; gap: 6px;
+    min-width: 200px; font-size: 13px; }
+  .more .menu label { display: flex; gap: 8px; align-items: center; }
+
+  /* Tabs: oben auf dem Mac, unten auf dem iPhone */
+  .tabs { display: flex; gap: 4px; margin: 0 0 14px; padding: 4px; background: var(--chip); border-radius: 12px;
+    position: sticky; top: 0; z-index: 5; }
+  .tabs button { flex: 1 1 0; display: inline-flex; align-items: center; justify-content: center; gap: 7px; border: 0;
+    background: transparent; padding: 7px 10px; border-radius: 9px; color: var(--muted); font-weight: 600; position: relative; min-width: 0; }
+  .tabs button.on { background: var(--panel); color: var(--ink); box-shadow: 0 1px 3px rgba(0,0,0,.12); }
+  .tabs svg { width: 18px; height: 18px; flex: none; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+  .tabs .tl { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .tabs .tb { min-width: 18px; padding: 0 5px; border-radius: 999px; background: var(--human); color: #fff; font-size: 11px;
+    font-weight: 700; line-height: 18px; text-align: center; }
+  .tabs .tb:empty { display: none; }
+  .tabs .tb.dot { min-width: 9px; width: 9px; height: 9px; padding: 0; background: var(--bad); font-size: 0; line-height: 0; }
+  .tabs .tb.pulse { animation: pulse 1.2s ease-in-out infinite; }
+  .tabs .tb.calm { background: var(--muted); }
+  [data-pane][hidden] { display: none !important; }
+  [data-pane] > h2:first-child { margin-top: 4px; }
+
+  /* Schnellauswahl über Eingabefeldern */
+  .quick { display: flex; gap: 6px; overflow-x: auto; margin: 8px 0 0; padding-bottom: 2px; scrollbar-width: none; }
+  .quick::-webkit-scrollbar { display: none; }
+  .quick button { flex: none; border-radius: 999px; padding: 4px 11px; font-size: 12.5px; background: var(--chip); border-color: transparent; }
+  .quick button.on { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 14%, var(--panel)); }
+  .chatbar .quick { flex: 1 1 100%; margin: 0; }
+  .coljump { display: none; }
+
+  /* System */
+  .systems { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(420px, 100%), 1fr)); gap: 12px; }
+  .sys { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 12px 14px; min-width: 0; }
+  .sys-head { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; margin-bottom: 10px; }
+  .sys-head b { font-size: 16px; }
+  .sys-head .right { margin-left: auto; font-size: 12px; }
+  .metric { display: grid; grid-template-columns: 64px minmax(0, 1fr); gap: 4px 12px; align-items: center; padding: 8px 0; border-top: 1px solid var(--line); }
+  .metric > .k { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .05em; }
+  .metric .big { font-size: 26px; font-weight: 700; font-variant-numeric: tabular-nums; line-height: 1.1; }
+  .metric .big small { font-size: 13px; font-weight: 500; color: var(--muted); }
+  .metric .row2 { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; min-width: 0; }
+  .metric .sub2 { font-size: 12.5px; color: var(--muted); font-variant-numeric: tabular-nums; }
+  .meter { height: 8px; border-radius: 4px; background: var(--chip); overflow: hidden; flex: 1 1 140px; min-width: 100px; }
+  .meter i { display: block; height: 100%; border-radius: 4px; background: var(--lv, var(--ok)); }
+  .lv-ok { --lv: var(--ok); } .lv-warn { --lv: var(--warn); } .lv-bad { --lv: var(--bad); }
+  .spark { display: block; width: 100%; max-width: 260px; height: 34px; flex: 1 1 160px; color: var(--search); touch-action: none; }
+  .spark .area { fill: currentColor; opacity: .14; stroke: none; }
+  .spark .line { fill: none; stroke: currentColor; stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; }
+  .spark .cur { fill: currentColor; stroke: var(--panel); stroke-width: 2; }
+  .spark .hair { stroke: var(--muted); stroke-width: 1; }
+  .spark .base { stroke: var(--line); stroke-width: 1; }
+  .spark.mem { color: var(--merge); }
+  .spark-val { font-size: 11.5px; color: var(--muted); min-width: 92px; font-variant-numeric: tabular-nums; }
+  .cores { display: grid; grid-template-columns: repeat(auto-fill, minmax(26px, 1fr)); gap: 4px; }
+  .core { display: grid; gap: 3px; justify-items: center; padding: 3px 0; border: 1px solid transparent; border-radius: 6px;
+    background: none; cursor: pointer; min-height: 0; font-size: 10.5px; color: var(--muted); font-variant-numeric: tabular-nums; }
+  .core.on { border-color: var(--muted); background: var(--chip); }
+  .core .col2 { width: 14px; height: 46px; border-radius: 4px; background: var(--chip); display: flex; align-items: flex-end; overflow: hidden; }
+  .core .col2 i { display: block; width: 100%; border-radius: 4px; background: var(--lv, var(--ok)); min-height: 2px; }
+  .core-detail { margin-top: 6px; display: flex; align-items: center; gap: 10px; flex-wrap: wrap; font-size: 12.5px; }
+  .svc { display: flex; gap: 6px; flex-wrap: wrap; }
+  .svc .chip .dot { background: var(--ok); }
+  .svc .chip.bad .dot { background: var(--bad); }
+
+  /* iPhone und schmale Fenster */
+  @media (max-width: 760px) {
+    main { padding: calc(10px + env(safe-area-inset-top)) max(12px, env(safe-area-inset-right)) calc(84px + env(safe-area-inset-bottom)) max(12px, env(safe-area-inset-left)); }
+    header { gap: 8px; flex-wrap: wrap; margin-bottom: 8px; }
+    header h1 { font-size: 18px; flex: 1 1 0; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    header .spacer, #updated { display: none; }
+    .head2 { order: 5; flex: 1 1 100%; flex-wrap: nowrap; overflow-x: auto; margin: 0 -12px; padding: 0 12px 2px; scrollbar-width: none; }
+    .head2:empty, .head2:not(:has(button)) { display: none; }
+    .filters label { display: none; }
+    .head2::-webkit-scrollbar { display: none; }
+    .head2 .projects, .head2 .wsswitch { flex-wrap: nowrap; flex: none; }
+    .new-lbl { display: none; }
+    .tabs { position: fixed; left: 0; right: 0; bottom: 0; top: auto; margin: 0; border-radius: 0; z-index: 9;
+      padding: 4px max(6px, env(safe-area-inset-right)) calc(4px + env(safe-area-inset-bottom)) max(6px, env(safe-area-inset-left));
+      background: color-mix(in srgb, var(--panel) 92%, transparent); border-top: 1px solid var(--line);
+      backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px); }
+    .tabs button { flex-direction: column; gap: 2px; padding: 6px 2px; font-size: 10.5px; font-weight: 600; min-height: 50px; }
+    .tabs button.on { background: transparent; box-shadow: none; color: var(--accent); }
+    .tabs svg { width: 22px; height: 22px; }
+    .tabs .tb { position: absolute; top: 3px; left: calc(50% + 6px); }
+    .toast { bottom: calc(78px + env(safe-area-inset-bottom)); }
+    input, select, textarea { font-size: 16px; }
+    .kpis { grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px; }
+    .kpi { padding: 6px 9px; }
+    .kpi b { font-size: 18px; }
+    .kpi span { font-size: 11px; }
+    .controls { gap: 6px; }
+    .card { padding: 12px; }
+    .title { flex-basis: 100%; }
+    .filters input[type=search] { max-width: none; flex-basis: 100%; }
+    .coljump { display: flex; gap: 6px; overflow-x: auto; margin: 0 0 8px; scrollbar-width: none; }
+    .coljump::-webkit-scrollbar { display: none; }
+    .coljump button { flex: none; border-radius: 999px; font-size: 12.5px; padding: 4px 11px; display: inline-flex; gap: 6px; align-items: center; }
+    .coljump button::before { content: ""; width: 8px; height: 8px; border-radius: 2px; background: var(--c); }
+    .board { grid-auto-columns: 86%; scroll-snap-type: x mandatory; margin: 0 -12px; padding: 0 12px 6px; scroll-padding: 0 12px; }
+    .col { scroll-snap-align: start; }
+    .col-body { max-height: calc(100dvh - 300px); }
+    aside.drawer { width: 100vw; border-left: 0; }
+    .dhead { padding: calc(10px + env(safe-area-inset-top)) 14px 10px; position: sticky; top: 0; background: var(--panel); }
+    .dhead h3 { font-size: 15px; }
+    .dbody { padding: 10px 14px calc(24px + env(safe-area-inset-bottom)); }
+    .chatbar { bottom: calc(-24px - env(safe-area-inset-bottom)); padding-bottom: calc(10px + env(safe-area-inset-bottom)); }
+    .kv { grid-template-columns: minmax(0, 1fr); gap: 0; }
+    .kv dt { margin-top: 8px; font-size: 12px; }
+    .feed li { grid-template-columns: 52px minmax(0, 1fr); }
+    .feed li .s { grid-column: 1 / -1; }
+    .row { flex-wrap: wrap; }
+    .row .t { flex-basis: 60%; }
+    .metric { grid-template-columns: minmax(0, 1fr); }
+    .spark { max-width: none; }
+    .core .col2 { height: 38px; }
+    html.lock, html.lock body { overflow: hidden; }
+  }
+  /* Finger statt Maus: größere Ziele, kein Drag & Drop */
+  @media (pointer: coarse) {
+    button, select, input:not([type=checkbox]):not([type=radio]) { min-height: 44px; }
+    button.small, .quick button, .coljump button, .projects button, .wsswitch button { min-height: 36px; }
+    .core { min-height: 0; }
+    .tabs button { min-height: 50px; }
+    input[type=checkbox] { width: 20px; height: 20px; }
+  }
 </style>
 </head>
 <body>
 <main>
   <header>
     <h1 id="title">Leitstand</h1>
-    <nav class="projects" id="projects" aria-label="Projekt"></nav>
-    <div class="wsswitch" id="ws-switch" role="group" aria-label="Workspace"></div>
+    <div class="head2" id="head2">
+      <nav class="projects" id="projects" aria-label="Projekt"></nav>
+      <div class="wsswitch" id="ws-switch" role="group" aria-label="Workspace"></div>
+    </div>
     <span class="muted" id="updated">lädt …</span>
     <span class="spacer"></span>
-    <label class="muted" style="font-size:13px"><input type="checkbox" id="auto" checked> Auto-Refresh</label>
-    <button id="refresh" title="Jetzt neu laden">↻</button>
-    <button class="primary" id="new-issue">+ Issue</button>
-    <button id="logout" title="Abmelden (nur bei aktivem Login)" hidden>Abmelden</button>
+    <button id="refresh" title="Jetzt neu laden" aria-label="Neu laden">↻</button>
+    <button class="primary" id="new-issue" title="Neues Issue" aria-label="Neues Issue">+<span class="new-lbl"> Issue</span></button>
+    <details class="more" id="more"><summary title="Mehr" aria-label="Mehr">⋯</summary>
+      <div class="menu">
+        <span class="muted" id="updated2"></span>
+        <label><input type="checkbox" id="auto" checked> Auto-Refresh</label>
+        <button id="logout" title="Abmelden (nur bei aktivem Login)" hidden>Abmelden</button>
+      </div>
+    </details>
   </header>
+  <nav class="tabs" id="tabs" role="tablist" aria-label="Bereiche">
+    <button data-tab="decide" role="tab" title="Entscheiden (1)"><svg viewBox="0 0 24 24"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg><span class="tl">Entscheiden</span><span class="tb" id="tb-decide"></span></button>
+    <button data-tab="worker" role="tab" title="Worker (2)"><svg viewBox="0 0 24 24"><rect x="4" y="4" width="16" height="16" rx="2"/><path d="M9 9h6v6H9zM9 1v3M15 1v3M9 20v3M15 20v3M20 9h3M20 14h3M1 9h3M1 14h3"/></svg><span class="tl">Worker</span><span class="tb" id="tb-worker"></span></button>
+    <button data-tab="board" role="tab" title="Board (3)"><svg viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="18" rx="1.5"/><rect x="14" y="3" width="7" height="11" rx="1.5"/></svg><span class="tl">Board</span><span class="tb calm" id="tb-board"></span></button>
+    <button data-tab="prs" role="tab" title="PRs (4)"><svg viewBox="0 0 24 24"><circle cx="6" cy="6" r="2.5"/><circle cx="6" cy="18" r="2.5"/><circle cx="18" cy="18" r="2.5"/><path d="M6 8.5v7M18 15.5V9a3 3 0 0 0-3-3h-4"/><path d="M13 3.5L10.5 6 13 8.5"/></svg><span class="tl">PRs</span><span class="tb calm" id="tb-prs"></span></button>
+    <button data-tab="system" role="tab" title="System (5)"><svg viewBox="0 0 24 24"><path d="M3 12h4l3-8 4 16 3-8h4"/></svg><span class="tl">System</span><span class="tb" id="tb-system"></span></button>
+  </nav>
   <div id="errors"></div>
-  <div class="kpis" id="kpis"></div>
-  <div class="controls" id="controls"></div>
-  <div class="asks" id="asks"></div>
 
-  <h2>Worker <span class="sub muted" id="workers-n"></span></h2>
-  <div class="roles" id="roles"></div>
+  <section data-pane="decide">
+    <div class="asks" id="asks"></div>
+    <h2>Wartet auf dich <span id="human-n"></span></h2>
+    <p class="muted" style="margin:-4px 0 10px;font-size:13px" id="human-hint"></p>
+    <div class="inbox" id="inbox" data-drop="human" style="--c:var(--human)"></div>
+  </section>
 
-  <div id="runners-wrap" hidden><h2>CI-Runner <span class="sub muted" id="runners-n"></span>
-    <button class="small" data-ra="start" data-n="all" title="Alle Runner auf dem Server einschalten">Alle an</button>
-    <button class="small" data-ra="stop" data-n="all" title="Alle Runner ausschalten (verweigert bei laufenden Jobs)">Alle aus</button>
-    <button class="small" data-ra="add" title="Einen Runner mehr anlegen und starten (höchstens 8, dauert etwa eine Minute)">+ Runner</button>
-    <button class="small danger" data-ra="delete" title="Den Runner mit der höchsten Nummer löschen (verweigert bei laufendem Job)">− Runner</button></h2>
-  <div class="runners" id="runners"><span class="muted" style="font-size:13px">lädt …</span></div></div>
+  <section data-pane="worker" hidden>
+    <div class="kpis" id="kpis"></div>
+    <div class="controls" id="controls"></div>
+    <h2>Worker <span class="sub muted" id="workers-n"></span></h2>
+    <div class="roles" id="roles"></div>
 
-  <h2>Wartet auf dich <span id="human-n"></span></h2>
-  <p class="muted" style="margin:-4px 0 10px;font-size:13px" id="human-hint"></p>
-  <div class="inbox" id="inbox" data-drop="human" style="--c:var(--human)"></div>
+    <div id="runners-wrap" hidden><h2>CI-Runner <span class="sub muted" id="runners-n"></span>
+      <button class="small" data-ra="start" data-n="all" title="Alle Runner auf dem Server einschalten">Alle an</button>
+      <button class="small" data-ra="stop" data-n="all" title="Alle Runner ausschalten (verweigert bei laufenden Jobs)">Alle aus</button>
+      <button class="small" data-ra="add" title="Einen Runner mehr anlegen und starten (höchstens 8, dauert etwa eine Minute)">+ Runner</button>
+      <button class="small danger" data-ra="delete" title="Den Runner mit der höchsten Nummer löschen (verweigert bei laufendem Job)">− Runner</button></h2>
+    <div class="runners" id="runners"><span class="muted" style="font-size:13px">lädt …</span></div></div>
+  </section>
 
-  <h2>Board <span class="sub muted">Karten ziehen oder anklicken · „In Arbeit“ claimen nur Worker</span></h2>
-  <div class="filters">
-    <input type="search" id="f-q" placeholder="Suche: ID, Titel, Worker, PR …">
-    <select id="f-mod"><option value="">alle Module</option></select>
-    <select id="f-prio"><option value="">alle Prioritäten</option><option value="1">P0–P1</option><option value="2">bis P2</option></select>
-    <label><input type="checkbox" id="f-tests"> nur Tests</label>
-    <label><input type="checkbox" id="f-stale"> nur hängende</label>
-  </div>
-  <div class="board" id="board"></div>
-  <details class="deferred" id="deferred-wrap"><summary id="deferred-sum">Zurückgestellt</summary>
-    <div class="col" data-drop="deferred" style="--c:var(--muted);margin-top:8px"><div class="col-body" id="deferred"></div></div>
-  </details>
+  <section data-pane="board" hidden>
+    <h2>Board <span class="sub muted" id="board-sub">Karten ziehen oder anklicken · „In Arbeit“ claimen nur Worker</span></h2>
+    <div class="filters">
+      <input type="search" id="f-q" placeholder="Suche: ID, Titel, Worker, PR …">
+      <select id="f-mod"><option value="">alle Module</option></select>
+      <select id="f-prio"><option value="">alle Prioritäten</option><option value="1">P0–P1</option><option value="2">bis P2</option></select>
+      <label><input type="checkbox" id="f-tests"> nur Tests</label>
+      <label><input type="checkbox" id="f-stale"> nur hängende</label>
+    </div>
+    <div class="quick" id="fquick" style="margin:-2px 0 10px"></div>
+    <div class="coljump" id="coljump"></div>
+    <div class="board" id="board"></div>
+    <details class="deferred" id="deferred-wrap"><summary id="deferred-sum">Zurückgestellt</summary>
+      <div class="col" data-drop="deferred" style="--c:var(--muted);margin-top:8px"><div class="col-body" id="deferred"></div></div>
+    </details>
+    <div id="panels"></div>
+  </section>
 
-  <div id="panels"></div>
+  <section data-pane="prs" hidden>
+    <div class="two" id="prs-wrap">
+      <div><h2>Offene PRs</h2><div class="list" id="prs"></div></div>
+      <div><h2>Zuletzt gemergt</h2><div class="list" id="merged"></div></div>
+    </div>
+  </section>
 
-  <div class="two" id="prs-wrap">
-    <div><h2>Offene PRs</h2><div class="list" id="prs"></div></div>
-    <div><h2>Zuletzt gemergt</h2><div class="list" id="merged"></div></div>
-  </div>
+  <section data-pane="system" hidden>
+    <h2>System <span class="sub muted" id="system-sub"></span></h2>
+    <div class="systems" id="systems"><span class="muted" style="font-size:13px">lädt …</span></div>
+  </section>
 </main>
 
 <div class="scrim" id="scrim"></div>
@@ -338,6 +507,12 @@ const drafts = new Map();      // Entwürfe je Issue, überleben das Neuladen
 const keys = {};               // letzte Render-Schlüssel je Bereich
 let dragging = null;
 let drawer = null;             // { kind: 'issue'|'worker'|'create', id }
+// Bereiche als Tabs; der aktive steht im Hash (#<projekt>/<tab>) und im Browser
+const TABS = ['decide', 'worker', 'board', 'prs', 'system'];
+let TAB = 'decide';
+// Finger statt Maus (iPhone): kein Drag & Drop, Bestätigen per zweitem Tippen
+const TOUCH = matchMedia('(pointer: coarse)').matches;
+const quick = (k) => meta()?.quick?.[k] || [];
 
 // ---- Zeit ----
 const ms = (iso) => (iso ? Date.now() - new Date(iso).getTime() : null);
@@ -376,7 +551,7 @@ async function post(url, body) {
 function armed(btn, label) {
   if (btn.dataset.armed) return true;
   const orig = btn.textContent;
-  btn.dataset.armed = '1'; btn.textContent = label;
+  btn.dataset.armed = '1'; btn.textContent = TOUCH ? `${label} (nochmal tippen)` : label;
   setTimeout(() => { delete btn.dataset.armed; btn.textContent = orig; }, 4000);
   return false;
 }
@@ -409,6 +584,27 @@ function xInfo(it, cls = '') {
 const xActions = (it) => it.x?.actions || [];
 const xButton = (a, cls = '') => `<button class="go ${cls}" data-xaction="${esc(a.key)}" data-confirm="${esc(a.confirm)}"
   ${a.disabled ? `disabled title="${esc(a.disabled)}"` : a.hint ? `title="${esc(a.hint)}"` : ''}>${esc(a.title)}</button>`;
+
+// Schnellauswahl über einem Feld: Antippen setzt den Text ein (ein eigener Text bleibt davor),
+// gesendet wird erst mit dem Knopf. target = id des Felds, sonst das Textfeld der Karte.
+function quickHtml(list, target = '') {
+  return list.length ? `<div class="quick" ${target ? `data-target="${esc(target)}"` : ''}>${list.map((t) =>
+    `<button type="button" data-quick="${esc(t)}">${esc(t)}</button>`).join('')}</div>` : '';
+}
+function applyQuick(btn) {
+  const row = btn.closest('.quick');
+  const field = row.dataset.target ? $(row.dataset.target) : btn.closest('.card')?.querySelector('textarea');
+  if (!field) return null;
+  const chips = [...row.querySelectorAll('button[data-quick]')].map((b) => b.dataset.quick);
+  const t = btn.dataset.quick;
+  const cur = field.value.trim();
+  // leer oder nur ein anderer Chip: ersetzen; sonst anhängen
+  const own = chips.reduce((v, c) => (v.endsWith(c) ? v.slice(0, -c.length).replace(/[\s,·]+$/, '') : v), cur);
+  field.value = !own || chips.includes(cur) ? t : `${own}${field.tagName === 'TEXTAREA' ? '\n' : ', '}${t}`;
+  row.querySelectorAll('button').forEach((b) => b.classList.toggle('on', b === btn));
+  field.dispatchEvent(new Event('input', { bubbles: true }));
+  return field;
+}
 
 // ---- Kopf ----
 function renderHead() {
@@ -618,7 +814,7 @@ function renderInbox(items) {
       ${it.notes ? `<details><summary>Notizen</summary><div class="text">${esc(it.notes)}</div></details>` : ''}
       ${it.decision?.options?.length ? `<div class="choices">${it.decision.options.map((o) => `<button data-choose="${esc(o.key)}" data-label="${esc(o.label)}"
           title="Option ${esc(o.key)} ins Entscheidungsfeld übernehmen (Taste ${esc(o.key)} auf der obersten Karte)"><span class="k">${esc(o.key)}</span><span>${esc(o.label)}</span></button>`).join('')}</div>
-        <p class="muted" style="font-size:12px;margin:0 0 6px">Option wählen (Klick oder Taste), bei Bedarf ergänzen, dann ${esc(release)} (Enter).</p>` : ''}
+        <p class="muted" style="font-size:12px;margin:0 0 6px">Option wählen (${TOUCH ? 'antippen' : 'Klick oder Taste'}), bei Bedarf ergänzen, dann ${esc(release)}${TOUCH ? '' : ' (Enter)'}.</p>` : quickHtml(quick('decide'))}
       <textarea placeholder="Deine Entscheidung, z. B. „Nicht gewollt, nur in diesem Fall übernehmen“">${esc(drafts.get(it.id) || '')}</textarea>
       <div class="actions">
         ${acts.map((a) => xButton(a)).join('')}
@@ -654,9 +850,11 @@ function itemHtml(it, col) {
   const wip = it.status === 'in_progress';
   const since = col === 'done' ? it.closed_at : (wip ? it.started_at : it.updated_at);
   // die erste Phase (in Arbeit) claimen nur Worker
-  const drag = col !== meta().readyPhase && col !== 'done' ? 'true' : 'false';
-  return `<div class="item ${it.stale ? 'stale' : ''}" draggable="${drag}" data-issue="${esc(it.id)}" title="${esc(it.title)}">
+  const movable = col !== meta().readyPhase && col !== 'done';
+  const drag = movable && !TOUCH ? 'true' : 'false';
+  return `<div class="item ${it.stale ? 'stale' : ''}" draggable="${drag}" data-issue="${esc(it.id)}" ${TOUCH ? '' : `title="${esc(it.title)}"`}>
     <div style="display:flex;gap:6px;align-items:center"><span class="id">${esc(it.id)}</span>${prio(it.priority)}
+      ${TOUCH && movable ? `<button class="small" style="margin-left:auto" data-move-issue="${esc(it.id)}" title="Verschieben" aria-label="Verschieben">⇄</button>` : ''}
       ${it.external_ref ? `<span class="muted" style="font-size:11px">${esc(it.external_ref)}</span>` : ''}
       ${it.stale ? '<span class="badge bad" title="Lease abgelaufen – Worker hängt oder ist weg">⚠ Lease</span>' : ''}</div>
     <div class="t">${esc(it.title)}</div>
@@ -682,12 +880,15 @@ function renderBoard() {
   $('board').innerHTML = COLS.map(([k, label, c, hint]) => {
     const items = st.columns[k].filter(passes);
     const total = st.columns[k].length;
-    return `<section class="col" data-drop="${DROP_OK.has(k) ? k : ''}" style="--c:${c}">
+    return `<section class="col" data-col="${esc(k)}" data-drop="${DROP_OK.has(k) ? k : ''}" style="--c:${c}">
       <h3><span>${esc(label)}</span><span class="n">${items.length}${items.length !== total ? `/${total}` : ''}</span></h3>
       <div class="hint">${esc(hint)}</div>
       <div class="col-body">${items.map((it) => itemHtml(it, k)).join('') || '<div class="muted" style="padding:6px 8px;font-size:13px">leer</div>'}</div>
     </section>`;
   }).join('');
+  // iPhone: Sprungleiste zu den Spalten (das Board scrollt seitlich)
+  $('coljump').innerHTML = COLS.map(([k, label, c]) => `<button data-jump="${esc(k)}" style="--c:${c}">${esc(label)} <b>${st.columns[k].filter(passes).length}</b></button>`).join('');
+  $('board-sub').textContent = TOUCH ? 'Karte antippen zum Öffnen, ⇄ zum Verschieben' : 'Karten ziehen oder anklicken · „In Arbeit“ claimen nur Worker';
   const def = st.columns.deferred.filter(passes);
   $('deferred-sum').textContent = `Zurückgestellt (${def.length})`;
   $('deferred').innerHTML = def.map((it) => itemHtml(it, 'deferred')).join('') || '<div class="muted" style="padding:6px">leer</div>';
@@ -734,11 +935,12 @@ function renderSwitch() {
   }).join('');
   if (keys.switch !== html) { keys.switch = html; $('ws-switch').innerHTML = html; }
   $('ws-switch').hidden = !html;
-  $('prs-wrap').hidden = !meta().prs;
+  document.querySelector('.tabs [data-tab="prs"]').hidden = !meta().prs;
+  if (TAB === 'prs' && !meta().prs) showTab('decide');
   $('runners-wrap').hidden = !st.project.runners;
   // humanHint kommt aus beads.leitstand.mjs des Projekts (HTML), sonst der Standardtext
   $('human-hint').innerHTML = meta().humanHint
-    || `Entscheidung eintragen und <b>${esc(meta().release)}</b>: Die Notiz landet am Issue, das Label <code>human</code> fällt weg, und der nächste Worker übernimmt. <b>Notiz</b> ergänzt nur. Karten vom Board lassen sich hierher ziehen.`;
+    || `Entscheidung eintragen und <b>${esc(meta().release)}</b>: Die Notiz landet am Issue, das Label <code>human</code> fällt weg, und der nächste Worker übernimmt. <b>Notiz</b> ergänzt nur.${TOUCH ? '' : ' Karten vom Board lassen sich hierher ziehen.'}`;
 }
 async function switchWs(name) {
   if (name === WS) return;
@@ -847,6 +1049,9 @@ async function load() {
     renderPanels();
     if (drawer?.kind === 'worker') refreshWorkerDrawer();
     $('updated').textContent = `aktualisiert ${new Date(st.at).toLocaleTimeString('de-DE')}`;
+    $('updated2').textContent = $('updated').textContent;
+    renderBadges();
+    if (TAB === 'system' && !sysData) loadSystem();
     loadRunners();
   } catch (e) {
     $('errors').innerHTML = `<div class="error">Server nicht erreichbar (${esc(e.message)}). Läuft <code>scripts/beadskit/leitstand/inbox.mjs</code>?</div>`;
@@ -861,11 +1066,13 @@ function openDrawer(kind, id, title, html) {
   $('d-body').innerHTML = html;
   $('drawer').classList.add('open'); $('scrim').classList.add('open');
   $('drawer').setAttribute('aria-hidden', 'false');
+  document.documentElement.classList.add('lock');
 }
 function closeDrawer() {
   drawer = null;
   $('drawer').classList.remove('open'); $('scrim').classList.remove('open');
   $('drawer').setAttribute('aria-hidden', 'true');
+  document.documentElement.classList.remove('lock');
 }
 
 async function openIssue(id, focusClose = false) {
@@ -914,8 +1121,9 @@ async function openIssue(id, focusClose = false) {
         · ${esc(pr.headRefName)} · <span class="add">+${esc(pr.additions)}</span> <span class="del">−${esc(pr.deletions)}</span>
         ${pr.mergeable === 'CONFLICTING' ? ' · <span class="conflict">Konflikt</span>' : ''}</div>
       <ul class="feed">${pr.checks.map((c) => `<li><span class="when"></span><span class="tool">${esc(c.state || '…')}</span><span class="s">${c.url ? `<a href="${esc(c.url)}" target="_blank" rel="noopener">${esc(c.name)}</a>` : esc(c.name)}</span></li>`).join('')}</ul>` : ''}
-    <h4>Aktion</h4>
+    <h4 id="i-act">Aktion</h4>
     <div class="form">
+      ${quickHtml(quick('close'), 'i-text')}
       <textarea id="i-text" placeholder="Notiz oder Begründung (beim Schließen Pflicht)">${esc(drafts.get(it.id) || '')}</textarea>
       <div class="moves">
         ${closed ? '' : xActions(it).map((a) => xButton(a, 'small')).join('')}
@@ -998,7 +1206,8 @@ async function openWorker(name) {
       ${w?.kind === 'background'
         ? `<div class="chatbar muted" style="font-size:12.5px">Hintergrund-Worker: schreiben nur über <code>scripts/beadskit/workers attach ${esc(name)}</code>, oder unter Details „Neu starten“ (öffnet ihn im Terminal).</div>`
         : `<form class="chatbar" id="chat-form" autocomplete="off">
-            <input id="chat-text" maxlength="4000" placeholder="Nachricht oder /befehl an ${esc(name)} …" aria-label="Nachricht an ${esc(name)}">
+            ${quickHtml(quick('chat'), 'chat-text')}
+            <input id="chat-text" maxlength="4000" placeholder="Nachricht oder /befehl an ${esc(name)} …" aria-label="Nachricht an ${esc(name)}" enterkeyhint="send">
             <button class="primary" type="submit">Senden</button><span class="msg" id="c-msg"></span></form>`}
     </div>
     <div id="w-details"><p class="muted">lädt …</p></div>`);
@@ -1084,6 +1293,7 @@ function openCreate() {
   const labels = [...(m.name === 'code' ? [] : [`ws:${m.name}`]), `phase:${m.readyPhase}`];
   openDrawer('create', null, esc(c.title), `
     <form class="form" id="create">
+      <div class="quick" id="title-tpl">${TITLE_TPL.map(([pre, type]) => `<button type="button" data-tpl="${esc(pre)}" data-type="${type}">${esc(pre.replace(/: $/, ''))}</button>`).join('')}</div>
       <label>Titel <input name="title" required minlength="5" maxlength="200" placeholder="${esc(c.titlePlaceholder)}"></label>
       <label>Beschreibung <textarea name="description" rows="8" placeholder="${esc(c.descriptionPlaceholder)}"></textarea></label>
       <div class="inline">
@@ -1096,11 +1306,50 @@ function openCreate() {
       <div class="actions"><button class="primary" type="submit">Anlegen</button><span class="msg" id="c-msg"></span></div>
       <p class="muted" style="font-size:12.5px">Landet mit ${labels.map((l) => `<code>${esc(l)}</code>`).join(' und ')} in der Warteschlange; der nächste freie Worker nimmt es.</p>
     </form>`);
-  $('create').title.focus();
+  // auf dem iPhone nicht sofort die Tastatur öffnen
+  if (!TOUCH) $('create').title.focus();
 }
+// Titel-Vorlagen im Formular „Neues Issue“: setzen das Präfix und den Typ
+const TITLE_TPL = [['Bug: ', 'bug'], ['Feature: ', 'feature'], ['Aufgabe: ', 'task'], ['Aufräumen: ', 'chore']];
 
 // ---- Ereignisse ----
 document.addEventListener('click', async (e) => {
+  const tb = e.target.closest('.tabs button[data-tab]');
+  if (tb) return showTab(tb.dataset.tab);
+  if (!e.target.closest('#more')) $('more').open = false;
+  const qb = e.target.closest('button[data-quick]');
+  if (qb && !qb.closest('#inbox')) { applyQuick(qb); return; }
+  const tpl = e.target.closest('button[data-tpl]');
+  if (tpl) {
+    const f = $('create');
+    f.title.value = tpl.dataset.tpl + f.title.value.replace(new RegExp(`^(${TITLE_TPL.map(([x]) => x.trim()).join('|')})\\s*`), '');
+    f.type.value = tpl.dataset.type;
+    tpl.parentElement.querySelectorAll('button').forEach((b) => b.classList.toggle('on', b === tpl));
+    if (!TOUCH) f.title.focus();
+    return;
+  }
+  const mi = e.target.closest('button[data-move-issue]');
+  if (mi) {
+    e.preventDefault();
+    await openIssue(mi.dataset.moveIssue);
+    $('i-act')?.scrollIntoView({ block: 'start' });
+    return;
+  }
+  const jb = e.target.closest('button[data-jump]');
+  if (jb) {
+    const col = $('board').querySelector(`.col[data-col="${CSS.escape(jb.dataset.jump)}"]`);
+    if (col) $('board').scrollTo({ left: col.offsetLeft - $('board').offsetLeft - 12, behavior: 'smooth' });
+    return;
+  }
+  const qf = e.target.closest('button[data-qfilter]');
+  if (qf) return quickFilter(qf.dataset.qfilter);
+  const core = e.target.closest('button[data-core]');
+  if (core) {
+    const [host, i] = [core.dataset.host, Number(core.dataset.core)];
+    sysCore.set(host, sysCore.get(host) === i ? null : i);
+    renderSystem();
+    return;
+  }
   const issueLink = e.target.closest('[data-issue]');
   const inDrawerAction = e.target.closest('#d-body button');
   if (issueLink && !e.target.closest('a[target=_blank]') && !inDrawerAction) {
@@ -1226,9 +1475,16 @@ document.addEventListener('click', async (e) => {
     const mv = e.target.closest('button[data-move]');
     if (mv) {
       const to = mv.dataset.move;
-      if (to === 'done' && !text.trim()) { $('i-msg').className = 'msg bad'; $('i-msg').textContent = 'Bitte einen Grund eintragen'; return; }
+      // ohne Grund: der erste Vorschlag (z. B. „Erledigt“) wird eingesetzt, Bestätigen bleibt
+      if (to === 'done' && !text.trim()) {
+        $('i-text').value = quick('close')[0] || 'Erledigt';
+        drafts.set(id, $('i-text').value);
+        $('i-msg').className = 'msg'; $('i-msg').textContent = `Grund: „${$('i-text').value}“ – ändern oder bestätigen`;
+        armed(mv, 'Wirklich schließen?');
+        return;
+      }
       if (to === 'done' && !armed(mv, 'Wirklich schließen?')) return;
-      return issueAction(id, { action: 'move', to, text }, `${id} → ${mv.textContent.trim()}`);
+      return issueAction(id, { action: 'move', to, text }, `${id} → ${mv.textContent.replace(/ \(nochmal tippen\)$/, '').trim()}`);
     }
     const act = e.target.closest('button[data-xaction]');
     if (act) {
@@ -1329,12 +1585,15 @@ document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && drawer) 
 // Detail schließt erst das Detail.
 document.addEventListener('keydown', (e) => {
   if (e.metaKey || e.ctrlKey || e.altKey || e.target.closest?.('input, textarea, select, [contenteditable]')) return;
-  const card = (drawer?.kind === 'worker' && document.querySelector('#w-ask .card.ask')) || (!drawer && document.querySelector('#asks .card.ask'));
+  const onDecide = TAB === 'decide';
+  const card = (drawer?.kind === 'worker' && document.querySelector('#w-ask .card.ask')) || (!drawer && onDecide && document.querySelector('#asks .card.ask'));
   if (!card) {
     // keine Rückfrage offen: 1–9 wählt die Option der obersten Entscheidungskarte
-    const dc = !drawer && /^[1-9]$/.test(e.key) && [...document.querySelectorAll('#inbox .card.decide')].find((c) => c.querySelector('button[data-choose]'));
+    const dc = !drawer && onDecide && /^[1-9]$/.test(e.key) && [...document.querySelectorAll('#inbox .card.decide')].find((c) => c.querySelector('button[data-choose]'));
     const ob = dc && dc.querySelector(`button[data-choose="${e.key}"]`);
-    if (ob) { e.preventDefault(); chooseOption(ob); }
+    if (ob) { e.preventDefault(); chooseOption(ob); return; }
+    // sonst 1–5 wechselt den Tab
+    if (!drawer && /^[1-5]$/.test(e.key)) { e.preventDefault(); showTab(TABS[Number(e.key) - 1]); }
     return;
   }
   if (e.key === 'Enter') {
@@ -1373,6 +1632,12 @@ function chooseOption(btn) {
 }
 
 $('inbox').addEventListener('click', async (e) => {
+  const qb = e.target.closest('button[data-quick]');
+  if (qb) {
+    e.stopPropagation();
+    if (applyQuick(qb)) qb.closest('.card').querySelector('button[data-action="release"]')?.classList.add('ready');
+    return;
+  }
   const ch = e.target.closest('button[data-choose]');
   if (ch) { e.stopPropagation(); chooseOption(ch); return; }
   const btn = e.target.closest('button[data-action], button[data-xaction]');
@@ -1383,6 +1648,7 @@ $('inbox').addEventListener('click', async (e) => {
   const action = btn.dataset.action;
   const xaction = btn.dataset.xaction;
   if (btn.dataset.done && !card.querySelector('textarea').value.trim()) card.querySelector('textarea').value = 'Erledigt';
+  if (action === 'close' && !card.querySelector('textarea').value.trim()) card.querySelector('textarea').value = quick('close')[0] || 'Erledigt';
   const text = card.querySelector('textarea').value;
   const msg = card.querySelector('.msg');
   if (action === 'close' && !armed(btn, 'Wirklich schließen?')) return;
@@ -1443,14 +1709,223 @@ function loadFilters() {
   Object.assign(filters, { q: '', mod: '', prio: '', tests: false, stale: false });
   try { Object.assign(filters, JSON.parse(localStorage.getItem(fkey()) || '{}')); } catch {}
   $('f-q').value = filters.q; $('f-prio').value = filters.prio; $('f-tests').checked = filters.tests; $('f-stale').checked = filters.stale;
+  renderQuickFilters();
+}
+// Filter zum Antippen statt Tippen in die Suche
+const QF = [['stale', 'hängend'], ['tests', 'Tests'], ['p1', 'P0–P1'], ['reset', 'alle zeigen']];
+function renderQuickFilters() {
+  const on = { stale: filters.stale, tests: filters.tests, p1: filters.prio === '1' };
+  $('fquick').innerHTML = QF.map(([k, label]) => `<button type="button" data-qfilter="${k}" class="${on[k] ? 'on' : ''}">${esc(label)}</button>`).join('');
+}
+function quickFilter(k) {
+  if (k === 'reset') Object.assign(filters, { q: '', mod: '', prio: '', tests: false, stale: false });
+  if (k === 'stale' || k === 'tests') filters[k] = !filters[k];
+  if (k === 'p1') filters.prio = filters.prio === '1' ? '' : '1';
+  try { localStorage.setItem(fkey(), JSON.stringify(filters)); } catch {}
+  $('f-q').value = filters.q; $('f-mod').value = filters.mod; $('f-prio').value = filters.prio; $('f-tests').checked = filters.tests; $('f-stale').checked = filters.stale;
+  renderQuickFilters();
+  if (st) renderBoard();
 }
 for (const [id, k, prop] of [['f-q', 'q', 'value'], ['f-mod', 'mod', 'value'], ['f-prio', 'prio', 'value'], ['f-tests', 'tests', 'checked'], ['f-stale', 'stale', 'checked']]) {
   $(id).addEventListener('input', () => {
     filters[k] = $(id)[prop];
     try { localStorage.setItem(fkey(), JSON.stringify(filters)); } catch {}
+    renderQuickFilters();
     if (st) renderBoard();
   });
 }
+
+// ---- Tabs ----
+const hashFor = () => `${P}${TAB !== 'decide' ? `/${TAB}` : ''}`;
+function parseHash() {
+  const [slug = '', tab = ''] = decodeURIComponent(location.hash.slice(1)).split('/');
+  return [slug, TABS.includes(tab) ? tab : ''];
+}
+function showTab(tab, first = false) {
+  if (!TABS.includes(tab) || document.querySelector(`.tabs [data-tab="${tab}"]`).hidden) tab = 'decide';
+  const changed = tab !== TAB;
+  TAB = tab;
+  document.querySelectorAll('[data-pane]').forEach((x) => { x.hidden = x.dataset.pane !== tab; });
+  document.querySelectorAll('.tabs button[data-tab]').forEach((b) => {
+    b.classList.toggle('on', b.dataset.tab === tab);
+    b.setAttribute('aria-selected', String(b.dataset.tab === tab));
+  });
+  try { localStorage.setItem('leitstand-tab', tab); } catch { /* nur Komfort */ }
+  if (!first && P && location.hash.slice(1) !== hashFor()) history.replaceState(null, '', `#${hashFor()}`);
+  if (tab === 'decide') $('tb-decide').classList.remove('pulse');
+  if (tab === 'system') loadSystem();
+  if (changed && !first) window.scrollTo({ top: 0 });
+}
+
+// Zähler an den Tabs; neue Rückfrage in einem anderen Tab: Toast und pulsierender Zähler
+let seenAsks = { p: '', names: null };
+function renderBadges() {
+  const asks = (st.workers || []).filter((w) => w.ask).map((w) => w.name);
+  const human = meta().split.reduce((n, sp) => n + (st.columns[sp.key]?.length || 0), 0) + (st.columns.human?.length || 0);
+  $('tb-decide').textContent = human + asks.length || '';
+  if (seenAsks.p === P && seenAsks.names && TAB !== 'decide') {
+    const fresh = asks.filter((n) => !seenAsks.names.includes(n));
+    if (fresh.length) {
+      toast(`❓ Rückfrage von ${fresh.join(', ')} (Tab „Entscheiden“)`);
+      $('tb-decide').classList.add('pulse');
+    }
+  }
+  seenAsks = { p: P, names: asks };
+  const hanging = st.workers.filter((w) => w.status !== 'idle' && ms(w.activity?.lastAt) > 30 * 60000).length + (st.metrics?.stale || 0);
+  $('tb-worker').textContent = hanging || '';
+  $('tb-worker').title = hanging ? 'hängende Worker oder abgelaufene Claims' : '';
+  $('tb-prs').textContent = meta().prs && st.prs.length ? st.prs.length : '';
+}
+
+// ---- System ----
+// Werte je Rechner (CPU, Kerne, RAM, Platte …) über /api/system, nur solange der Tab offen ist
+let sysData = null;
+const sysCore = new Map();     // gewählter Kern je Rechner (Verlauf darunter)
+const SYS_EVERY = 3000;
+async function loadSystem() {
+  if (!P || loadSystem.busy) return;
+  loadSystem.busy = true;
+  try {
+    const r = await fetch(withP('/api/system'));
+    if (r.status === 401) { location.href = '/login'; return; }
+    const res = await r.json().catch(() => ({}));
+    sysData = r.ok ? res : { error: res.error || r.statusText };
+  } catch (e) {
+    sysData = { error: e.message };
+  } finally { loadSystem.busy = false; }
+  renderSystem();
+}
+setInterval(() => { if (TAB === 'system' && !document.hidden) loadSystem(); }, SYS_EVERY);
+
+const lvl = (p, warn = 70, bad = 90) => (!Number.isFinite(p) ? '' : p >= bad ? 'lv-bad' : p >= warn ? 'lv-warn' : 'lv-ok');
+const lvlText = (p, warn = 70, bad = 90) => (!Number.isFinite(p) ? '' : p >= bad ? ' <span class="bad-t" style="font-size:12px">kritisch</span>' : p >= warn ? ' <span class="warn-t" style="font-size:12px">hoch</span>' : '');
+const pct = (x) => (Number.isFinite(x) ? `${Math.round(x)}<small> %</small>` : '–');
+const gb = (b) => (b / 1024 ** 3).toFixed(b >= 100 * 1024 ** 3 ? 0 : 1).replace('.', ',');
+const upText = (sec) => {
+  const d = Math.floor(sec / 86400), h = Math.floor((sec % 86400) / 3600), m = Math.floor((sec % 3600) / 60);
+  return d ? `${d} d ${h} h` : h ? `${h} h ${m} min` : `${m} min`;
+};
+const meter = (p, cls) => `<div class="meter ${cls}" role="meter" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${Math.round(p || 0)}"><i style="width:${Math.max(0, Math.min(100, p || 0))}%"></i></div>`;
+// Verlauf 0–100 % als Linie, die rechts wächst (60 Punkte); Zeigen/Antippen zeigt den Wert
+const SP_W = 120, SP_H = 34, SP_N = 60;
+function sparkSvg(values, at, cls = '') {
+  const v = (values || []).slice(-SP_N);
+  const x = (i) => SP_W - (v.length - 1 - i) * (SP_W / (SP_N - 1));
+  const y = (p) => SP_H - 2 - (Math.max(0, Math.min(100, p)) / 100) * (SP_H - 4);
+  const pts = v.map((p, i) => (Number.isFinite(p) ? [x(i), y(p)] : null)).filter(Boolean);
+  const line = pts.map(([a, b], i) => `${i ? 'L' : 'M'}${a.toFixed(1)},${b.toFixed(1)}`).join('');
+  const area = pts.length > 1 ? `${line}L${pts.at(-1)[0].toFixed(1)},${SP_H}L${pts[0][0].toFixed(1)},${SP_H}Z` : '';
+  return `<svg class="spark ${cls}" viewBox="0 0 ${SP_W} ${SP_H}" preserveAspectRatio="none" data-v="${esc(v.join(','))}" data-at="${esc((at || []).slice(-v.length).join(','))}" role="img"
+    aria-label="Verlauf, zuletzt ${esc(v.at(-1) ?? '–')} %"><line class="base" x1="0" x2="${SP_W}" y1="${SP_H - 0.5}" y2="${SP_H - 0.5}" vector-effect="non-scaling-stroke"/>${area ? `<path class="area" d="${area}"/>` : ''}${pts.length > 1 ? `<path class="line" d="${line}" vector-effect="non-scaling-stroke"/>` : ''}
+    <line class="hair" x1="-5" x2="-5" y1="0" y2="${SP_H}" vector-effect="non-scaling-stroke"/></svg>`;
+}
+const spanText = (at) => (at?.length > 1 ? `Verlauf ${dur(at.at(-1) - at[0])}` : 'Verlauf');
+const sparkVal = (at) => `<span class="spark-val">${esc(spanText(at))}</span>`;
+function sparkHover(e) {
+  const svg = e.target.closest?.('svg.spark');
+  if (!svg) return;
+  const v = (svg.dataset.v || '').split(',').map((x) => (x === '' ? null : Number(x)));
+  const r = svg.getBoundingClientRect();
+  const out = svg.parentElement.querySelector('.spark-val');
+  const hair = svg.querySelector('.hair');
+  if (e.type === 'pointerleave' || !v.length) {
+    hair.setAttribute('x1', -5); hair.setAttribute('x2', -5);
+    if (out) out.textContent = spanText((svg.dataset.at || '').split(',').filter(Boolean).map(Number));
+    return;
+  }
+  // Punkt i liegt bei x(i); nächster zum Zeiger
+  const px = ((e.clientX - r.left) / r.width) * SP_W;
+  const i = Math.max(0, Math.min(v.length - 1, Math.round(v.length - 1 - (SP_W - px) / (SP_W / (SP_N - 1)))));
+  const hx = SP_W - (v.length - 1 - i) * (SP_W / (SP_N - 1));
+  hair.setAttribute('x1', hx); hair.setAttribute('x2', hx);
+  const at = (svg.dataset.at || '').split(',').map(Number);
+  const age = at.length === v.length ? Math.round((at.at(-1) - at[i]) / 1000) : Math.round(((v.length - 1 - i) * SYS_EVERY) / 1000);
+  if (out) out.textContent = `${age ? `vor ~${age} s` : 'jetzt'}: ${Number.isFinite(v[i]) ? `${Math.round(v[i])} %` : '–'}`;
+}
+for (const t of ['pointermove', 'pointerdown']) document.addEventListener(t, sparkHover);
+document.addEventListener('pointerleave', sparkHover, true);
+
+function sysCard(h, multi) {
+  const head = (extra = '') => `<div class="sys-head"><b>${esc(h.name)}</b>${multi && h.leader ? '<span class="badge">Leitrechner</span>' : ''}${extra}</div>`;
+  if (!h.ok) return `<article class="sys">${head()}<div class="msg bad">nicht erreichbar: ${esc(h.error || '?')}</div></article>`;
+  const s = h.stats || {}, c = s.cpu || {}, hist = h.history || {};
+  const per = c.perCore || [];
+  const sel = sysCore.get(h.name);
+  const memPct = s.mem ? (s.mem.used / s.mem.total) * 100 : null;
+  const diskPct = s.disk ? (s.disk.used / s.disk.total) * 100 : null;
+  const load = c.load || [];
+  const perNum = per.filter(Number.isFinite);
+  const avg = perNum.length ? Math.round(perNum.reduce((a, b) => a + b, 0) / perNum.length) : null;
+  const max = perNum.length ? Math.max(...perNum) : null;
+  const cpuM = `<div class="metric"><span class="k">CPU</span>
+      <div class="row2"><span class="big">${pct(c.percent)}</span>${lvlText(c.percent)}${meter(c.percent, lvl(c.percent))}</div>
+      <span></span><div class="row2">${sparkSvg(hist.cpu, hist.at)}${sparkVal(hist.at)}</div>
+      ${load.length ? `<span></span><div class="sub2">Load ${load.map((x) => String(x).replace('.', ',')).join(' · ')} bei ${esc(c.cores)} Kernen${c.cores ? ` (${Math.round((load[0] / c.cores) * 100)} % belegt)` : ''}</div>` : ''}</div>`;
+  const coreM = per.length ? `<div class="metric"><span class="k">Kerne</span>
+      <div class="sub2">${per.length} Kerne · Ø ${avg ?? '–'} % · höchster ${max ?? '–'} %${TOUCH ? ' · Kern antippen für Verlauf' : ' · Kern anklicken für Verlauf'}</div>
+      <span></span><div class="cores">${per.map((p, i) => `<button class="core ${sel === i ? 'on' : ''}" data-host="${esc(h.name)}" data-core="${i}"
+        title="Kern ${i + 1}: ${Number.isFinite(p) ? `${p} %` : '–'}" aria-label="Kern ${i + 1}: ${Number.isFinite(p) ? `${p} %` : 'kein Wert'}"><span class="col2 ${lvl(p)}"><i style="height:${Math.max(0, Math.min(100, p || 0))}%"></i></span><span>${Number.isFinite(p) ? p : '–'}</span></button>`).join('')}</div>
+      ${Number.isInteger(sel) && sel < per.length ? `<span></span><div class="core-detail"><b>Kern ${sel + 1}</b><span class="sub2">${Number.isFinite(per[sel]) ? `${per[sel]} %` : '–'}</span>${sparkSvg(hist.cores?.[sel], hist.at)}${sparkVal(hist.at)}</div>` : ''}</div>` : '';
+  const memM = s.mem ? `<div class="metric"><span class="k">RAM</span>
+      <div class="row2"><span class="big">${pct(memPct)}</span>${lvlText(memPct, 75, 90)}${meter(memPct, lvl(memPct, 75, 90))}</div>
+      <span></span><div class="sub2">${gb(s.mem.used)} von ${gb(s.mem.total)} GB belegt</div>
+      <span></span><div class="row2">${sparkSvg(hist.mem, hist.at, 'mem')}${sparkVal(hist.at)}</div></div>` : '';
+  const diskM = s.disk ? `<div class="metric"><span class="k">Platte</span>
+      <div class="row2">${meter(diskPct, lvl(diskPct, 80, 92))}<span class="sub2">${gb(s.disk.total - s.disk.used)} GB frei von ${gb(s.disk.total)} GB${lvlText(diskPct, 80, 92)}</span></div></div>` : '';
+  const more = [
+    Number.isFinite(s.tempC) ? `<span class="chip">🌡 ${esc(String(Math.round(s.tempC)))} °C</span>` : '',
+    `<span class="chip">claude-Prozesse ${esc(s.claude ?? 0)}</span>`,
+    s.docker != null ? `<span class="chip">Docker ${esc(s.docker)}</span>` : '',
+  ].join('');
+  const svc = (s.services || []).map((x) => `<span class="chip ${x.ok ? '' : 'bad'}" title="${esc(x.state)}${x.at ? ` · ${esc(stamp(x.at))}` : ''}"><span class="dot"></span>${esc(x.name)}${x.ok ? '' : ` · ${esc(x.state)}`}</span>`).join('');
+  return `<article class="sys">${head(`<span class="muted right">${s.uptime != null ? `läuft seit ${esc(upText(s.uptime))}` : ''}</span>`)}
+    ${cpuM}${coreM}${memM}${diskM}
+    <div class="metric"><span class="k">Mehr</span><div class="svc">${more}</div>
+      ${svc ? `<span></span><div class="svc">${svc}</div>` : ''}</div></article>`;
+}
+function renderSystem() {
+  const d = sysData;
+  const list = d?.systems || [];
+  // Warnpunkt am Tab: ein Rechner offline oder CPU/RAM ab 90 %
+  const hot = list.some((h) => !h.ok || h.stats?.cpu?.percent >= 90 || (h.stats?.mem && h.stats.mem.used / h.stats.mem.total >= 0.9));
+  $('tb-system').className = `tb${hot ? ' dot' : ''}`;
+  $('tb-system').textContent = hot ? ' ' : '';
+  $('tb-system').title = hot ? 'Rechner offline oder ausgelastet' : '';
+  if (TAB !== 'system') return;
+  if (d?.error) { $('systems').innerHTML = `<div class="error">${esc(d.error)}</div>`; $('system-sub').textContent = ''; return; }
+  if (!d) return;
+  $('system-sub').textContent = `${list.length > 1 ? `${list.length} Rechner · ` : ''}Stand ${clock(d.at)} · alle ${SYS_EVERY / 1000} s`;
+  $('systems').innerHTML = list.map((h) => sysCard(h, list.length > 1)).join('') || '<span class="muted">keine Werte</span>';
+}
+
+// ---- iPhone ----
+// Drawer passt sich der sichtbaren Fläche an (Tastatur), Seite dahinter scrollt nicht mit
+if (window.visualViewport) {
+  const fit = () => {
+    const d = $('drawer');
+    if (innerWidth > 760) { d.style.top = d.style.height = d.style.bottom = ''; return; }
+    d.style.top = `${visualViewport.offsetTop}px`;
+    d.style.height = `${visualViewport.height}px`;
+    d.style.bottom = 'auto';
+  };
+  visualViewport.addEventListener('resize', fit);
+  visualViewport.addEventListener('scroll', fit);
+  fit();
+}
+// Symbol für „Zum Home-Bildschirm“ (iOS braucht PNG)
+try {
+  const c = document.createElement('canvas');
+  c.width = c.height = 180;
+  const g = c.getContext('2d');
+  g.fillStyle = '#c2410c'; g.fillRect(0, 0, 180, 180);
+  g.strokeStyle = '#fff'; g.lineWidth = 14; g.lineCap = 'round'; g.lineJoin = 'round';
+  g.beginPath(); g.moveTo(30, 96); g.lineTo(62, 96); g.lineTo(80, 50); g.lineTo(102, 132); g.lineTo(120, 96); g.lineTo(150, 96); g.stroke();
+  for (const rel of ['apple-touch-icon', 'icon']) {
+    const l = document.createElement('link');
+    l.rel = rel; l.href = c.toDataURL('image/png');
+    document.head.append(l);
+  }
+} catch { /* ohne Symbol */ }
 
 // ---- Projekte ----
 function renderProjects() {
@@ -1470,7 +1945,7 @@ function selectProject(slug, first = false) {
   if (slug === P) return;
   P = slug;
   try { localStorage.setItem('leitstand-project', P); } catch {}
-  if (location.hash.slice(1) !== P) history.replaceState(null, '', `${first ? location.search : location.pathname}#${P}`);
+  if (location.hash.slice(1) !== hashFor()) history.replaceState(null, '', `${first ? location.search : location.pathname}#${hashFor()}`);
   // Workspace: beim ersten Laden ?ws=, sonst der zuletzt gewählte des Projekts
   if (!first || !WS) { try { WS = localStorage.getItem(wsKey()) || 'code'; } catch { WS = 'code'; } }
   st = null;
@@ -1483,12 +1958,18 @@ $('projects').addEventListener('click', (e) => {
   const b = e.target.closest('[data-project]');
   if (b) selectProject(b.dataset.project);
 });
-window.addEventListener('hashchange', () => selectProject(decodeURIComponent(location.hash.slice(1))));
+window.addEventListener('hashchange', () => {
+  const [slug, tab] = parseHash();
+  selectProject(slug);
+  if (tab && tab !== TAB) showTab(tab);
+});
 
 (async () => {
   await loadProjects();
-  let want = decodeURIComponent(location.hash.slice(1));
+  let [want, tab] = parseHash();
   if (!want) { try { want = localStorage.getItem('leitstand-project') || ''; } catch {} }
+  if (!tab) { try { tab = localStorage.getItem('leitstand-tab') || ''; } catch {} }
+  showTab(TABS.includes(tab) ? tab : 'decide', true);
   if (!PROJECTS.length) {
     $('errors').innerHTML = '<div class="error">Keine Projekte. Ein Projekt erscheint hier, sobald dort einmal <code>scripts/beadskit/workers</code> lief (Liste: <code>~/.config/beadskit/projects.txt</code>).</div>';
     return;
