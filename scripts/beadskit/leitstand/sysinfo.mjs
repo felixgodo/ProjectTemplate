@@ -165,3 +165,22 @@ export async function systemStats() {
     services: svc,
   };
 }
+
+/**
+ * Hängt die Werte eines Rechners ({ name, ok, stats }) an seinen Verlauf in `map` (nur im Speicher,
+ * höchstens `max` Punkte) und gibt ihn mit `history: { at, cpu, mem, cores }` zurück; at = Zeitpunkte
+ * in ms, cores je Kern.
+ */
+export function pushHistory(map, sys, max = 60, now = Date.now()) {
+  if (!sys?.ok || !sys.stats) return sys;
+  const h = map.get(sys.name) || { at: [], cpu: [], mem: [], cores: [] };
+  const s = sys.stats;
+  h.at = [...h.at, now].slice(-max);
+  h.cpu = [...h.cpu, s.cpu?.percent ?? null].slice(-max);
+  h.mem = [...h.mem, s.mem ? Math.round((s.mem.used / s.mem.total) * 1000) / 10 : null].slice(-max);
+  const per = s.cpu?.perCore || [];
+  if (h.cores.length !== per.length) h.cores = per.map(() => []);
+  h.cores = h.cores.map((c, i) => [...c, per[i] ?? null].slice(-max));
+  map.set(sys.name, h);
+  return { ...sys, history: h };
+}

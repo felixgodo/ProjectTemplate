@@ -31,11 +31,12 @@ import { execFile } from 'node:child_process';
 import { createHash, createHmac, randomBytes, scrypt as scryptCb, timingSafeEqual } from 'node:crypto';
 import { access, readFile, stat } from 'node:fs/promises';
 import { createServer } from 'node:http';
-import { homedir } from 'node:os';
+import { homedir, hostname } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { promisify } from 'node:util';
 import { chatTranscript, readTail, sessionSummary, transcriptPath } from './sessions.mjs';
+import { pushHistory, systemStats } from './sysinfo.mjs';
 
 const run = promisify(execFile);
 const scrypt = promisify(scryptCb);
@@ -169,10 +170,23 @@ export function buildWorkspaces(cfg, ext = {}) {
       humanHint: str(ui.humanHint),
       release: str(ui.release, code ? 'Freigeben an Fix' : 'Freigeben'),
       prs: ui.prs ?? code,
+      // Antworten zum Antippen über den Eingabefeldern (Entscheidung, Notiz/Schließgrund, Chat)
+      quick: Object.fromEntries(Object.entries(QUICK).map(([k, def]) => [k, quickList(ui.quick?.[k], def)])),
     };
   }
   return out;
 }
+
+/** Vorgaben der Schnellantworten; je Workspace in beads.leitstand.mjs unter quick überschreibbar. */
+export const QUICK = {
+  decide: ['Ja, so umsetzen', 'Wie vorgeschlagen', 'Nein, nicht gewollt', 'Nur in diesem Fall', 'Später nochmal fragen'],
+  close: ['Erledigt', 'Duplikat', 'Nicht nötig', 'Nicht reproduzierbar', 'Kommt später', 'Siehe PR'],
+  chat: ['Weiter', 'Status?', 'Ja', 'Nein', 'Nach diesem Issue stoppen', '/compact'],
+};
+const quickList = (v, def) => {
+  if (!Array.isArray(v)) return def;
+  return v.filter((x) => typeof x === 'string' && x.trim()).map((x) => x.trim().slice(0, 120)).slice(0, 12);
+};
 
 /** Workspace eines Issues: Label ws:<name>, ohne (oder mit unbekanntem) zu code. */
 export function wsOfIssue(issue, workspaces) {
@@ -673,6 +687,25 @@ export function remoteCommand(root, cmd, args = []) {
 }
 
 /**
+ * Systemwerte je Rechner (sysinfo.mjs): ohne hosts.conf nur dieser, sonst alle; local() misst hier,
+ * remote(name) holt die Werte des anderen Rechners. Ein Fehler betrifft nur diesen Rechner.
+ * → [{ name, leader, self, ok, error?, stats? }]
+ */
+export async function collectSystems(conf, { local, remote, self = 'local' }) {
+  const hosts = conf ? conf.hosts.map((h) => h.name) : [self];
+  return Promise.all(hosts.map(async (name) => {
+    const base = { name, leader: conf ? name === conf.leader : true, self: conf ? name === conf.self : true };
+    try {
+      const stats = base.self ? await local() : await remote(name);
+      if (!stats || typeof stats !== 'object') throw new Error('keine Werte');
+      return { ...base, ok: true, stats };
+    } catch (e) {
+      return { ...base, ok: false, error: String(e.message || e).trim().split('\n').at(-1).slice(0, 300) };
+    }
+  }));
+}
+
+/**
  * Worker aller Rechner in einer Liste: perHost = [{ host, ok, error, leader, self, workers }]. Jeder
  * Worker trägt seinen Rechner, den Workspace bestimmt dieser Leitstand aus der Rolle. Ein Rechner,
  * der nicht antwortet, steht mit Fehler in hosts; die übrigen bleiben.
@@ -1084,13 +1117,13 @@ const SSH_OPTS = ['-o', 'BatchMode=yes', '-o', 'ConnectTimeout=5', '-o', 'Server
   '-o', 'ControlMaster=auto', '-o', 'ControlPersist=10m', '-o', `ControlPath=${join(homedir(), '.ssh', 'bk-%C')}`];
 
 const loginHtml = (password) => `<!doctype html>
-<html lang="de"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<html lang="de"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="apple-mobile-web-app-capable" content="yes">
 <title>Leitstand</title><style>
 :root{--bg:#f6f6f3;--panel:#fff;--ink:#1d1d1b;--muted:#6b6b66;--line:#e2e1db;--accent:#c2410c;--bad:#b91c1c}
 @media (prefers-color-scheme:dark){:root{--bg:#161614;--panel:#1f1f1c;--ink:#ecebe6;--muted:#9a998f;--line:#34332e;--accent:#f97316;--bad:#ef4444}}
 body{margin:0;min-height:100vh;display:grid;place-items:center;background:var(--bg);color:var(--ink);font:15px/1.45 -apple-system,system-ui,sans-serif;padding:16px}
 form{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:22px;width:min(380px,100%);display:grid;gap:12px}
-h1{font-size:19px;margin:0}input{font:inherit;padding:9px 11px;border-radius:8px;border:1px solid var(--line);background:var(--bg);color:var(--ink)}
+h1{font-size:19px;margin:0}input{font:inherit;font-size:16px;padding:10px 11px;border-radius:8px;border:1px solid var(--line);background:var(--bg);color:var(--ink)}
 button{font:inherit;font-weight:600;padding:9px;border-radius:8px;border:0;background:var(--accent);color:#fff;cursor:pointer}
 p{margin:0;color:var(--muted);font-size:13px}.bad{color:var(--bad)}</style></head>
 <body><form id="f"><h1>Leitstand</h1>
@@ -1291,6 +1324,30 @@ function startServer(token, selfRoot) {
       remoteCache.set(key, { at: Date.now(), value });
       return value;
     }));
+  }
+
+  // Systemwerte aller Rechner mit Verlauf (Tab System); 2 s zwischengespeichert, damit mehrere
+  // offene Seiten nicht mehrfach messen
+  const sysHistory = new Map();
+  let sysCache = { at: 0, value: null };
+  async function systems(root) {
+    if (sysCache.value && Date.now() - sysCache.at < 2_000) return sysCache.value;
+    const conf = await hostsConf();
+    const list = await collectSystems(conf, {
+      self: hostname().split('.')[0],
+      local: systemStats,
+      remote: async (host) => {
+        try {
+          const { stdout } = await onHost(conf, host, root, 'scripts/beadskit/leitstand/host-agent.mjs', ['system'], { timeout: 15_000 });
+          return JSON.parse(stdout);
+        } catch (e) {
+          throw new Error(e.code === 'ETIMEDOUT' || e.killed ? 'keine Antwort' : cmdOutput(e));
+        }
+      },
+    });
+    const value = { at: new Date().toISOString(), systems: list.map((x) => pushHistory(sysHistory, x)) };
+    sysCache = { at: Date.now(), value };
+    return value;
   }
 
   // Drain-Markierungen und Schwelle des Auto-Neustarts (null wenn aus): Dateien oder bd kv
@@ -1623,6 +1680,7 @@ function startServer(token, selfRoot) {
         const data = await workerView(p, name, 'detail');
         return data ? send(res, 200, data) : send(res, 404, { error: 'Worker läuft nicht' });
       }
+      if (req.method === 'GET' && path === '/api/system') return send(res, 200, await systems(cfg.root));
       if (req.method === 'GET' && path === '/api/runners') {
         if (!cfg.runners) return send(res, 404, { error: 'keine eigenen CI-Runner' });
         // eigene Route: ssh zum Server dauert, ein Fehler soll das Board nicht stören

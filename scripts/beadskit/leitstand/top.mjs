@@ -24,7 +24,7 @@ import {
   buildWorkspaces, CONF_DIR, groupIssues, isBoardIssue, localWorkers, mapRoot, mergeHostWorkers, normalizeConfig,
   normalizeExt, parseHostsConf, parseMarkers, parseProjectList, parsePrompt, prSummary, remoteCommand,
 } from './inbox.mjs';
-import { systemStats } from './sysinfo.mjs';
+import { pushHistory, systemStats } from './sysinfo.mjs';
 
 const run = promisify(execFile);
 const SSH_OPTS = ['-o', 'BatchMode=yes', '-o', 'ConnectTimeout=5', '-o', 'ServerAliveInterval=10',
@@ -498,16 +498,6 @@ async function systems(conf) {
 
 // Verlauf der Systemwerte je Rechner (nur im Speicher, 60 Punkte)
 const history = new Map();
-function remember(sys) {
-  if (!sys.ok || !sys.stats) return sys;
-  const h = history.get(sys.name) || { cpu: [], mem: [] };
-  h.cpu.push(sys.stats.cpu?.percent ?? null);
-  h.mem.push(sys.stats.mem ? (sys.stats.mem.used / sys.stats.mem.total) * 100 : null);
-  h.cpu = h.cpu.slice(-60);
-  h.mem = h.mem.slice(-60);
-  history.set(sys.name, h);
-  return { ...sys, history: h };
-}
 
 async function collect(filter) {
   let conf = null;
@@ -521,7 +511,7 @@ async function collect(filter) {
   const hosts = all[0]?.hosts ?? (conf ? conf.hosts.map((h) => ({ name: h.name, ok: true, leader: h.name === conf.leader })) : []);
   const projects = all.map((d) => d.project)
     .sort((a, b) => (b.workers.length > 0) - (a.workers.length > 0) || a.name.localeCompare(b.name, 'de'));
-  return { at: new Date().toISOString(), hosts: conf ? hosts : [], systems: (await sysP).map(remember), projects };
+  return { at: new Date().toISOString(), hosts: conf ? hosts : [], systems: (await sysP).map((x) => pushHistory(history, x)), projects };
 }
 
 // ---------------------------------------------------------------- Programm

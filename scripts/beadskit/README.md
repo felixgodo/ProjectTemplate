@@ -81,6 +81,13 @@ PRs mit CI-Stand (aller Repos aus `BK_REPOS`) und die CI-Runner, wenn das Projek
 Er steuert Issues und Worker als Actor `user` und startet mit `autorestart` Worker mit großem
 Kontext selbst neu. Tests: `node --test scripts/beadskit/leitstand/*.test.mjs`.
 
+Die Seite hat fünf Tabs (oben, auf dem iPhone unten; `#<slug>/<tab>`, Tasten 1–5): **Entscheiden**
+(Rückfragen und `human`), **Worker** (Kennzahlen, Steuerung, CI-Runner), **Board**, **PRs** und
+**System** (`/api/system`: CPU gesamt und je Kern mit Verlauf, Load, RAM, Platte, Temperatur,
+Dienste je Rechner aus hosts.conf, über `host-agent.mjs system`). Über Eingabefeldern stehen
+Antworten zum Antippen (Entscheidung, Schließgrund, Chat, Titel-Vorlagen, Filter); auf Touch-Geräten
+ersetzt der Knopf ⇄ an der Karte das Ziehen. Als Web-App auf den Home-Bildschirm legbar.
+
 Fernzugang: `scripts/beadskit/leitstand/leitstand-remote` (Login mit Token oder Benutzer/Passwort
 `leitstand-remote password`, Sperre je IP; SSH-Rückkanal, nginx mit HTTPS, Basic-Auth nur mit
 `server-setup --basic-auth`; Hilfe im Kopf des Skripts). Token, Passwort und Basic-Auth liegen in
@@ -131,6 +138,8 @@ export default {
       group: { prefix: 'stadt:', all: 'alle Städte' },         // Filter und Karten-Tag statt modul:
       create: { type: 'task', title: 'Neuer Club', fields: [{ name: 'stadt', label: 'Stadt', prefix: 'stadt:' }] },
       humanHint: 'HTML-Hinweis über „Wartet auf dich“', release: 'Freigeben', prs: false,
+      // Antworten zum Antippen (je höchstens 12, je 120 Zeichen); fehlt eine Liste, gilt die Vorgabe
+      quick: { decide: ['Ja, aktivieren', 'Nein'], close: ['Kein Club', 'Duplikat'], chat: ['Weiter'] },
     },
   },
   // Zusatzangaben je Karte: Logo, Links (nur http/https), Tags
