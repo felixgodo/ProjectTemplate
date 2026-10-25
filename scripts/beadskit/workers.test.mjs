@@ -366,7 +366,7 @@ esac
 writeFileSync(join(fakeBin, 'ps'), '#!/bin/sh\nprintf \'%s\\n\' "$FAKE_TTY"\n');
 chmodSync(join(fakeBin, 'tmux'), 0o755);
 chmodSync(join(fakeBin, 'ps'), 0o755);
-const tmuxEnv = (extra = {}) => ({ PATH: `${fakeBin}:${dir}:${process.env.PATH}`, BK_TERM: 'tmux', BK_UNAME: 'Linux', ...extra });
+const tmuxEnv = (extra = {}) => ({ PATH: `${fakeBin}:${dir}:${process.env.PATH}`, BK_TERM: 'tmux', BK_UNAME: 'Linux', BK_SEND_WAIT: '0', ...extra });
 const tmuxCalls = (calls) => calls.filter((c) => c.startsWith('tmux ')).map((c) => c.slice(5));
 
 test('tmux: start legt die Session an und öffnet je Worker ein Fenster mit Farbe und Startbefehl', () => {
@@ -400,7 +400,7 @@ test('tmux: send tippt in das Pane mit dem TTY des Workers, ohne Terminal Abbruc
   const term = [{ id: 's1', pid: 4242, kind: 'interactive', name: 'fix-3', status: 'busy', cwd: testRepo().wt('fix-3') }];
   const r = workers(root, ['send', 'fix-3', '--', '/compact'], term, tmuxEnv({ FAKE_TTY: 'pts/7' }));
   assert.equal(r.status, 0, r.stderr);
-  assert.deepEqual(tmuxCalls(r.calls), ['list-panes -a -F #{pane_tty} #{pane_id}', 'send-keys -t %3 -l -- /compact', 'send-keys -t %3 Enter']);
+  assert.deepEqual(tmuxCalls(r.calls).filter((c) => c.startsWith('send-keys')), ['send-keys -t %3 -l -- /compact', 'send-keys -t %3 Enter']);
   // procps zeigt ? für Prozesse ohne Terminal
   const none = workers(root, ['send', 'fix-3', '--', 'hallo'], term, tmuxEnv({ FAKE_TTY: '?' }));
   assert.equal(none.status, 1);
@@ -608,4 +608,66 @@ esac
   const bg = workers(root, ['screen', 'fix-4'], [live('aaaa0001', 'fix-4')], env);
   assert.equal(bg.status, 1);
   assert.match(bg.stderr, /Hintergrund/);
+});
+
+test('send: steht der Text danach noch im Eingabefeld, ein zweites Enter; bleibt er, Abbruch', () => {
+  const { root, workers } = testRepo();
+  // capture-pane liefert beim n-ten Aufruf FAKE_SCREEN.n (fehlt die Datei: leerer Bildschirm)
+  writeFileSync(join(fakeBin, 'tmux'), `#!/bin/sh
+echo "tmux $*" >>"$FAKE_LOG"
+case $1 in
+  list-panes) echo "/dev/pts/7 %3" ;;
+  capture-pane)
+    n=$(($(cat "$FAKE_SCREEN.n" 2>/dev/null || echo 0) + 1))
+    echo $n >"$FAKE_SCREEN.n"
+    cat "$FAKE_SCREEN.$n" 2>/dev/null ;;
+esac
+`);
+  const screen = join(dir, 'screen');
+  const rule = '─'.repeat(40);
+  const box = (text) => `✽ Forming…\n${rule}\n❯ ${text} \n${rule}\n  ⏵⏵ auto mode on\n`;
+  const reset = (...screens) => {
+    rmSync(`${screen}.n`, { force: true });
+    for (let i = 1; i <= 3; i++) rmSync(`${screen}.${i}`, { force: true });
+    screens.forEach((t, i) => writeFileSync(`${screen}.${i + 1}`, t));
+  };
+  const term = [{ id: 's1', pid: 4242, kind: 'interactive', name: 'fix-3', status: 'busy', cwd: testRepo().wt('fix-3') }];
+  const env = tmuxEnv({ FAKE_TTY: 'pts/7', FAKE_SCREEN: screen });
+  const enters = (r) => tmuxCalls(r.calls).filter((c) => c === 'send-keys -t %3 Enter').length;
+  const msg = 'Bitte spot-k9k.261 prüfen';
+
+  // Feld nach dem ersten Enter leer: genau ein Enter
+  reset(box(''));
+  const ok = workers(root, ['send', 'fix-3', '--', msg], term, env);
+  assert.equal(ok.status, 0, ok.stderr);
+  assert.equal(enters(ok), 1);
+
+  // ein Vorschlag fing das erste Enter ab: zweites Enter, dann leer
+  reset(box(msg), box(''));
+  const twice = workers(root, ['send', 'fix-3', '--', msg], term, env);
+  assert.equal(twice.status, 0, twice.stderr);
+  assert.equal(enters(twice), 2);
+  assert.match(twice.stdout, /an fix-3 gesendet/);
+
+  // ein Vorschlag im leeren Feld ist nicht der eigene Text: kein zweites Enter
+  reset(box('Nimm dir spot-k9k.261 ✕'));
+  assert.equal(enters(workers(root, ['send', 'fix-3', '--', msg], term, env)), 1);
+
+  // Text bleibt stehen: Abbruch mit Hinweis, kein drittes Enter
+  reset(box(msg), box(msg));
+  const stuck = workers(root, ['send', 'fix-3', '--', msg], term, env);
+  assert.equal(stuck.status, 1);
+  assert.equal(enters(stuck), 2);
+  assert.match(stuck.stderr, /steht noch im Eingabefeld/);
+});
+
+test('iTerm: send und press Enter schicken CR, nicht das LF von write text', () => {
+  const src = readFileSync(script, 'utf8');
+  const block = (fn) => src.slice(src.indexOf(`${fn}() {`), src.indexOf('\n}\n', src.indexOf(`${fn}() {`)));
+  const write = block('term_write');
+  assert.match(write, /write text \(item 2 of argv\) newline no/);
+  assert.match(write, /write text \(ASCII character 13\) newline no/);
+  const press = block('term_press');
+  assert.match(press, /if k is "Enter" then[^\n]*\n(?:[^\n]*--[^\n]*\n)?\s*tell s to write text \(ASCII character 13\) newline no/);
+  assert.doesNotMatch(press, /write text ""/);
 });

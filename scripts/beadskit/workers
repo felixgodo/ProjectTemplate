@@ -859,7 +859,8 @@ term_press() {
             repeat with s in sessions of t
               if tty of s is (item 1 of argv) then
                 if k is "Enter" then
-                  tell s to write text ""
+                  -- CR wie die Enter-Taste; leeres write text hängt nur LF an, das Claude Code als neue Zeile nimmt
+                  tell s to write text (ASCII character 13) newline no
                 else if k is "Escape" then
                   tell s to write text (ASCII character 27) newline no
                 else
@@ -921,6 +922,8 @@ cmd_press() {
 
 # Schreibt Text (mit Enter) in das Terminal mit diesem TTY: ein tmux-Pane oder eine
 # iTerm-Session. Ohne Text nur Prüfung, ob es das gibt. Exit 1 ohne passendes Terminal.
+# In iTerm erst der Text ohne Zeilenende, nach einer Pause CR: das LF von write text nimmt
+# Claude Code als neue Zeile im Eingabefeld, ein CR direkt hinter dem Text als Teil des Einfügens.
 term_write() {
   if command -v tmux >/dev/null 2>&1; then
     pane=$(tmux list-panes -a -F '#{pane_tty} #{pane_id}' 2>/dev/null | awk -v t="$1" '$1 == t { print $2; exit }')
@@ -937,7 +940,11 @@ term_write() {
           repeat with t in tabs of w
             repeat with s in sessions of t
               if tty of s is (item 1 of argv) then
-                if (item 2 of argv) is not "" then tell s to write text (item 2 of argv)
+                if (item 2 of argv) is not "" then
+                  tell s to write text (item 2 of argv) newline no
+                  delay 0.3
+                  tell s to write text (ASCII character 13) newline no
+                end if
                 return
               end if
             end repeat
@@ -947,6 +954,21 @@ term_write() {
       error "kein iTerm-Tab mit " & (item 1 of argv) number 1
     end run
 APPLESCRIPT
+}
+
+# Steht dieser Text noch im Eingabefeld von Claude Code? Das Feld ist die letzte Zeile mit ❯
+# direkt unter einer Linie aus ─. Verglichen wird der Anfang des Textes, damit ein Vorschlag im
+# leeren Feld nicht als „noch da“ gilt. Exit 1: Feld leer, anderer Inhalt, Bildschirm nicht lesbar.
+input_pending() {
+  screen=$(term_screen "$1") || return 1
+  printf '%s\n' "$screen" | awk -v want="$2" '
+    function trim(x) { sub(/^[ \t]+/, "", x); sub(/[ \t]+$/, "", x); return x }
+    index($0, "─") == 1 { rule = NR; next }
+    index($0, "❯") == 1 && rule == NR - 1 { box = trim(substr($0, length("❯") + 1)) }
+    END {
+      w = substr(trim(want), 1, 20)
+      exit !(w != "" && index(box, w) == 1)
+    }'
 }
 
 # Startet einen Worker mit frischem Kontext neu. Ohne --force nur zwischen zwei Runden: idle,
@@ -1057,6 +1079,17 @@ cmd_send() {
   tty=$(tty_of "$5")
   [ -n "$tty" ] || { echo "$target: kein Terminal zur PID $5 gefunden" >&2; exit 1; }
   term_write "$tty" "$text" || { echo "$target: kein Terminal mit $tty (iTerm-Tab, tmux-Fenster)" >&2; exit 1; }
+  # Steht der Text danach noch im Eingabefeld (ein Vorschlag fing das Enter ab), ein zweites Enter
+  wait=${BK_SEND_WAIT:-1}
+  sleep "$wait"
+  if input_pending "$tty" "$text"; then
+    term_press "$tty" Enter
+    sleep "$wait"
+    if input_pending "$tty" "$text"; then
+      echo "$target: Text steht noch im Eingabefeld, nicht abgeschickt (scripts/beadskit/workers screen $target)" >&2
+      exit 1
+    fi
+  fi
   echo "an $target gesendet"
 }
 
