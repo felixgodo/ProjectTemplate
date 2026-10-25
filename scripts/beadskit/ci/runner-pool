@@ -1,0 +1,305 @@
+#!/bin/sh
+# Gemeinsamer CI-Runner-Pool für alle beadskit-Projekte auf dem Server: Statt fester Runner je
+# Repo startet der Dienst beadskit-runner-pool für jeden wartenden Job einen Einmal-Runner für
+# genau dieses Repo (ci/runner-pool-daemon), höchstens SLOTS gleichzeitig, alle in
+# beadskit-ci.slice. Die Workflows bleiben unverändert (`runs-on: [self-hosted, <slug>]`).
+# Teil des beadskit aus dem ProjectTemplate – nicht im Projekt ändern.
+#
+#   runner-pool setup [--dry-run]     Image, Netz, CI-MySQL, Dienst einrichten bzw. aktualisieren
+#   runner-pool set-token             Token von stdin auf den Server (Fine-grained PAT, siehe unten)
+#   runner-pool status [--json]       Plätze, laufende Runner mit Job, wartende Jobs je Projekt
+#   runner-pool size <n>              Plätze (1–8), gilt ab der nächsten Runde
+#   runner-pool start|stop            Dienst an/aus (stop: laufende Jobs laufen zu Ende)
+#   runner-pool start|stop mysql [--force]  CI-MySQL an/aus (stop verweigert bei laufendem Job)
+#   runner-pool logs                  letzte Zeilen des Dienstes
+#   runner-pool remove                Dienst, Container, Netz, Volumes und Konfiguration löschen
+#
+# Projekte: alle aus ~/.config/beadskit/projects.txt (POOL_PROJECTS: Liste von Pfaden), deren
+# Workflows self-hosted nutzen. Label = BK_SLUG, Repo aus RUNNER_REPO oder `gh repo view`, ins
+# Image kommen die RUNNER_APT aller Projekte, die CI-MySQL (Host `mysql` im Netz beadskit-ci)
+# läuft, sobald ein Projekt RUNNER_MYSQL setzt. `setup` nach jeder Änderung daran erneut.
+# Token: Fine-grained PAT, Zugriff auf genau diese Repos, Repository-Rechte Administration
+# (Read and write, für JIT-Runner) und Actions (Read). Er liegt nur auf dem Server
+# (/etc/beadskit-ci/token, 0600). Eingeben: `scripts/beadskit/ci/runner-pool set-token`, dann
+# einfügen und Ctrl-D.
+#
+# Einstellungen per Umgebung (Standard): RUNNER_SSH_HOST (server), RUNNER_POOL_SLOTS (4, nur beim
+# ersten setup, danach `size`), RUNNER_CPUS (2) und RUNNER_MEM (6g) je Runner, RUNNER_CI_CPUS (4)
+# und RUNNER_CI_MEM (24G) für die Slice, RUNNER_POOL_IDLE (600 s).
+set -eu
+
+# shellcheck source=lib.sh
+. "$(dirname "$0")/lib.sh"
+
+SSH_HOST=${RUNNER_SSH_HOST:-server}
+SLOTS_DEFAULT=${RUNNER_POOL_SLOTS:-4}
+CPUS=${RUNNER_CPUS:-2}
+MEM=${RUNNER_MEM:-6g}
+IDLE=${RUNNER_POOL_IDLE:-600}
+CI_CPUS=${RUNNER_CI_CPUS:-4}
+CI_MEM=${RUNNER_CI_MEM:-24G}
+SLICE=beadskit-ci.slice
+VERSION=$RUNNER_VERSION
+DIR=
+OPT=/opt/beadskit-runner-pool
+CONF=/etc/beadskit-ci/pool.conf
+UNIT=beadskit-runner-pool.service
+MAX=8
+case $SLOTS_DEFAULT in [1-8]) ;; *) echo "RUNNER_POOL_SLOTS ungültig: '$SLOTS_DEFAULT' (1–8)" >&2; exit 1 ;; esac
+case $CI_CPUS in '' | 0* | *[!0-9]*) echo "RUNNER_CI_CPUS ungültig: '$CI_CPUS' (ganze Zahl ab 1)" >&2; exit 1 ;; esac
+printf '%s' "$CI_MEM" | grep -Eq '^[1-9][0-9]*[KMGT]?$' || { echo "RUNNER_CI_MEM ungültig: '$CI_MEM' (z. B. 24G)" >&2; exit 1; }
+printf '%s' "$CPUS" | grep -Eq '^[0-9]+(\.[0-9]+)?$' || { echo "RUNNER_CPUS ungültig: '$CPUS'" >&2; exit 1; }
+printf '%s' "$MEM" | grep -Eq '^[1-9][0-9]*[kmg]?$' || { echo "RUNNER_MEM ungültig: '$MEM' (z. B. 6g)" >&2; exit 1; }
+case $IDLE in '' | *[!0-9]*) echo "RUNNER_POOL_IDLE ungültig: '$IDLE'" >&2; exit 1 ;; esac
+
+usage() {
+  sed -n '8,15s/^# \{0,1\}//p' "$0" >&2
+  exit 2
+}
+
+remote() {
+  ssh -o BatchMode=yes "$SSH_HOST" "$@"
+}
+
+# Projekte mit self-hosted-Workflows, eine Zeile je Projekt: repo<TAB>label<TAB>apt<TAB>mysql
+projects() {
+  list=${POOL_PROJECTS:-$(grep -v '^#' "$HOME/.config/beadskit/projects.txt" 2>/dev/null || true)}
+  for p in $list; do
+    [ -f "$p/beads.project.sh" ] || continue
+    grep -qs 'self-hosted' "$p"/.github/workflows/*.y*ml || continue
+    (
+      BK_SLUG='' RUNNER_APT='' RUNNER_MYSQL='' RUNNER_REPO='' RUNNER_LABEL=''
+      # shellcheck source=/dev/null
+      . "$p/beads.project.sh"
+      repo=${RUNNER_REPO:-$(cd "$p" && gh repo view --json nameWithOwner --jq .nameWithOwner 2>/dev/null || true)}
+      [ -n "$repo" ] && [ -n "$BK_SLUG" ] || { echo "übersprungen (Repo oder BK_SLUG unbekannt): $p" >&2; exit 0; }
+      printf '%s\t%s\t%s\t%s\n' "$repo" "${RUNNER_LABEL:-$BK_SLUG}" "$RUNNER_APT" "$RUNNER_MYSQL"
+    )
+  done
+}
+
+setup_script() {
+  rows=$1
+  repos=$(printf '%s\n' "$rows" | awk -F'\t' 'NF { printf "%s%s:%s", sep, $1, $2; sep = " " }')
+  # RUNNER_APT aller Projekte, jedes Paket einmal
+  EXTRA_APT=$(printf '%s\n' "$rows" | cut -f3 | tr ' ' '\n' | grep . | sort -u | tr '\n' ' ' || true)
+  mysql=$(printf '%s\n' "$rows" | cut -f4 | grep . | sort -V | tail -n 1 || true)
+  for r in $repos; do
+    printf '%s' "$r" | grep -Eq '^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+:[a-z0-9-]+$' || { echo "Repo/Label ungültig: $r" >&2; exit 1; }
+  done
+  case $mysql in *[!0-9.]*) echo "RUNNER_MYSQL ungültig: '$mysql'" >&2; exit 1 ;; esac
+  for a in $EXTRA_APT; do
+    case $a in *[!a-z0-9.+-]*) echo "RUNNER_APT-Paket ungültig: '$a'" >&2; exit 1 ;; esac
+  done
+  cat <<EOF
+set -euo pipefail
+$(slice_script)
+mkdir -p $OPT /etc/beadskit-ci && cd $OPT
+cat >Dockerfile <<'DOCKERFILE'
+$(dockerfile)
+DOCKERFILE
+docker build -q -t beadskit-runner:$VERSION -t beadskit-runner:latest . >/dev/null
+docker network inspect beadskit-ci >/dev/null 2>&1 || docker network create beadskit-ci >/dev/null
+EOF
+  if [ -n "$mysql" ]; then
+    cat <<EOF
+# CI-MySQL für DB-Tests (Host mysql im Netz beadskit-ci, Daten im RAM, root-Passwort ci)
+if [ "\$(docker inspect -f '{{.Config.Image}}' beadskit-ci-mysql 2>/dev/null || true)" != mysql:$mysql ]; then
+  docker rm -f beadskit-ci-mysql >/dev/null 2>&1 || true
+  docker run -d --name beadskit-ci-mysql --restart unless-stopped --network beadskit-ci --network-alias mysql \\
+    --cgroup-parent $SLICE --cpus 1 --cpu-shares 128 --memory 1g --tmpfs /var/lib/mysql \\
+    --security-opt no-new-privileges:true -e MYSQL_ROOT_PASSWORD=ci mysql:$mysql \\
+    --innodb-buffer-pool-size=256M --max-connections=200 >/dev/null
+fi
+EOF
+  else
+    echo "docker rm -f beadskit-ci-mysql >/dev/null 2>&1 || true"
+  fi
+  cat <<EOF
+cat >runner-pool-daemon <<'DAEMON'
+$(cat "$(dirname "$0")/runner-pool-daemon")
+DAEMON
+chmod 755 runner-pool-daemon
+slots=\$(sed -n 's/^SLOTS=\([1-8]\)\$/\1/p' $CONF 2>/dev/null || true)
+cat >$CONF <<CONF
+# Erzeugt von beadskit ci/runner-pool setup – Plätze ändern: runner-pool size <n>
+REPOS="$repos"
+SLOTS=\${slots:-$SLOTS_DEFAULT}
+CPUS=$CPUS
+MEM=$MEM
+IDLE_MAX=$IDLE
+IMAGE=beadskit-runner:latest
+CONF
+cat >/etc/systemd/system/$UNIT <<'UNIT'
+# Erzeugt von beadskit ci/runner-pool – nicht von Hand ändern.
+[Unit]
+Description=CI-Runner-Pool (beadskit): Einmal-Runner je wartendem Job
+After=docker.service network-online.target
+Requires=docker.service
+
+[Service]
+Slice=$SLICE
+ExecStart=$OPT/runner-pool-daemon
+Restart=always
+RestartSec=10
+TimeoutStopSec=60
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+systemctl daemon-reload
+if [ -s /etc/beadskit-ci/token ]; then
+  systemctl enable -q $UNIT
+  systemctl restart $UNIT
+  echo "Pool läuft: \$(printf '%s' "$repos" | wc -w | tr -d ' ') Repos, \${slots:-$SLOTS_DEFAULT} Plätze"
+else
+  echo "Token fehlt: scripts/beadskit/ci/runner-pool set-token, danach setup erneut"
+fi
+EOF
+}
+
+cmd_setup() {
+  dry=
+  for a in "$@"; do
+    case $a in
+      --dry-run) dry=1 ;;
+      *) usage ;;
+    esac
+  done
+  rows=$(projects)
+  [ -n "$rows" ] || { echo "Kein Projekt mit self-hosted-Workflow gefunden." >&2; exit 1; }
+  if [ -n "$dry" ]; then
+    echo "# ssh $SSH_HOST bash -s"
+    setup_script "$rows"
+    return
+  fi
+  setup_script "$rows" | remote bash -s
+}
+
+cmd_set_token() {
+  [ ! -t 0 ] || echo "Token einfügen, dann Enter und Ctrl-D:" >&2
+  tok=$(cat | tr -d '[:space:]')
+  case $tok in github_pat_* | ghp_*) ;; *) echo "Das sieht nicht nach einem GitHub-Token aus." >&2; exit 1 ;; esac
+  printf '%s\n' "$tok" | remote 'umask 077 && mkdir -p /etc/beadskit-ci && cat >/etc/beadskit-ci/token &&
+    if systemctl is-enabled -q beadskit-runner-pool 2>/dev/null; then systemctl restart beadskit-runner-pool; fi'
+  echo "Token gespeichert."
+}
+
+# Zustand vom Server: state.json des Dienstes, Dienst-Status, MySQL, Plätze
+state_script() {
+  cat <<EOF
+st=\$(cat /run/beadskit-runner-pool/state.json 2>/dev/null || echo '{}')
+svc=\$(systemctl is-active $UNIT 2>/dev/null || true)
+[ -f /etc/systemd/system/$UNIT ] || svc=missing
+# docker inspect gäbe für einen fehlenden Container eine Leerzeile aus
+db=\$(docker ps -a --filter 'name=^beadskit-ci-mysql\$' --format '{{.State}}')
+[ -n "\$db" ] || db=missing
+slots=\$(sed -n 's/^SLOTS=//p' $CONF 2>/dev/null || true)
+tok=\$([ -s /etc/beadskit-ci/token ] && echo true || echo false)
+jq -c --arg svc "\$svc" --arg db "\$db" --arg slots "\$slots" --argjson tok "\$tok" \\
+  '. + {service: \$svc, mysqlState: \$db, slotsConf: (\$slots | tonumber? // null), token: \$tok}' <<<"\$st"
+EOF
+}
+
+# {service, token, slots, repos, queued {label: n}, runners [{name, label, repo, slot, busy, github, job, cpu, mem}],
+#  mysql {container, cpu, mem} | null, slice, at}
+cmd_status_json() {
+  tmp=$(mktemp)
+  usage_script | remote bash -s >"$tmp" 2>/dev/null &
+  upid=$!
+  st=$(state_script | remote bash -s)
+  wait "$upid" || true
+  usage=$(jq -c . "$tmp" 2>/dev/null || true)
+  rm -f "$tmp"
+  jq -n --argjson s "$st" --argjson u "${usage:-"{}"}" '{
+    service: $s.service, token: $s.token, slots: ($s.slotsConf // $s.slots // null), at: ($s.at // null),
+    repos: ($s.repos // []), queued: ($s.queued // {}),
+    runners: [($s.runners // [])[] | . + {cpu: ($u.containers[.name].cpu // null), mem: ($u.containers[.name].mem // null)}],
+    mysql: (if $s.mysqlState == "missing" then null
+      else {container: $s.mysqlState, cpu: ($u.containers.mysql.cpu // null), mem: ($u.containers.mysql.mem // null)} end),
+    slice: ($u.slice // null)
+  }'
+}
+
+cmd_status() {
+  cmd_status_json | jq -r '
+    "Pool: \(.service)\(if .token then "" else " (Token fehlt)" end), \([.runners[] | select(.busy)] | length) von \(.slots // "?") Plätzen mit Job",
+    (.runners[] | "  \(.name)\t\(.repo)\t\(if .job then "\(.job.name) · \(.job.branch)" elif .busy then "Job" else "wartet auf Job" end)"),
+    (if (.queued | length) > 0 then "Wartend: \(.queued | to_entries | map("\(.key) \(.value)") | join(", "))" else "Wartend: keine" end),
+    (if .mysql then "CI-MySQL: \(.mysql.container)" else empty end),
+    (.slice | if . and .cpuPct then "CI gesamt (beadskit-ci.slice): \(.cpuPct) % CPU von \(if .cpus then "\(.cpus * 100) %" else "unbegrenzt" end)" else empty end)'
+}
+
+cmd_size() {
+  [ $# -eq 1 ] || usage
+  case $1 in [1-8]) ;; *) echo "Plätze: 1–$MAX" >&2; exit 2 ;; esac
+  remote "sed -i 's/^SLOTS=.*/SLOTS=$1/' $CONF && grep -q '^SLOTS=$1\$' $CONF"
+  echo "Pool: $1 Plätze."
+}
+
+# Bricht ab, wenn ein Pool-Runner gerade einen Job hat (dessen DB-Tests brauchen die MySQL)
+guard_mysql() {
+  busy=$(cmd_status_json | jq -r '[.runners[] | select(.busy) | .name] | join(", ")')
+  if [ -n "$busy" ]; then
+    echo "$busy arbeitet gerade an einem Job, dessen DB-Tests ohne MySQL abbrächen. Trotzdem: --force" >&2
+    exit 1
+  fi
+}
+
+cmd_start() {
+  case "$*" in
+    '') remote "systemctl enable -q --now $UNIT" ;;
+    mysql) remote "docker start beadskit-ci-mysql >/dev/null" ;;
+    *) usage ;;
+  esac
+}
+
+cmd_stop() {
+  case "$*" in
+    '') remote "systemctl stop $UNIT && systemctl disable -q $UNIT" ;;
+    mysql) guard_mysql; remote "docker stop beadskit-ci-mysql >/dev/null" ;;
+    'mysql --force' | '--force mysql') remote "docker stop beadskit-ci-mysql >/dev/null" ;;
+    *) usage ;;
+  esac
+}
+
+cmd_logs() {
+  remote "journalctl -u $UNIT -n 50 --no-pager"
+}
+
+cmd_remove() {
+  remote bash -s <<EOF
+set -u
+systemctl disable -q --now $UNIT 2>/dev/null || true
+ids=\$(docker ps -aq --filter label=beadskit.pool)
+[ -z "\$ids" ] || docker rm -f \$ids >/dev/null
+docker rm -f beadskit-ci-mysql >/dev/null 2>&1 || true
+docker network rm beadskit-ci >/dev/null 2>&1 || true
+vols=\$(docker volume ls -q | grep '^beadskit-pool-' || true)
+[ -z "\$vols" ] || docker volume rm \$vols >/dev/null
+rm -rf $OPT /etc/beadskit-ci /etc/systemd/system/$UNIT
+systemctl daemon-reload
+EOF
+  echo "Pool entfernt. Bei GitHub übrige pool-*-Runner verschwinden von selbst (JIT) oder im Repo unter Settings → Actions → Runners."
+}
+
+[ $# -ge 1 ] || usage
+cmd=$1
+shift
+case $cmd in
+  setup) cmd_setup "$@" ;;
+  set-token) [ $# -eq 0 ] || usage; cmd_set_token ;;
+  status)
+    case ${1-} in
+      '') cmd_status ;;
+      --json) cmd_status_json ;;
+      *) usage ;;
+    esac
+    ;;
+  size) cmd_size "$@" ;;
+  start) cmd_start "$@" ;;
+  stop) cmd_stop "$@" ;;
+  logs) cmd_logs ;;
+  remove) [ $# -eq 0 ] || usage; cmd_remove ;;
+  *) usage ;;
+esac

@@ -4,9 +4,9 @@
 // Claude-Session gerade tut, aus ihrem Transkript), Kanban-Board je Workspace, PRs mit CI-Stand,
 // CI-Runner. Steuert Issues (verschieben, Priorität, Unclaim, anlegen), Worker (start, add, drain,
 // stop, restart, Chat: Verlauf lesen, Nachricht ins Terminal senden) und die CI-Runner auf dem
-// Server (an/aus, hinzufügen, löschen). Mit `workers autorestart` startet der Server Worker mit
+// Server (gemeinsamer Pool: Plätze, an/aus, CI-MySQL). Mit `workers autorestart` startet der Server Worker mit
 // großem Kontext zwischen zwei Runden selbst neu (Prüfung jede Minute, siehe planRestarts).
-// Liest und schreibt nur über scripts/beadskit/{bdw,workers,ci/runner-server}, `claude agents|logs`,
+// Liest und schreibt nur über scripts/beadskit/{bdw,workers,ci/runner-pool}, `claude agents|logs`,
 // `gh` und die Transkripte unter ~/.claude/projects (nur lesend).
 //
 // Zwei Rechner (~/.config/beadskit/hosts.conf, siehe ProjectTemplate/scripts/remote): Der Leitstand
@@ -395,23 +395,25 @@ export function planWorkerAction({ action, role, name, force, off, counts, thres
 }
 
 /**
- * Argumente für scripts/beadskit/ci/runner-server: start/stop eines Runners (1–8), der CI-MySQL
- * (mysql) oder aller, add, delete eines Runners (1–8) oder ohne Nummer den mit der höchsten.
+ * Argumente für scripts/beadskit/ci/runner-pool: Plätze (size 1–8), Dienst an/aus (start/stop ohne
+ * n) und CI-MySQL an/aus (n = mysql, stop mit --force trotz laufendem Job).
  */
 export function planRunnerAction({ action, n, force }) {
-  const one = (x) => Number.isInteger(x) && x >= 1 && x <= 8;
-  if (action === 'add') return ['add'];
-  if (action === 'delete') {
-    if (n != null && !one(n)) throw new Error('Runner: 1–8');
-    return ['delete', ...(n != null ? [String(n)] : []), ...(force ? ['--force'] : [])];
+  if (action === 'size') {
+    if (!(Number.isInteger(n) && n >= 1 && n <= 8)) throw new Error('Plätze: 1–8');
+    return ['size', String(n)];
   }
   if (action !== 'start' && action !== 'stop') throw new Error('unbekannte Aktion');
-  if (n !== 'all' && n !== 'mysql' && !one(n)) throw new Error('Runner: 1–8, mysql oder all');
-  return [action, String(n), ...(action === 'stop' && force ? ['--force'] : [])];
+  if (n == null) return [action];
+  if (n !== 'mysql') throw new Error('nur der Pool oder mysql');
+  return [action, 'mysql', ...(action === 'stop' && force ? ['--force'] : [])];
 }
 
-/** Normalisiert die Runner aus `runner-server status --json`; Einträge ohne gültige Nummer fallen weg. */
-export function parseRunners(list, slug = 'runner') {
+/**
+ * Normalisiert `runner-pool status --json`: Dienst, Plätze, laufende Pool-Runner (mit Projekt-Label,
+ * Job, CPU, RAM), wartende Jobs je Label, CI-MySQL und Slice. Ungültiges fällt weg.
+ */
+export function parsePool(d) {
   const job = (j) => (j && typeof j === 'object' ? {
     name: str(j.name),
     branch: str(j.branch),
@@ -420,28 +422,43 @@ export function parseRunners(list, slug = 'runner') {
     url: typeof j.url === 'string' && j.url.startsWith('https://github.com/') ? j.url : null,
     started: str(j.started, null),
   } : null);
-  return (Array.isArray(list) ? list : [])
-    .filter((r) => r && Number.isInteger(r.n) && r.n >= 1 && r.n <= 8)
-    .map((r) => ({
-      n: r.n,
-      name: str(r.name, `${slug}-runner-${r.n}`),
-      container: str(r.container, 'missing'),
-      github: str(r.github, 'missing'),
-      busy: r.busy === true,
-      job: job(r.job),
-      cpu: num(r.cpu),
-      mem: num(r.mem),
-    }))
-    .sort((a, b) => a.n - b.n);
+  const o = d && typeof d === 'object' ? d : {};
+  const queued = o.queued && typeof o.queued === 'object' && !Array.isArray(o.queued) ? o.queued : {};
+  return {
+    service: str(o.service, 'missing'),
+    token: o.token === true,
+    slots: Number.isInteger(o.slots) && o.slots >= 1 && o.slots <= 8 ? o.slots : null,
+    repos: (Array.isArray(o.repos) ? o.repos : [])
+      .filter((r) => r && typeof r.repo === 'string' && typeof r.label === 'string')
+      .map((r) => ({ repo: r.repo, label: r.label })),
+    queued: Object.fromEntries(Object.entries(queued).filter(([, v]) => Number.isInteger(v) && v > 0)),
+    runners: (Array.isArray(o.runners) ? o.runners : [])
+      .filter((r) => r && typeof r.name === 'string' && r.name.startsWith('pool-'))
+      .map((r) => ({
+        name: r.name,
+        label: str(r.label),
+        repo: str(r.repo),
+        slot: Number(r.slot) || null,
+        busy: r.busy === true,
+        github: str(r.github, 'starting'),
+        job: job(r.job),
+        cpu: num(r.cpu),
+        mem: num(r.mem),
+      }))
+      .sort((a, b) => (a.slot ?? 99) - (b.slot ?? 99)),
+    mysql: parseMysql(o.mysql),
+    slice: parseSlice(o.slice),
+    at: str(o.at, null),
+  };
 }
 
-/** CI-MySQL aus `runner-server status --json` (container, cpu, mem) oder null, wenn es keine gibt. */
+/** CI-MySQL aus `runner-pool status --json` (container, cpu, mem) oder null, wenn es keine gibt. */
 export function parseMysql(m) {
   if (!m || typeof m !== 'object') return null;
   return { container: str(m.container, 'missing'), cpu: num(m.cpu), mem: num(m.mem) };
 }
 
-/** Auslastung der CI-Slice aus `runner-server status --json`: cpuPct (% eines Kerns), cpus (Quota), mem (Bytes). */
+/** Auslastung der CI-Slice aus `runner-pool status --json`: cpuPct (% eines Kerns), cpus (Quota), mem (Bytes). */
 export function parseSlice(s) {
   if (!s || typeof s !== 'object') return null;
   const out = { cpuPct: num(s.cpuPct), cpus: num(s.cpus), mem: num(s.mem) };
@@ -1346,7 +1363,7 @@ function startServer(token, selfRoot) {
       root,
       bdw,
       workersCmd: join(root, 'scripts/beadskit/workers'),
-      runnerCmd: join(root, 'scripts/beadskit/ci/runner-server'),
+      runnerCmd: join(root, 'scripts/beadskit/ci/runner-pool'),
       wtDir: join(root, '.claude/worktrees'),
       bd: (args) => json(bdw, [...args, '--json'], root, env),
     };
@@ -1788,12 +1805,9 @@ function startServer(token, selfRoot) {
         // eigene Route: ssh zum Server dauert, ein Fehler soll das Board nicht stören
         try {
           const { stdout } = await run(t.runnerCmd, ['status', '--json'], { cwd: t.root, timeout: 30_000 });
-          const d = JSON.parse(stdout);
           return send(res, 200, {
-            runners: parseRunners(Array.isArray(d) ? d : d?.runners, cfg.slug),
-            queued: Number.isInteger(d?.queued) ? d.queued : null,
-            slice: parseSlice(d?.slice),
-            mysql: parseMysql(d?.mysql),
+            ...parsePool(JSON.parse(stdout)),
+            label: cfg.slug,
             at: new Date().toISOString(),
           });
         } catch (e) {
@@ -1884,7 +1898,7 @@ function startServer(token, selfRoot) {
         try { args = planRunnerAction(body); } catch (e) { return send(res, 400, { error: e.message }); }
         try {
           // add baut das Image und registriert, das dauert bis zu einigen Minuten
-          const r = await run(t.runnerCmd, args, { cwd: t.root, timeout: args[0] === 'add' ? 300_000 : 60_000 });
+          const r = await run(t.runnerCmd, args, { cwd: t.root, timeout: 60_000 });
           return send(res, 200, { ok: true, output: stripAnsi(`${r.stdout}${r.stderr}`).trim() });
         } catch (e) {
           return send(res, 409, { error: cmdOutput(e) });

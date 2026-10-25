@@ -80,6 +80,7 @@
   .runner.on .dot { background: var(--ok); }
   .runner.warn .dot { background: var(--warn); }
   .runner.missing { opacity: .7; }
+  .runner.other { opacity: .75; }
 
   /* Kennzahlen */
   .kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(118px, 1fr)); gap: 8px; }
@@ -431,11 +432,8 @@
     <h2>Worker <span class="sub muted" id="workers-n"></span></h2>
     <div class="roles" id="roles"></div>
 
-    <div id="runners-wrap" hidden><h2>CI-Runner <span class="sub muted" id="runners-n"></span>
-      <button class="small" data-ra="start" data-n="all" title="Alle Runner und die CI-MySQL auf dem Server einschalten">Alle an</button>
-      <button class="small" data-ra="stop" data-n="all" title="Alle Runner und die CI-MySQL ausschalten (verweigert bei laufenden Jobs)">Alle aus</button>
-      <button class="small" data-ra="add" title="Einen Runner mehr anlegen und starten (kleinste freie Nummer, höchstens 8, dauert etwa eine Minute)">+ Runner</button>
-      <button class="small danger" data-ra="delete" title="Den Runner mit der höchsten Nummer löschen (verweigert bei laufendem Job); einzelne Runner über „Löschen“ auf der Karte">− Runner</button></h2>
+    <div id="runners-wrap" hidden><h2>CI-Runner-Pool <span class="sub muted" id="runners-n"></span>
+      <span id="runners-ctl"></span></h2>
     <div class="runners" id="runners"><span class="muted" style="font-size:13px">lädt …</span></div></div>
   </section>
 
@@ -1009,42 +1007,35 @@ async function loadRunners(force = false) {
   } finally { loadRunners.busy = false; }
   renderRunners();
 }
+// Ein Einmal-Runner des gemeinsamen Pools: Projekt (Label), Job, CPU/RAM; das eigene Projekt hervorgehoben
 function runnerChip(r) {
-  const on = r.container === 'running';
-  const cls = r.container === 'missing' ? 'missing' : on && r.github === 'online' ? 'on' : on ? 'warn' : '';
-  const state = r.container === 'missing' ? 'nicht eingerichtet'
-    : on ? (r.github === 'online' ? 'an' : `an, GitHub ${r.github}`) : 'aus';
-  const toggle = r.container === 'missing'
-    ? '<span class="muted" style="font-size:12px" title="scripts/beadskit/ci/runner-server setup">setup nötig</span>'
-    : on ? `<button class="small danger" data-ra="stop" data-n="${r.n}">Ausschalten</button>`
-      : `<button class="small" data-ra="start" data-n="${r.n}">Einschalten</button>`;
-  const btn = `<span class="rbtns">${toggle}<button class="small danger" data-ra="delete" data-n="${r.n}"
-    title="Runner ${r.n} löschen: Container, Volume und Anmeldung bei GitHub (verweigert bei laufendem Job)">Löschen</button></span>`;
-  const use = on && (r.cpu != null || r.mem != null)
+  const own = r.label === runners?.label;
+  const state = r.busy ? 'Job' : r.github === 'starting' ? 'startet' : 'wartet auf Job';
+  const use = r.cpu != null || r.mem != null
     ? `<div class="use muted">CPU ${r.cpu != null ? `${Math.round(r.cpu)} %` : '?'} · RAM ${gib(r.mem)}</div>` : '';
   const j = r.job;
   const job = j
     ? `<div class="job" title="${esc(`${j.title}\n${j.branch}`)}">${j.url
       ? `<a href="${esc(j.url)}" target="_blank" rel="noopener">${esc(j.name)}</a>` : esc(j.name)}
       <span class="muted">· ${esc(j.branch)}${j.started ? ` · seit ${esc(dur(ms(j.started)))}` : ''}</span></div>`
-    : `<div class="job muted">${on ? 'wartet auf einen Job' : '–'}</div>`;
-  return `<div class="runner ${cls}${r.busy ? ' busy' : ''}"><div class="rhead"><span class="dot"></span>
-    <b>${esc(r.name)}</b><span class="muted">${esc(state)}</span>
-    ${r.busy ? '<span class="badge warn" title="arbeitet gerade an einem CI-Job">Job</span>' : ''}${btn}</div>${job}${use}</div>`;
+    : `<div class="job muted">${r.busy ? 'Job läuft' : 'wartet auf einen Job'}</div>`;
+  return `<div class="runner on${r.busy ? ' busy' : ''}${own ? '' : ' other'}"><div class="rhead"><span class="dot"></span>
+    <b>${esc(r.label)}</b><span class="muted" title="${esc(`${r.name} · ${r.repo}`)}">Platz ${esc(r.slot ?? '?')} · ${esc(state)}</span>
+    ${r.busy ? '<span class="badge warn" title="arbeitet gerade an einem CI-Job">Job</span>' : ''}</div>${job}${use}</div>`;
 }
 // CI-MySQL (RUNNER_MYSQL): eigene Zeile, An/Aus; stop verweigert der Server bei laufendem Job
 function mysqlChip(m) {
   const on = m.container === 'running';
   const state = m.container === 'missing' ? 'nicht eingerichtet' : on ? 'an' : 'aus';
   const btn = m.container === 'missing'
-    ? '<span class="muted" style="font-size:12px" title="scripts/beadskit/ci/runner-server setup">setup nötig</span>'
+    ? '<span class="muted" style="font-size:12px" title="scripts/beadskit/ci/runner-pool setup">setup nötig</span>'
     : on ? '<button class="small danger" data-ra="stop" data-n="mysql" title="Nur ausschalten, wenn kein Job DB-Tests braucht">Ausschalten</button>'
       : '<button class="small" data-ra="start" data-n="mysql">Einschalten</button>';
   const use = on && (m.cpu != null || m.mem != null)
     ? `<div class="use muted">CPU ${m.cpu != null ? `${Math.round(m.cpu)} %` : '?'} · RAM ${gib(m.mem)}</div>` : '';
   return `<div class="runner ${on ? 'on' : m.container === 'missing' ? 'missing' : ''}"><div class="rhead"><span class="dot"></span>
     <b>CI-MySQL</b><span class="muted">${esc(state)}</span><span class="rbtns">${btn}</span></div>
-    <div class="job muted">Datenbank für die DB-Tests der Runner</div>${use}</div>`;
+    <div class="job muted">Datenbank für die DB-Tests aller Projekte (Host mysql)</div>${use}</div>`;
 }
 const gib = (b) => (b != null ? `${(b / 2 ** 30).toFixed(1)} GiB` : '?');
 // „CI gesamt 380 % von 400 %, 9.1 GiB“: Auslastung der gemeinsamen Slice beadskit-ci.slice
@@ -1057,14 +1048,27 @@ function renderRunners() {
   if (runners?.error) {
     $('runners').innerHTML = `<span class="msg bad">${esc(runners.error)}</span>`;
     $('runners-n').textContent = '';
+    $('runners-ctl').innerHTML = '';
     return;
   }
-  const list = runners?.runners || [];
-  const on = list.filter((r) => r.container === 'running').length;
-  const queued = runners?.queued ? ` · ${runners.queued} Job${runners.queued === 1 ? '' : 's'} warten` : '';
-  $('runners-n').textContent = `${on} von ${list.length} an, ${list.filter((r) => r.busy).length} mit Job${queued}${sliceText(runners?.slice)} · Stand ${clock(runners?.at)}`;
-  const chips = [...list.map(runnerChip), ...(runners?.mysql ? [mysqlChip(runners.mysql)] : [])];
-  $('runners').innerHTML = chips.length ? chips.join('') : '<span class="muted" style="font-size:13px">keine</span>';
+  const p = runners || {};
+  const list = p.runners || [];
+  const on = p.service === 'active';
+  const busy = list.filter((r) => r.busy).length;
+  const wait = Object.entries(p.queued || {}).map(([l, n]) => `${l} ${n}`).join(', ');
+  const svc = p.service === 'missing' ? 'nicht eingerichtet' : on ? (p.token ? 'an' : 'an, Token fehlt') : 'aus';
+  $('runners-n').textContent = runners
+    ? `${svc} · ${busy} von ${p.slots ?? '?'} Plätzen mit Job${wait ? ` · wartend: ${wait}` : ''}${sliceText(p.slice)} · Stand ${clock(p.at)}`
+    : '';
+  const n = p.slots;
+  $('runners-ctl').innerHTML = !runners || p.service === 'missing' ? ''
+    : `${Number.isInteger(n) ? `<button class="small" data-ra="size" data-n="${n - 1}" ${n > 1 ? '' : 'disabled'} title="Ein Platz weniger (laufende Jobs laufen zu Ende)">− Platz</button>
+      <button class="small" data-ra="size" data-n="${n + 1}" ${n < 8 ? '' : 'disabled'} title="Ein Platz mehr (höchstens 8; die CI bleibt im Deckel der Slice)">+ Platz</button>` : ''}
+      ${on ? '<button class="small danger" data-ra="stop" title="Keine neuen Runner starten; laufende Jobs laufen zu Ende">Pool aus</button>'
+        : '<button class="small" data-ra="start">Pool an</button>'}`;
+  const chips = [...list.map(runnerChip), ...(p.mysql ? [mysqlChip(p.mysql)] : [])];
+  $('runners').innerHTML = chips.length ? chips.join('')
+    : `<span class="muted" style="font-size:13px">${p.service === 'missing' ? 'Pool nicht eingerichtet: scripts/beadskit/ci/runner-pool setup' : 'kein Runner aktiv, startet bei Bedarf'}</span>`;
 }
 
 // ---- Laden ----
@@ -1446,16 +1450,10 @@ document.addEventListener('click', async (e) => {
   const ra = e.target.closest('button[data-ra]');
   if (ra) {
     const action = ra.dataset.ra;
-    const n = ['all', 'mysql'].includes(ra.dataset.n) ? ra.dataset.n : ra.dataset.n ? Number(ra.dataset.n) : undefined;
+    const n = ra.dataset.n === 'mysql' ? 'mysql' : ra.dataset.n ? Number(ra.dataset.n) : undefined;
     const force = !!ra.dataset.force;
-    const nums = (runners?.runners || []).map((r) => r.n);
-    const ask = force ? 'Job abbrechen?' : {
-      stop: `${n === 'all' ? 'alle (mit CI-MySQL)' : n === 'mysql' ? 'CI-MySQL' : `Runner ${n}`} aus?`,
-      add: 'Runner anlegen?',
-      delete: `Runner ${n ?? (nums.length ? Math.max(...nums) : '?')} löschen?`,
-    }[action];
+    const ask = force ? 'Job abbrechen?' : action === 'stop' ? `${n === 'mysql' ? 'CI-MySQL' : 'Pool'} aus?` : null;
     if (ask && !armed(ra, ask)) return;
-    if (action === 'add') toast('Runner wird angelegt, das dauert etwa eine Minute …');
     ra.disabled = true;
     try {
       const r = await post('/api/runners', { action: ra.dataset.ra, n, force });
@@ -1463,8 +1461,8 @@ document.addEventListener('click', async (e) => {
       await loadRunners(true);
     } catch (err) {
       toast(err.message, true);
-      // verweigert (Job läuft oder letzter Runner): beim nächsten Klick mit --force
-      if (err.status === 409 && (action === 'stop' || action === 'delete') && !force && ra.isConnected) {
+      // CI-MySQL verweigert (Job läuft): beim nächsten Klick mit --force
+      if (err.status === 409 && action === 'stop' && n === 'mysql' && !force && ra.isConnected) {
         ra.dataset.force = '1'; ra.textContent = 'Trotzdem (--force)';
       }
     } finally { ra.disabled = false; }

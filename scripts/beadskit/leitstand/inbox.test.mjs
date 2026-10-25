@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import {
   buildWorkspaces, cardExtras, clientIp, groupIssues, isOwnHost, isPagePath, isSameOrigin, labelSlug, loginGuard, metrics,
-  normalizeConfig, normalizeExt, parseCookies, parseProjectList, parseMysql, parseRunners, parseSlice, parseWorkers, planCreate, planDecision,
+  normalizeConfig, normalizeExt, parseCookies, parseProjectList, parseMysql, parsePool, parseSlice, parseWorkers, planCreate, planDecision,
   planIssueAction, planRestarts, planRunnerAction, planWorkerAction, prSummary, publicConfig, readBody, repoOfIssue,
   RESTART_COOLDOWN_MS, safeEqual, signSession, today, verifySession, hashPassword, parsePasswordLine, verifyPassword,
   workerRe, wsOfIssue, parseHostsConf, mapRoot, shQuote, remoteCommand, mergeHostWorkers, parseMarkers, routeWorkerAction,
@@ -85,24 +85,16 @@ test('Text mit Optionen bleibt ein einzelnes Argument', () => {
 
 const NOW = Date.parse('2026-10-16T12:00:00Z');
 
-test('planRunnerAction: start/stop für Nummer oder all, --force nur bei stop', () => {
-  assert.deepEqual(planRunnerAction({ action: 'start', n: 4 }), ['start', '4']);
-  assert.deepEqual(planRunnerAction({ action: 'start', n: 'all', force: true }), ['start', 'all']);
-  assert.deepEqual(planRunnerAction({ action: 'stop', n: 2, force: true }), ['stop', '2', '--force']);
-  assert.deepEqual(planRunnerAction({ action: 'stop', n: 'all' }), ['stop', 'all']);
-  assert.throws(() => planRunnerAction({ action: 'remove', n: 1 }), /Aktion/);
-  assert.deepEqual(planRunnerAction({ action: 'add', n: '--force' }), ['add']);
-  assert.deepEqual(planRunnerAction({ action: 'delete' }), ['delete']);
-  assert.deepEqual(planRunnerAction({ action: 'delete', force: true }), ['delete', '--force']);
-  assert.deepEqual(planRunnerAction({ action: 'delete', n: 3, force: true }), ['delete', '3', '--force']);
-  assert.deepEqual(planRunnerAction({ action: 'delete', n: 5 }), ['delete', '5']);
-  for (const n of [0, 9, 'all', '3', 1.5]) assert.throws(() => planRunnerAction({ action: 'delete', n }), /1–8/);
+test('planRunnerAction: Plätze 1–8, Pool und CI-MySQL an/aus, --force nur bei stop mysql', () => {
+  assert.deepEqual(planRunnerAction({ action: 'size', n: 3 }), ['size', '3']);
+  for (const n of [0, 9, '3', 1.5, undefined]) assert.throws(() => planRunnerAction({ action: 'size', n }), /1–8/);
+  assert.deepEqual(planRunnerAction({ action: 'start' }), ['start']);
+  assert.deepEqual(planRunnerAction({ action: 'stop', force: true }), ['stop']);
+  assert.deepEqual(planRunnerAction({ action: 'start', n: 'mysql', force: true }), ['start', 'mysql']);
   assert.deepEqual(planRunnerAction({ action: 'stop', n: 'mysql', force: true }), ['stop', 'mysql', '--force']);
-  assert.deepEqual(planRunnerAction({ action: 'start', n: 'mysql' }), ['start', 'mysql']);
-  assert.throws(() => planRunnerAction({ action: 'delete', n: 'mysql' }), /1–8/);
-  for (const n of [0, 9, 1.5, '3', '--force', undefined]) {
-    assert.throws(() => planRunnerAction({ action: 'stop', n }), /1–8/);
-  }
+  assert.deepEqual(planRunnerAction({ action: 'stop', n: 'mysql' }), ['stop', 'mysql']);
+  for (const n of [1, 'all', '--force']) assert.throws(() => planRunnerAction({ action: 'stop', n }), /Pool oder mysql/);
+  for (const action of ['add', 'delete', 'remove', 'setup']) assert.throws(() => planRunnerAction({ action }), /Aktion/);
 });
 
 test('prSummary: CI-Zustand aus den Checks, übersprungene ausgeblendet', () => {
@@ -447,29 +439,33 @@ test('planWorkerAction send: eine Zeile ohne Steuerzeichen, nur gültige Worker'
   assert.throws(() => p({ action: 'send', name: '--all', text: 'hi' }), /Worker/);
 });
 
-test('parseRunners: sortiert, füllt fehlende Felder mit dem Projekt-Slug, verwirft Ungültiges', () => {
-  assert.deepEqual(parseRunners([
-    { n: 2, name: 'spot-runner-2', container: 'exited', github: 'offline', busy: false },
-    { n: 1, container: 'running', github: 'online', busy: true, cpu: 187.5, mem: 1400000000, job: {
-      name: 'App', branch: 'fix/x', title: 'Fix X', url: 'https://github.com/o/r/actions/runs/1/job/2',
-      started: '2026-10-18T21:00:00Z', extra: 1,
-    } },
-    { n: 4, job: { name: 'Admin', url: 'javascript:alert(1)' } },
-    { n: 'x' }, null, { n: 12 },
-    { n: 3, busy: 'true', cpu: -1, mem: '5' },
-  ], 'spot'), [
-    { n: 1, name: 'spot-runner-1', container: 'running', github: 'online', busy: true, job: {
-      name: 'App', branch: 'fix/x', title: 'Fix X', url: 'https://github.com/o/r/actions/runs/1/job/2',
-      started: '2026-10-18T21:00:00Z',
-    }, cpu: 187.5, mem: 1400000000 },
-    { n: 2, name: 'spot-runner-2', container: 'exited', github: 'offline', busy: false, job: null, cpu: null, mem: null },
-    { n: 3, name: 'spot-runner-3', container: 'missing', github: 'missing', busy: false, job: null, cpu: null, mem: null },
-    { n: 4, name: 'spot-runner-4', container: 'missing', github: 'missing', busy: false, job: {
-      name: 'Admin', branch: '', title: '', url: null, started: null,
-    }, cpu: null, mem: null },
-  ]);
-  assert.equal(parseRunners([{ n: 1 }], 'regiehub')[0].name, 'regiehub-runner-1');
-  assert.deepEqual(parseRunners(null), []);
+test('parsePool: Dienst, Plätze, Pool-Runner nach Platz, wartende Jobs, verwirft Ungültiges', () => {
+  const p = parsePool({
+    service: 'active', token: true, slots: 4, at: '2026-10-25T22:00:00Z',
+    repos: [{ repo: 'o/spot', label: 'spot' }, { repo: 1 }],
+    queued: { spot: 2, regiehub: 0, x: 'viele' },
+    runners: [
+      { name: 'pool-regiehub-1-2', label: 'regiehub', repo: 'o/BrightHub', slot: '2', busy: false, github: 'online', cpu: 3.5, mem: 7e8 },
+      { name: 'pool-spot-1-1', label: 'spot', repo: 'o/spot', slot: '1', busy: true, github: 'online', job: {
+        name: 'Backend', branch: 'fix/x', title: 'Fix', url: 'javascript:x', started: '2026-10-25T21:59:00Z' } },
+      { name: 'spot-runner-1' }, null,
+    ],
+    mysql: { container: 'running', cpu: 1, mem: 2 },
+    slice: { cpuPct: 120, cpus: 4, mem: 3e9 },
+  });
+  assert.equal(p.service, 'active');
+  assert.equal(p.slots, 4);
+  assert.deepEqual(p.repos, [{ repo: 'o/spot', label: 'spot' }]);
+  assert.deepEqual(p.queued, { spot: 2 });
+  assert.deepEqual(p.runners.map((r) => [r.name, r.slot, r.busy]), [['pool-spot-1-1', 1, true], ['pool-regiehub-1-2', 2, false]]);
+  assert.equal(p.runners[0].job.url, null);
+  assert.equal(p.runners[0].cpu, null);
+  assert.equal(p.runners[1].mem, 7e8);
+  assert.deepEqual(p.mysql, { container: 'running', cpu: 1, mem: 2 });
+  assert.deepEqual(p.slice, { cpuPct: 120, cpus: 4, mem: 3e9 });
+  const empty = parsePool(null);
+  assert.deepEqual([empty.service, empty.token, empty.slots, empty.runners, empty.mysql], ['missing', false, null, [], null]);
+  assert.equal(parsePool({ slots: 12 }).slots, null);
 });
 
 test('parseMysql: Zustand, CPU und RAM der CI-MySQL, null ohne', () => {
