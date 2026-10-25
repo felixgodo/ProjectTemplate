@@ -15,7 +15,7 @@ const SCRIPT = join(dirname(fileURLToPath(import.meta.url)), 'runner-server');
 function dryRun(env = {}) {
   return spawnSync('sh', [SCRIPT, 'setup', '--dry-run'], {
     encoding: 'utf8',
-    env: { ...process.env, RUNNER_COUNT: '2', RUNNER_REPO: 'owner/repo', RUNNER_LABEL: 'demo', ...env },
+    env: { ...process.env, BK_PROJECT_FILE: '/dev/null', RUNNER_COUNT: '2', RUNNER_REPO: 'owner/repo', RUNNER_LABEL: 'demo', ...env },
   });
 }
 
@@ -85,7 +85,7 @@ esac
   writeFileSync(join(dir, 'gh'), '#!/bin/sh\ncase "$*" in *from_entries*) echo "${GH_RUNNERS:-{\\}}" ;; esac\n');
   chmodSync(join(dir, 'ssh'), 0o755);
   chmodSync(join(dir, 'gh'), 0o755);
-  const env = { ...process.env, PATH: `${dir}:${process.env.PATH}`, RUNNERS: runners, LOG: log, RUNNER_REPO: 'owner/repo', RUNNER_LABEL: 'demo', PS: '', ...extra };
+  const env = { ...process.env, PATH: `${dir}:${process.env.PATH}`, RUNNERS: runners, LOG: log, RUNNER_REPO: 'owner/repo', RUNNER_LABEL: 'demo', BK_PROJECT_FILE: '/dev/null', PS: '', ...extra };
   delete env.RUNNER_COUNT;
   const r = spawnSync('sh', [SCRIPT, ...args], { encoding: 'utf8', env });
   let remote = '';

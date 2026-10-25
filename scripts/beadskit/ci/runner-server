@@ -50,8 +50,10 @@ set -eu
 ROOT=$(git -C "$(dirname "$0")" rev-parse --path-format=absolute --git-common-dir)
 ROOT=$(dirname "$ROOT")
 BK_SLUG=""
+# BK_PROJECT_FILE: andere Projektdatei (Tests: /dev/null, damit die Einstellungen des Projekts nicht greifen)
+PROJECT_FILE=${BK_PROJECT_FILE:-$ROOT/beads.project.sh}
 # shellcheck source=/dev/null
-[ ! -f "$ROOT/beads.project.sh" ] || . "$ROOT/beads.project.sh"
+[ ! -f "$PROJECT_FILE" ] || . "$PROJECT_FILE"
 SSH_HOST=${RUNNER_SSH_HOST:-server}
 REPO=${RUNNER_REPO:-$(cd "$ROOT" && gh repo view --json nameWithOwner --jq .nameWithOwner 2>/dev/null || true)}
 LABEL=${RUNNER_LABEL:-$BK_SLUG}
