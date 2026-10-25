@@ -15,6 +15,8 @@
 #   workers restart <name> [--force] [--term …] [--dry-run]   Worker mit frischem Kontext neu starten
 #   workers autorestart [--over 200k] [--off]   Leitstand startet große Kontexte selbst neu
 #   workers send <name> [--] <text>   Nachricht oder /befehl in das Terminal eines Workers tippen
+#   workers screen <name> [--lines N]   Bildschirm des Terminals eines Workers (z. B. eine Rückfrage)
+#   workers press <name> <1-9|Escape|Enter>   eine Taste ohne Enter senden (Rückfrage beantworten)
 #   workers repo-for <issue-id>   Repo-Pfad, in dem das Issue bearbeitet wird (BK_REPOS)
 #   workers config              Projekt-Konfiguration als JSON (für den Leitstand)
 #   workers top [slug…] [--once]   Live-Übersicht aller Projekte und Worker im Terminal (q beendet)
@@ -287,7 +289,7 @@ worker_name() { echo "$1-$((BK_HOST_BASE + $2))"; }
 term_cmd() { echo "cd '$ROOT' && claude -w $2 -n $2 '$(prompt_for "$1")'"; }
 
 usage() {
-  sed -n '7,20s/^# \{0,1\}//p' "$0" >&2
+  sed -n '7,22s/^# \{0,1\}//p' "$0" >&2
   exit 2
 }
 
@@ -815,6 +817,107 @@ tty_of() {
   case $t in ''|'?'|'??') ;; /dev/*) echo "$t" ;; *) echo "/dev/$t" ;; esac
 }
 
+# tmux-Pane mit diesem TTY, leer ohne tmux bzw. ohne passendes Pane
+tmux_pane() {
+  command -v tmux >/dev/null 2>&1 || return 0
+  tmux list-panes -a -F '#{pane_tty} #{pane_id}' 2>/dev/null | awk -v t="$1" '$1 == t { print $2; exit }'
+}
+
+# Text auf dem Bildschirm des Terminals mit diesem TTY (tmux-Pane oder iTerm-Session); Exit 1 ohne
+term_screen() {
+  pane=$(tmux_pane "$1")
+  if [ -n "$pane" ]; then tmux capture-pane -p -J -t "$pane"; return; fi
+  [ "$UNAME" = Darwin ] || return 1
+  osascript - "$1" <<'APPLESCRIPT'
+    on run argv
+      tell application "iTerm"
+        repeat with w in windows
+          repeat with t in tabs of w
+            repeat with s in sessions of t
+              if tty of s is (item 1 of argv) then return contents of s
+            end repeat
+          end repeat
+        end repeat
+      end tell
+      error "kein iTerm-Tab mit " & (item 1 of argv) number 1
+    end run
+APPLESCRIPT
+}
+
+# Eine Taste (1–9, Escape, Enter) ohne Enter an das Terminal mit diesem TTY; Exit 1 ohne
+term_press() {
+  pane=$(tmux_pane "$1")
+  if [ -n "$pane" ]; then tmux send-keys -t "$pane" "$2"; return; fi
+  [ "$UNAME" = Darwin ] || return 1
+  osascript - "$1" "$2" >/dev/null <<'APPLESCRIPT'
+    on run argv
+      set k to item 2 of argv
+      tell application "iTerm"
+        repeat with w in windows
+          repeat with t in tabs of w
+            repeat with s in sessions of t
+              if tty of s is (item 1 of argv) then
+                if k is "Enter" then
+                  tell s to write text ""
+                else if k is "Escape" then
+                  tell s to write text (ASCII character 27) newline no
+                else
+                  tell s to write text k newline no
+                end if
+                return
+              end if
+            end repeat
+          end repeat
+        end repeat
+      end tell
+      error "kein iTerm-Tab mit " & (item 1 of argv) number 1
+    end run
+APPLESCRIPT
+}
+
+# TTY eines laufenden Terminal-Workers; bricht mit Hinweis ab (unbekannt, Hintergrund, kein Terminal)
+worker_tty() {
+  line=$(running | awk -v n="$1" '$1 == n { print; exit }')
+  [ -n "$line" ] || { echo "kein laufender Worker $1 (scripts/beadskit/workers ls)" >&2; exit 1; }
+  # shellcheck disable=SC2086 # Absicht: "<worktree> <kind> <status> <name> <pid> <ref>" zerlegen
+  set -- $line
+  if [ "$2" = background ]; then
+    echo "$1 läuft im Hintergrund: nur über scripts/beadskit/workers attach $1" >&2
+    exit 1
+  fi
+  t=$(tty_of "$5")
+  [ -n "$t" ] || { echo "$1: kein Terminal zur PID $5 gefunden" >&2; exit 1; }
+  echo "$t"
+}
+
+cmd_screen() {
+  target="" lines=40
+  while [ $# -gt 0 ]; do
+    case $1 in
+      --lines) [ $# -ge 2 ] || usage; lines=$2; shift ;;
+      --lines=*) lines=${1#*=} ;;
+      -*) usage ;;
+      *) [ -z "$target" ] || usage; target=$1 ;;
+    esac
+    shift
+  done
+  [ -n "$target" ] || usage
+  case $lines in ''|*[!0-9]*) echo "--lines: Zahl" >&2; exit 2 ;; esac
+  tty=$(worker_tty "$target")
+  out=$(term_screen "$tty") || { echo "$target: kein Terminal mit $tty (iTerm-Tab, tmux-Fenster)" >&2; exit 1; }
+  # Leerzeilen am Ende weg (tmux füllt bis zur Fensterhöhe auf)
+  printf '%s\n' "$out" | sed -e :a -e '/^[[:space:]]*$/{$d;N;ba' -e '}' | tail -n "$lines"
+}
+
+# Beantwortet eine Rückfrage im Terminal eines Workers mit einer einzelnen Taste
+cmd_press() {
+  [ $# = 2 ] || usage
+  case $2 in [1-9]|Escape|Enter) ;; *) echo "Taste: 1–9, Escape oder Enter" >&2; exit 2 ;; esac
+  tty=$(worker_tty "$1")
+  term_press "$tty" "$2" || { echo "$1: kein Terminal mit $tty (iTerm-Tab, tmux-Fenster)" >&2; exit 1; }
+  echo "$2 an $1 gesendet"
+}
+
 # Schreibt Text (mit Enter) in das Terminal mit diesem TTY: ein tmux-Pane oder eine
 # iTerm-Session. Ohne Text nur Prüfung, ob es das gibt. Exit 1 ohne passendes Terminal.
 term_write() {
@@ -1075,6 +1178,8 @@ case $sub in
   restart) cmd_restart "$@" ;;
   autorestart) cmd_autorestart "$@" ;;
   send) cmd_send "$@" ;;
+  screen) cmd_screen "$@" ;;
+  press) cmd_press "$@" ;;
   repo-for) [ $# = 1 ] || usage; cmd_repo_for "$1" ;;
   config) cmd_config ;;
   top) exec node "$KIT/leitstand/top.mjs" "$@" ;;

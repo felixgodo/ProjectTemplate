@@ -7,7 +7,9 @@ import {
   planIssueAction, planRestarts, planRunnerAction, planWorkerAction, prSummary, publicConfig, readBody, repoOfIssue,
   RESTART_COOLDOWN_MS, safeEqual, signSession, today, verifySession, hashPassword, parsePasswordLine, verifyPassword,
   workerRe, wsOfIssue, parseHostsConf, mapRoot, shQuote, remoteCommand, mergeHostWorkers, parseMarkers, routeWorkerAction,
+  parsePrompt,
 } from './inbox.mjs';
+import { readFileSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { chatTranscript, summarizeTranscript, toolSummary, transcriptPath } from './sessions.mjs';
 
@@ -772,4 +774,32 @@ test('normalizeConfig: markers kv nur ausdrücklich, publicConfig ohne markers',
   assert.equal(normalizeConfig({ root: '/r', slug: 's', markers: 'kv' }).markers, 'kv');
   assert.equal(normalizeConfig({ root: '/r', slug: 's', markers: 'x' }).markers, 'file');
   assert.equal('markers' in publicConfig(normalizeConfig({ root: '/r', slug: 's', markers: 'kv' })), false);
+});
+
+// ---- Rückfragen ----
+test('parsePrompt: Frage, Optionen (mehrzeilig, ❯), Grund und Befehl aus einem echten tmux-Bildschirm', () => {
+  const r = parsePrompt(readFileSync(new URL('./testdata/prompt-proceed.txt', import.meta.url), 'utf8'));
+  assert.equal(r.question, 'Do you want to proceed?');
+  assert.deepEqual(r.options.map((o) => [o.key, o.selected]), [['1', true], ['2', false], ['3', false]]);
+  assert.equal(r.options[1].label, 'Yes, and always allow access to /home/felixoben/IdeaProjects/ScriptPress/frontend/sdk from this project');
+  assert.equal(r.context.at(-1), 'allowed working directories');
+  assert.match(r.context[0], /fix-102\/node_modules\/$/);
+  assert.match(r.command.at(-1), /npm run test:press/);
+});
+
+test('parsePrompt: ohne Auswahl null, nummerierte Liste mitten im Text ohne 1. null', () => {
+  assert.equal(parsePrompt(''), null);
+  assert.equal(parsePrompt('● Fertig.\n\n❯ \n'), null);
+  assert.equal(parsePrompt(' 2. zwei\n 3. drei\n'), null);
+  const simple = parsePrompt(' Weiter?\n ❯ 1. Ja\n   2. Nein\n\n Esc to cancel\n');
+  assert.deepEqual([simple.question, simple.options.map((o) => o.label), simple.context, simple.command], ['Weiter?', ['Ja', 'Nein'], [], []]);
+});
+
+test('planWorkerAction press: nur erlaubte Tasten, Route an den Rechner des Workers', () => {
+  assert.deepEqual(planWorkerAction({ action: 'press', name: 'fix-2', text: '2' }, WS), ['press', 'fix-2', '2']);
+  assert.deepEqual(planWorkerAction({ action: 'press', name: 'fix-2', text: 'Escape' }, WS), ['press', 'fix-2', 'Escape']);
+  for (const t of ['0', '22', 'y', '; rm', '', undefined]) assert.throws(() => planWorkerAction({ action: 'press', name: 'fix-2', text: t }, WS), /Taste/);
+  assert.throws(() => planWorkerAction({ action: 'press', name: 'x', text: '1' }, WS), /Worker/);
+  const hosts = [{ name: 'mac', ok: true }, { name: 'pc', ok: true }];
+  assert.deepEqual(routeWorkerAction({ action: 'press', name: 'fix-101' }, { hosts, self: 'pc', workers: [{ name: 'fix-101', host: 'pc' }] }), ['pc']);
 });

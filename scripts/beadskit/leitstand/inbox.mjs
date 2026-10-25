@@ -354,6 +354,11 @@ export function planWorkerAction({ action, role, name, force, off, counts, thres
     case 'restart':
       if (typeof name !== 'string' || !re.test(name)) throw new Error('unbekannter Worker');
       return [action, name, ...(force ? ['--force'] : [])];
+    case 'press': {
+      if (typeof name !== 'string' || !re.test(name)) throw new Error('unbekannter Worker');
+      if (!PRESS_KEYS.includes(text)) throw new Error('Taste: 1–9, Escape oder Enter');
+      return ['press', name, text];
+    }
     case 'send': {
       if (typeof name !== 'string' || !re.test(name)) throw new Error('unbekannter Worker');
       // eine Zeile: Enter im Tab schickt ab, Steuerzeichen würden die Oberfläche bedienen
@@ -520,6 +525,67 @@ export function parseWorkers(agents, wtDir, workspaces) {
 
 const HOST_RE = /^[a-z0-9]{1,20}$/;
 
+/** Tasten, die der Leitstand an eine Rückfrage schicken darf (workers press). */
+export const PRESS_KEYS = ['1', '2', '3', '4', '5', '6', '7', '8', '9', 'Escape', 'Enter'];
+
+const OPTION_RE = /^\s*(?:[❯›>]\s*)?([1-9])\.\s+(.+?)\s*$/;
+const SEPARATOR_RE = /^\s*[─━╌┄═╭╰]{8,}/;
+const unframe = (l) => l.replace(/^\s*[│┃]\s?/, '').replace(/\s*[│┃]\s*$/, '').replace(/\s+$/, '');
+
+/**
+ * Rückfrage auf dem Bildschirm eines Workers (Ausgabe von `workers screen`): die letzte
+ * nummerierte Auswahl (1., 2., … mit ❯ an der aktuellen), die Frage darüber und deren Kontext bis
+ * zur letzten Trennlinie. null, wenn keine Auswahl zu sehen ist.
+ */
+export function parsePrompt(screen) {
+  const lines = String(screen || '').split('\n').map((l) => l.replace(/\s+$/, ''));
+  let last = -1;
+  for (let i = lines.length - 1; i >= 0; i--) if (OPTION_RE.test(lines[i])) { last = i; break; }
+  if (last < 0) return null;
+  let first = last;
+  while (first > 0 && OPTION_RE.exec(lines[first])?.[1] !== '1') first--;
+  if (OPTION_RE.exec(lines[first])?.[1] !== '1') return null;
+  const options = [];
+  for (let i = first; i < lines.length; i++) {
+    const m = OPTION_RE.exec(lines[i]);
+    if (m) {
+      if (Number(m[1]) !== options.length + 1) break;
+      options.push({ key: m[1], label: m[2].trim(), selected: /^\s*[❯›>]/.test(lines[i]) });
+    } else if (i > last && (!lines[i].trim() || /^\s*Esc to/.test(lines[i]))) {
+      break;
+    } else if (lines[i].trim() && /^\s{4,}/.test(lines[i]) && options.length) {
+      options.at(-1).label += ` ${lines[i].trim()}`;
+    } else if (!lines[i].trim()) {
+      continue;
+    } else {
+      break;
+    }
+  }
+  if (options.length < 2) return null;
+  // Frage: erste nicht leere Zeile über der Auswahl; Kontext darüber bis zur Trennlinie
+  let q = first - 1;
+  while (q >= 0 && !unframe(lines[q]).trim()) q--;
+  const question = q >= 0 ? unframe(lines[q]).trim() : '';
+  const trim = (list) => {
+    while (list.length && !list[0].trim()) list.shift();
+    while (list.length && !list.at(-1).trim()) list.pop();
+    return list;
+  };
+  const context = [];
+  let sep = -1;
+  for (let i = q - 1; i >= 0 && context.length < 14; i--) {
+    if (SEPARATOR_RE.test(lines[i])) { sep = i; break; }
+    context.unshift(unframe(lines[i]));
+  }
+  // darüber, bis zur nächsten Trennlinie oder Kopfzeile: der Befehl, um den es geht (Ende davon)
+  const command = [];
+  for (let i = sep - 1; i >= 0 && command.length < 40; i--) {
+    if (SEPARATOR_RE.test(lines[i]) || !/^\s*[│┃]/.test(lines[i])) break;
+    command.unshift(unframe(lines[i]));
+  }
+  return { question, options, context: trim(context), command: trim(command).slice(-12) };
+}
+
 /**
  * Zwei Rechner (~/.config/beadskit/hosts.conf, Zeilen NAME=wert): Leitrechner, dieser Rechner und
  * je Rechner ssh-Ziel (HOST_<h>_SSH, Standard der Name) und Projektordner (HOST_<h>_ROOT). null
@@ -612,7 +678,7 @@ export function parseMarkers(kv, roles = [], hosts = []) {
 /**
  * Auf welchen Rechnern eine Worker-Aktion läuft. start/add: der gewählte (Standard dieser),
  * stop --all: alle erreichbaren, stop/restart/send: der, auf dem der Worker läuft, drain und
- * autorestart: dieser (die Markierungen liegen in der gemeinsamen Datenbank).
+ * autorestart: dieser (die Markierungen liegen in der gemeinsamen Datenbank). press wie send.
  */
 export function routeWorkerAction({ action, name, host }, { hosts = [], self = null, workers = [] } = {}) {
   if (!hosts.length) return [null];
@@ -623,7 +689,7 @@ export function routeWorkerAction({ action, name, host }, { hosts = [], self = n
     return [h];
   }
   if (action === 'stop' && name === 'all') return hosts.filter((h) => h.ok !== false).map((h) => h.name);
-  if (['stop', 'restart', 'send'].includes(action)) {
+  if (['stop', 'restart', 'send', 'press'].includes(action)) {
     const w = workers.find((x) => x.name === name);
     if (!w) throw new Error(`Worker ${name} läuft auf keinem Rechner`);
     return [w.host];
@@ -1305,11 +1371,16 @@ function startServer(token, selfRoot) {
     // Claims aller Workspaces: die Worker-Karten zeigen auch Worker des anderen Workspaces
     const live = (issues || []).filter((i) => isBoardIssue(i) && i.status === 'in_progress');
     const { workers, hosts } = withIssues(p, perHost, live, drain);
+    // Rückfragen: Bildschirm der wartenden Terminal-Worker auf ihrem Rechner lesen
+    await Promise.all(workers.filter((w) => w.status === 'waiting' && w.kind === 'terminal').map(async (w) => {
+      w.ask = await askOf(p, conf, w);
+    }));
     // offene Entscheidungen je Workspace, für den Umschalter
     const attention = Object.fromEntries(Object.keys(workspaces).map((w) => [w, 0]));
     for (const i of issues || []) {
       if (isBoardIssue(i) && (i.labels || []).includes('human') && !['closed', 'deferred'].includes(i.status)) attention[wsOfIssue(i, workspaces)] += 1;
     }
+    for (const w of workers) if (w.ask && Object.hasOwn(attention, w.ws)) attention[w.ws] += 1;
     const panels = [];
     for (const panel of ext.panels.filter((x) => !x.ws || x.ws === ws.name)) {
       let items = [];
@@ -1350,6 +1421,22 @@ function startServer(token, selfRoot) {
         ...hosts.filter((h) => !h.ok).map((h) => (conf ? `Rechner ${h.name}: ${h.error}` : h.error))].filter(Boolean),
       at: new Date().toISOString(),
     };
+  }
+
+  // Rückfrage eines wartenden Workers: erkannte Auswahl oder die letzten Bildschirmzeilen; 2 s je Worker
+  const askCache = new Map();
+  async function askOf(p, conf, w) {
+    const key = `${p.cfg.slug}/${w.host}/${w.name}`;
+    const hit = askCache.get(key);
+    if (hit && Date.now() - hit.at < 2_000) return hit.value;
+    let value = null;
+    try {
+      const { stdout } = await onHost(conf, w.host, p.cfg.root, 'scripts/beadskit/workers', ['screen', w.name, '--lines', '40'], { timeout: 10_000 });
+      const prompt = parsePrompt(stdout);
+      value = prompt || { question: null, options: [], context: [], screen: stdout.split('\n').slice(-14) };
+    } catch { /* Terminal nicht lesbar: nur der Status „waiting“ */ }
+    askCache.set(key, { at: Date.now(), value });
+    return value;
   }
 
   // Worker auf irgendeinem Rechner; null, wenn er nirgends läuft
@@ -1567,7 +1654,7 @@ function startServer(token, selfRoot) {
         let targets;
         try {
           args = planWorkerAction(body, workspaces, conf ? conf.hosts.map((h) => h.name) : []);
-          const needs = ['stop', 'restart', 'send'].includes(body.action);
+          const needs = ['stop', 'restart', 'send', 'press'].includes(body.action);
           const perHost = conf && needs ? await hostWorkers(p, conf) : [];
           const { workers, hosts } = mergeHostWorkers(perHost, workspaces);
           targets = routeWorkerAction(body, { hosts: conf ? (needs ? hosts : conf.hosts) : [], self: conf?.self, workers });

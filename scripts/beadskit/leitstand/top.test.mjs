@@ -132,3 +132,15 @@ test('wenig Höhe: erst kürzere Listen, dann ohne Worker-Text und PRs, nie höh
   const small = renderOverview(full, { width: 200, height: 14, color: false, now });
   assert.doesNotMatch(small, /spot-h7/);
 });
+
+test('Rückfrage: Status Frage, Zeile mit Frage und Antworten, Hinweis in der Kopfzeile', () => {
+  const ask = { question: 'Do you want to proceed?', options: [{ key: '1', label: 'Yes' }, { key: '2', label: 'No' }], context: ['outside the allowed working directories'] };
+  const d = { ...data, projects: [{ ...data.projects[0], workers: [worker('fix-102', { status: 'waiting', ask })] }] };
+  const t = renderOverview(d, { width: 160, color: false, now });
+  assert.match(t, /❓ 1 Rückfrage wartet auf dich/);
+  assert.match(t, /fix-102 +pc +❓ Frage/);
+  assert.match(t, /↳ ❓ Do you want to proceed\? +1 Yes · 2 No/);
+  assert.match(t, /outside the allowed working directories/);
+  // auch auf der kleinsten Stufe bleibt die Frage
+  assert.match(renderOverview(d, { width: 160, height: 3, color: false, now }), /↳ ❓ Do you want to proceed/);
+});
