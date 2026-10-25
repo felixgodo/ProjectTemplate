@@ -129,6 +129,12 @@
   .card.ask .opts button { text-align: left; max-width: 100%; white-space: normal; }
   .card.ask .opts button .k { font-weight: 700; margin-right: 6px; }
   .badge.ask { background: var(--warn); color: #fff; font-weight: 700; animation: pulse 1.6s infinite; }
+  /* Optionen eines human-Issues: Knopf je Option, Wahl landet im Entscheidungsfeld */
+  .choices { display: grid; gap: 6px; margin: 8px 0 4px; }
+  .choices button { text-align: left; white-space: normal; display: flex; gap: 8px; align-items: baseline; }
+  .choices button .k { font-weight: 700; min-width: 1.2em; }
+  .choices button.on { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 14%, var(--panel)); }
+  .card.decide button.ready { outline: 2px solid var(--accent); outline-offset: 2px; }
   .card-head { display: flex; gap: 10px; align-items: baseline; flex-wrap: wrap; }
   .id { font: 600 12.5px ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--muted); }
   .title { font-weight: 600; flex: 1 1 320px; }
@@ -610,10 +616,14 @@ function renderInbox(items) {
         <summary>Beschreibung</summary><div class="text">${esc(it.description || '–')}</div>
       </details>
       ${it.notes ? `<details><summary>Notizen</summary><div class="text">${esc(it.notes)}</div></details>` : ''}
+      ${it.decision?.options?.length ? `<div class="choices">${it.decision.options.map((o) => `<button data-choose="${esc(o.key)}" data-label="${esc(o.label)}"
+          title="Option ${esc(o.key)} ins Entscheidungsfeld übernehmen (Taste ${esc(o.key)} auf der obersten Karte)"><span class="k">${esc(o.key)}</span><span>${esc(o.label)}</span></button>`).join('')}</div>
+        <p class="muted" style="font-size:12px;margin:0 0 6px">Option wählen (Klick oder Taste), bei Bedarf ergänzen, dann ${esc(release)} (Enter).</p>` : ''}
       <textarea placeholder="Deine Entscheidung, z. B. „Nicht gewollt, nur in diesem Fall übernehmen“">${esc(drafts.get(it.id) || '')}</textarea>
       <div class="actions">
         ${acts.map((a) => xButton(a)).join('')}
         ${primary ? '' : `<button class="primary" data-action="release" title="Notiz anhängen, Label human entfernen – ein Worker übernimmt">${esc(release)}</button>`}
+        ${it.decision?.todo ? '<button data-action="close" data-done="1" title="Aufgabe erledigt: Issue schließen (Text im Feld wird der Grund, sonst „Erledigt“)">✓ Erledigt</button>' : ''}
         <button data-action="note" title="Nur Notiz anhängen, bleibt bei dir">Notiz</button>
         <button data-action="defer" title="Auf Eis legen (deferred)">Zurückstellen</button>
         <button class="danger" data-action="close" title="Erledigt oder nicht nötig – Text wird der Schließgrund">Schließen</button>
@@ -1320,7 +1330,13 @@ document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && drawer) 
 document.addEventListener('keydown', (e) => {
   if (e.metaKey || e.ctrlKey || e.altKey || e.target.closest?.('input, textarea, select, [contenteditable]')) return;
   const card = (drawer?.kind === 'worker' && document.querySelector('#w-ask .card.ask')) || (!drawer && document.querySelector('#asks .card.ask'));
-  if (!card) return;
+  if (!card) {
+    // keine Rückfrage offen: 1–9 wählt die Option der obersten Entscheidungskarte
+    const dc = !drawer && /^[1-9]$/.test(e.key) && [...document.querySelectorAll('#inbox .card.decide')].find((c) => c.querySelector('button[data-choose]'));
+    const ob = dc && dc.querySelector(`button[data-choose="${e.key}"]`);
+    if (ob) { e.preventDefault(); chooseOption(ob); }
+    return;
+  }
   if (e.key === 'Enter') {
     const armedBtn = card.querySelector('button[data-press][data-armed]');
     if (armedBtn) { e.preventDefault(); armedBtn.click(); }
@@ -1343,7 +1359,22 @@ $('inbox').addEventListener('input', (e) => {
   const card = e.target.closest('.card');
   if (card && e.target.tagName === 'TEXTAREA') drafts.set(card.dataset.id, e.target.value);
 });
+// Option übernehmen: „Option n: …“ ins Feld (ein schon getippter eigener Satz bleibt dahinter),
+// dann Freigeben fokussieren, Enter sendet
+function chooseOption(btn) {
+  const card = btn.closest('.card');
+  const ta = card.querySelector('textarea');
+  const own = ta.value.replace(/^Option \d+: .*(\n|$)/, '').trim();
+  ta.value = `Option ${btn.dataset.choose}: ${btn.dataset.label}${own ? `\n${own}` : ''}`;
+  drafts.set(card.dataset.id, ta.value);
+  card.querySelectorAll('button[data-choose]').forEach((b) => b.classList.toggle('on', b === btn));
+  const rel = card.querySelector('button[data-action="release"]');
+  if (rel) { rel.classList.add('ready'); rel.focus(); }
+}
+
 $('inbox').addEventListener('click', async (e) => {
+  const ch = e.target.closest('button[data-choose]');
+  if (ch) { e.stopPropagation(); chooseOption(ch); return; }
   const btn = e.target.closest('button[data-action], button[data-xaction]');
   if (!btn) return;
   e.stopPropagation();
@@ -1351,6 +1382,7 @@ $('inbox').addEventListener('click', async (e) => {
   const id = card.dataset.id;
   const action = btn.dataset.action;
   const xaction = btn.dataset.xaction;
+  if (btn.dataset.done && !card.querySelector('textarea').value.trim()) card.querySelector('textarea').value = 'Erledigt';
   const text = card.querySelector('textarea').value;
   const msg = card.querySelector('.msg');
   if (action === 'close' && !armed(btn, 'Wirklich schließen?')) return;
