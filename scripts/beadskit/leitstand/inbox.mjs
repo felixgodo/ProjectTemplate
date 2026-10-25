@@ -98,6 +98,7 @@ const CODE_COLS = {
 const PHASE_PALETTE = ['#e6781e', '#1ea0aa', '#d25096', '#7c3aed', '#3c6ed2', '#d2aa28'];
 const cap = (s) => s.charAt(0).toUpperCase() + s.slice(1);
 const str = (v, d = '') => (typeof v === 'string' && v ? v : d);
+const num = (v) => (typeof v === 'number' && Number.isFinite(v) && v >= 0 ? v : null);
 const rgb = (c) => (Array.isArray(c) && c.length === 3 && c.every((n) => Number.isInteger(n) && n >= 0 && n <= 255)
   ? `rgb(${c.join(' ')})` : null);
 // CSS-Farbe aus beads.leitstand.mjs: Hex, rgb() oder var(--x), nichts, was aus dem Attribut ausbricht
@@ -393,12 +394,19 @@ export function planWorkerAction({ action, role, name, force, off, counts, thres
   }
 }
 
-/** Argumente für scripts/beadskit/ci/runner-server: start/stop eines Runners (1–8) oder aller, add, delete. */
+/**
+ * Argumente für scripts/beadskit/ci/runner-server: start/stop eines Runners (1–8) oder aller, add,
+ * delete eines Runners (1–8) oder ohne Nummer den mit der höchsten.
+ */
 export function planRunnerAction({ action, n, force }) {
+  const one = (x) => Number.isInteger(x) && x >= 1 && x <= 8;
   if (action === 'add') return ['add'];
-  if (action === 'delete') return ['delete', ...(force ? ['--force'] : [])];
+  if (action === 'delete') {
+    if (n != null && !one(n)) throw new Error('Runner: 1–8');
+    return ['delete', ...(n != null ? [String(n)] : []), ...(force ? ['--force'] : [])];
+  }
   if (action !== 'start' && action !== 'stop') throw new Error('unbekannte Aktion');
-  if (n !== 'all' && !(Number.isInteger(n) && n >= 1 && n <= 8)) throw new Error('Runner: 1–8 oder all');
+  if (n !== 'all' && !one(n)) throw new Error('Runner: 1–8 oder all');
   return [action, String(n), ...(action === 'stop' && force ? ['--force'] : [])];
 }
 
@@ -421,8 +429,17 @@ export function parseRunners(list, slug = 'runner') {
       github: str(r.github, 'missing'),
       busy: r.busy === true,
       job: job(r.job),
+      cpu: num(r.cpu),
+      mem: num(r.mem),
     }))
     .sort((a, b) => a.n - b.n);
+}
+
+/** Auslastung der CI-Slice aus `runner-server status --json`: cpuPct (% eines Kerns), cpus (Quota), mem (Bytes). */
+export function parseSlice(s) {
+  if (!s || typeof s !== 'object') return null;
+  const out = { cpuPct: num(s.cpuPct), cpus: num(s.cpus), mem: num(s.mem) };
+  return Object.values(out).every((v) => v == null) ? null : out;
 }
 
 /** Gehört ein Issue aufs Board? Epics, Merge-Slot und angeheftete nicht. */
@@ -1769,6 +1786,7 @@ function startServer(token, selfRoot) {
           return send(res, 200, {
             runners: parseRunners(Array.isArray(d) ? d : d?.runners, cfg.slug),
             queued: Number.isInteger(d?.queued) ? d.queued : null,
+            slice: parseSlice(d?.slice),
             at: new Date().toISOString(),
           });
         } catch (e) {

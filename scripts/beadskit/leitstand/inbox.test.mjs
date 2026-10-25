@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import {
   buildWorkspaces, cardExtras, clientIp, groupIssues, isOwnHost, isPagePath, isSameOrigin, labelSlug, loginGuard, metrics,
-  normalizeConfig, normalizeExt, parseCookies, parseProjectList, parseRunners, parseWorkers, planCreate, planDecision,
+  normalizeConfig, normalizeExt, parseCookies, parseProjectList, parseRunners, parseSlice, parseWorkers, planCreate, planDecision,
   planIssueAction, planRestarts, planRunnerAction, planWorkerAction, prSummary, publicConfig, readBody, repoOfIssue,
   RESTART_COOLDOWN_MS, safeEqual, signSession, today, verifySession, hashPassword, parsePasswordLine, verifyPassword,
   workerRe, wsOfIssue, parseHostsConf, mapRoot, shQuote, remoteCommand, mergeHostWorkers, parseMarkers, routeWorkerAction,
@@ -93,7 +93,10 @@ test('planRunnerAction: start/stop für Nummer oder all, --force nur bei stop', 
   assert.throws(() => planRunnerAction({ action: 'remove', n: 1 }), /Aktion/);
   assert.deepEqual(planRunnerAction({ action: 'add', n: '--force' }), ['add']);
   assert.deepEqual(planRunnerAction({ action: 'delete' }), ['delete']);
-  assert.deepEqual(planRunnerAction({ action: 'delete', n: 3, force: true }), ['delete', '--force']);
+  assert.deepEqual(planRunnerAction({ action: 'delete', force: true }), ['delete', '--force']);
+  assert.deepEqual(planRunnerAction({ action: 'delete', n: 3, force: true }), ['delete', '3', '--force']);
+  assert.deepEqual(planRunnerAction({ action: 'delete', n: 5 }), ['delete', '5']);
+  for (const n of [0, 9, 'all', '3', 1.5]) assert.throws(() => planRunnerAction({ action: 'delete', n }), /1–8/);
   for (const n of [0, 9, 1.5, '3', '--force', undefined]) {
     assert.throws(() => planRunnerAction({ action: 'stop', n }), /1–8/);
   }
@@ -444,26 +447,34 @@ test('planWorkerAction send: eine Zeile ohne Steuerzeichen, nur gültige Worker'
 test('parseRunners: sortiert, füllt fehlende Felder mit dem Projekt-Slug, verwirft Ungültiges', () => {
   assert.deepEqual(parseRunners([
     { n: 2, name: 'spot-runner-2', container: 'exited', github: 'offline', busy: false },
-    { n: 1, container: 'running', github: 'online', busy: true, job: {
+    { n: 1, container: 'running', github: 'online', busy: true, cpu: 187.5, mem: 1400000000, job: {
       name: 'App', branch: 'fix/x', title: 'Fix X', url: 'https://github.com/o/r/actions/runs/1/job/2',
       started: '2026-10-18T21:00:00Z', extra: 1,
     } },
     { n: 4, job: { name: 'Admin', url: 'javascript:alert(1)' } },
     { n: 'x' }, null, { n: 12 },
-    { n: 3, busy: 'true' },
+    { n: 3, busy: 'true', cpu: -1, mem: '5' },
   ], 'spot'), [
     { n: 1, name: 'spot-runner-1', container: 'running', github: 'online', busy: true, job: {
       name: 'App', branch: 'fix/x', title: 'Fix X', url: 'https://github.com/o/r/actions/runs/1/job/2',
       started: '2026-10-18T21:00:00Z',
-    } },
-    { n: 2, name: 'spot-runner-2', container: 'exited', github: 'offline', busy: false, job: null },
-    { n: 3, name: 'spot-runner-3', container: 'missing', github: 'missing', busy: false, job: null },
+    }, cpu: 187.5, mem: 1400000000 },
+    { n: 2, name: 'spot-runner-2', container: 'exited', github: 'offline', busy: false, job: null, cpu: null, mem: null },
+    { n: 3, name: 'spot-runner-3', container: 'missing', github: 'missing', busy: false, job: null, cpu: null, mem: null },
     { n: 4, name: 'spot-runner-4', container: 'missing', github: 'missing', busy: false, job: {
       name: 'Admin', branch: '', title: '', url: null, started: null,
-    } },
+    }, cpu: null, mem: null },
   ]);
   assert.equal(parseRunners([{ n: 1 }], 'regiehub')[0].name, 'regiehub-runner-1');
   assert.deepEqual(parseRunners(null), []);
+});
+
+test('parseSlice: Zahlen der CI-Slice, null ohne Messwerte', () => {
+  assert.deepEqual(parseSlice({ cpuPct: 389.2, cpus: 4, mem: 9e9, x: 1 }), { cpuPct: 389.2, cpus: 4, mem: 9e9 });
+  assert.deepEqual(parseSlice({ cpuPct: 12, cpus: null, mem: 'viel' }), { cpuPct: 12, cpus: null, mem: null });
+  assert.equal(parseSlice({ cpuPct: null, cpus: null, mem: null }), null);
+  assert.equal(parseSlice(null), null);
+  assert.equal(parseSlice('x'), null);
 });
 
 test('parseWorkers nimmt nur Sessions in den Worktrees, mit Rolle und Workspace, sortiert numerisch', () => {
