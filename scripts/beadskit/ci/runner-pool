@@ -191,7 +191,9 @@ state_script() {
 st=\$(cat /run/beadskit-runner-pool/state.json 2>/dev/null || echo '{}')
 svc=\$(systemctl is-active $UNIT 2>/dev/null || true)
 [ -f /etc/systemd/system/$UNIT ] || svc=missing
-db=\$(docker inspect -f '{{.State.Status}}' beadskit-ci-mysql 2>/dev/null || echo missing)
+# docker inspect gäbe für einen fehlenden Container eine Leerzeile aus
+db=\$(docker ps -a --filter 'name=^beadskit-ci-mysql\$' --format '{{.State}}')
+[ -n "\$db" ] || db=missing
 slots=\$(sed -n 's/^SLOTS=//p' $CONF 2>/dev/null || true)
 tok=\$([ -s /etc/beadskit-ci/token ] && echo true || echo false)
 jq -c --arg svc "\$svc" --arg db "\$db" --arg slots "\$slots" --argjson tok "\$tok" \\
