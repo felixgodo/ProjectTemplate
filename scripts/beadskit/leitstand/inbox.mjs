@@ -525,6 +525,42 @@ export function parseWorkers(agents, wtDir, workspaces) {
 
 const HOST_RE = /^[a-z0-9]{1,20}$/;
 
+const LIST_ITEM_RE = /^\s*(?:(\d{1,2})[.)]|[-*•])\s+(.+?)\s*$/;
+const DECISION_HEAD_RE = /^\s*(?:\*\*)?(Optionen|Options)(?:\*\*)?\s*:?\s*(?:\*\*)?\s*$/i;
+const DECISION_HINT_RE = /(Entscheidung\s+(nötig|gefragt|liegt\s+beim\s+User)|Mögliche\s+(Fixes|Lösungen|Wege)|zur\s+Wahl)/i;
+
+/**
+ * Entscheidung in der Beschreibung eines human-Issues: ein Block „Optionen:“ mit nummerierten
+ * Zeilen (worker-regeln.md), sonst die Aufzählung direkt nach „Entscheidung nötig“/„Mögliche
+ * Fixes“ (mindestens zwei Punkte). `todo`, wenn eine Zeile mit „Zu tun (User)“ beginnt.
+ * → { options: [{ key: '1', label }], todo } oder null, wenn beides fehlt.
+ */
+export function parseDecision(description) {
+  const lines = String(description || '').split('\n');
+  const todo = lines.some((l) => /^\s*(?:\*\*)?Zu tun \(User\)/i.test(l));
+  const listAfter = (start) => {
+    const items = [];
+    for (let i = start; i < lines.length; i++) {
+      const m = LIST_ITEM_RE.exec(lines[i]);
+      if (m) items.push(m[2].replace(/\*\*/g, '').trim());
+      else if (!lines[i].trim()) { if (items.length) break; }
+      else if (items.length && /^\s{2,}\S/.test(lines[i])) items[items.length - 1] += ` ${lines[i].trim()}`;
+      else break;
+    }
+    return items;
+  };
+  let items = [];
+  const head = lines.findIndex((l) => DECISION_HEAD_RE.test(l));
+  if (head >= 0) items = listAfter(head + 1);
+  if (items.length < 2) {
+    // Hinweiszeile („Entscheidung nötig …“), die Aufzählung darunter; die Zeile selbst kann mit „:“ enden
+    const hint = lines.findIndex((l) => DECISION_HINT_RE.test(l));
+    items = hint >= 0 ? listAfter(hint + 1) : [];
+  }
+  const options = items.length >= 2 && items.length <= 9 ? items.map((label, k) => ({ key: String(k + 1), label: label.slice(0, 300) })) : [];
+  return options.length || todo ? { options, todo } : null;
+}
+
 /** Tasten, die der Leitstand an eine Rückfrage schicken darf (workers press). */
 export const PRESS_KEYS = ['1', '2', '3', '4', '5', '6', '7', '8', '9', 'Escape', 'Enter'];
 
@@ -1366,6 +1402,10 @@ function startServer(token, selfRoot) {
         const x = cardExtras(it, ext);
         if (x) it.x = x;
         if (it.metadata?.pr) it.pr_repo = repoOfIssue(it, cfg.repos);
+        if ((it.labels || []).includes('human')) {
+          const d = parseDecision(it.description);
+          if (d) it.decision = d;
+        }
       }
     }
     // Claims aller Workspaces: die Worker-Karten zeigen auch Worker des anderen Workspaces

@@ -7,7 +7,7 @@ import {
   planIssueAction, planRestarts, planRunnerAction, planWorkerAction, prSummary, publicConfig, readBody, repoOfIssue,
   RESTART_COOLDOWN_MS, safeEqual, signSession, today, verifySession, hashPassword, parsePasswordLine, verifyPassword,
   workerRe, wsOfIssue, parseHostsConf, mapRoot, shQuote, remoteCommand, mergeHostWorkers, parseMarkers, routeWorkerAction,
-  parsePrompt,
+  parsePrompt, parseDecision,
 } from './inbox.mjs';
 import { readFileSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
@@ -802,4 +802,16 @@ test('planWorkerAction press: nur erlaubte Tasten, Route an den Rechner des Work
   assert.throws(() => planWorkerAction({ action: 'press', name: 'x', text: '1' }, WS), /Worker/);
   const hosts = [{ name: 'mac', ok: true }, { name: 'pc', ok: true }];
   assert.deepEqual(routeWorkerAction({ action: 'press', name: 'fix-101' }, { hosts, self: 'pc', workers: [{ name: 'fix-101', host: 'pc' }] }), ['pc']);
+});
+
+test('parseDecision: Block „Optionen:“, Hinweis „Entscheidung nötig“ mit Aufzählung, Zu tun (User)', () => {
+  const block = parseDecision('Kern: ticket.io sperrt Bots.\n\nOptionen:\n1. Vorlage 5 als kaputt markieren (empfohlen)\n2. Nutzungsbedingungen klären,\n   bis dahin nichts ändern\n\nSonstiges');
+  assert.deepEqual(block, { todo: false, options: [{ key: '1', label: 'Vorlage 5 als kaputt markieren (empfohlen)' }, { key: '2', label: 'Nutzungsbedingungen klären, bis dahin nichts ändern' }] });
+  const hint = parseDecision('Entscheidung nötig (Kosten):\n- **Neu einreihen**, nur kommende Events\n- Oder nichts tun.\n');
+  assert.deepEqual(hint.options.map((o) => o.label), ['Neu einreihen, nur kommende Events', 'Oder nichts tun.']);
+  assert.deepEqual(parseDecision('Zu tun (User): Passwort im Passwortmanager ablegen. Danach schließen.'), { options: [], todo: true });
+  // eine einzelne Aufzählung ohne Hinweis ist keine Entscheidung, ein Punkt allein auch nicht
+  assert.equal(parseDecision('Schritte:\n1. a\n2. b'), null);
+  assert.equal(parseDecision('Optionen:\n1. nur eine'), null);
+  assert.equal(parseDecision(''), null);
 });

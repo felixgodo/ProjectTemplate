@@ -42,6 +42,24 @@ Metadaten am Issue: `branch`, `pr`, `fixer` (Actor des Fix-Workers).
 - Merge-Sperre (`bdw merge-slot acquire|release`): nur freigeben, was man selbst hält
   (`bdw merge-slot check` zeigt den Holder). `release` prüft den Holder **nicht**.
 
+## Issues für den User (`human`)
+Ein Issue mit `human` landet im Leitstand unter „Wartet auf dich“. Damit der User schnell
+entscheiden kann, beginnt die Beschreibung mit dem Kern (ein bis zwei Sätze: was ist los, was
+hängt daran) und endet mit genau einer dieser Formen:
+
+- **Entscheidung:** ein Block `Optionen:` mit nummerierten Wegen, je eine Zeile, für sich
+  verständlich, Folgen in Klammern, die Empfehlung zuerst und mit „(empfohlen)“ markiert:
+  ```
+  Optionen:
+  1. Vorlage 5 als kaputt markieren, Clubs auf die eigene Seite bzw. Status 2 (empfohlen)
+  2. Nutzungsbedingungen klären, bis dahin nichts ändern
+  ```
+  Der Leitstand zeigt jede Option als Knopf. Die Wahl kommt als Notiz
+  `User-Entscheidung <datum>: Option 2: …` zurück, `human` fällt weg; wer das Issue danach
+  nimmt, setzt genau diese Option um (ergänzender Text des Users gilt mit).
+- **Aufgabe nur für den User** (Zugang, Server, Konto, Geld): eine Zeile `Zu tun (User): …` mit
+  dem, was zu tun ist. Der Leitstand zeigt dafür „Erledigt“, das schließt das Issue.
+
 ## Auslaufen (drain)
 `scripts/beadskit/workers drain` legt eine Markierung für alle Worker an, `drain <rolle>` eine nur
 für eine Rolle (z. B. `drain fix`). Danach hören die betroffenen Worker nach dem laufenden
