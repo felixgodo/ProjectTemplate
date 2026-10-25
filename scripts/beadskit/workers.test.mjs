@@ -329,6 +329,26 @@ test('beads.project.sh: ungültige Rollen und Workspaces brechen ab', () => {
   assert.equal(tryCfg('BK_ROLES="fix verify"\n').status, 0);
 });
 
+// ---- Terminal iTerm (Mac) ----
+// osascript-Ersatz: kopiert die Befehlsliste (Argument 2) nach FAKE_LOG, wie sie iTerm tippen würde
+const itermBin = join(dir, 'itermbin');
+mkdirSync(itermBin);
+writeFileSync(join(itermBin, 'osascript'), '#!/bin/sh\ncat "$2" >>"$FAKE_LOG"\n');
+chmodSync(join(itermBin, 'osascript'), 0o755);
+
+test('iTerm: Startzeile mit \\033 und \\a als Text, keine Steuerzeichen (echo von /bin/sh)', () => {
+  const { root, workers } = testRepo();
+  clearMarkers(testRepo());
+  const r = workers(root, ['start', 'fix=1', 'search=0', 'verify=0'], [], { PATH: `${itermBin}:${dir}:${process.env.PATH}` });
+  assert.equal(r.status, 0, r.stderr);
+  const line = r.calls.find((c) => c.includes('claude -w fix-1'));
+  assert.ok(line, r.calls.join('\n'));
+  assert.ok(line.startsWith("printf '\\033]6;1;bg;red;brightness;"), line);
+  assert.ok(line.includes('\\a'), line);
+  assert.doesNotMatch(line, /[\x07\x1b]/);
+  assert.ok(line.endsWith(`cd '${root}' && claude -w fix-1 -n fix-1 '/loop 10m /spot-fix'`), line);
+});
+
 // ---- Terminal tmux (Linux) ----
 // Fakes für tmux und ps: tmux protokolliert jeden Aufruf in FAKE_LOG; has-session gelingt nur
 // mit FAKE_TMUX_UP, new-window -P gibt %9 aus, list-panes liefert das Pane %3 mit /dev/pts/7.
