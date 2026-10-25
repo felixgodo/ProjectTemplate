@@ -346,8 +346,11 @@ active_jobs() {
 # cpu in % eines Kerns. Die Slice wird über die Dauer von `docker stats` gemessen (zwei Lesungen
 # von usage_usec), cpus ist die Quota in Kernen (null ohne Slice).
 usage_script() {
-  printf 'cg=/sys/fs/cgroup/%s\ndir=%s\n' "$SLICE" "$DIR"
+  printf 'slice=%s\ndir=%s\n' "$SLICE" "$DIR"
   cat <<'EOF'
+# Bindestriche im Namen sind für systemd Hierarchie (beadskit.slice/beadskit-ci.slice)
+cg=/sys/fs/cgroup$(systemctl show -p ControlGroup --value "$slice" 2>/dev/null)
+[ "$cg" != /sys/fs/cgroup ] || cg=/nicht-vorhanden
 u() { sed -n 's/^usage_usec //p' "$cg/cpu.stat" 2>/dev/null; }
 t0=$(date +%s%N) u0=$(u)
 stats=$(cd "$dir" 2>/dev/null && ids=$(docker compose ps -q 2>/dev/null) && [ -n "$ids" ] &&
