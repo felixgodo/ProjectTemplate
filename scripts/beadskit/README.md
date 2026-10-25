@@ -98,6 +98,9 @@ projekteigenen Leitstands (`<git-dir>/<slug>-leitstand-*`) und entfernt dessen l
 **CI-Runner:** `scripts/beadskit/ci/runner-server setup|status|start|stop|add|delete|logs|remove`
 (Label = `BK_SLUG`, Repo aus `gh`, Ablage `/opt/<slug>-runner` auf dem Server). Der Workflow
 wählt sie mit `runs-on: [self-hosted, <slug>]`; dann zeigt der Leitstand den Abschnitt CI-Runner.
+Runner und MySQL laufen mit `cpu_shares` 128 (Docker-Standard 1024). So bekommen die Dienste auf
+dem Server Vorrang, wenn alle Runner gleichzeitig rechnen. Neue Grenzen übernimmt
+`setup --recreate`, wenn kein Job läuft.
 
 ## beads.project.sh
 
@@ -117,6 +120,7 @@ wählt sie mit `runs-on: [self-hosted, <slug>]`; dann zeigt der Leitstand den Ab
 | `bk_color <rolle>` | iTerm-Tabfarbe `"r g b"` (Funktion, optional) | je Rolle |
 | `BK_REPOS` | weitere Repos `<schlüssel>:<pfad>`; Label `modul:<schlüssel>` → dort bearbeiten | leer |
 | `RUNNER_APT`, `RUNNER_MYSQL` | Zusatzpakete und MySQL-Version im CI-Runner | leer |
+| `RUNNER_CPUS`, `RUNNER_MEM`, `RUNNER_CPU_SHARES` | Grenzen je Runner; `cpu_shares` = Gewicht gegenüber dem Host | `2`, `6g`, `128` |
 
 Rollen bestehen aus a-z und `-` (`club-add`). Ein Worker `<rolle>-<n>` gehört zum Workspace
 seiner Rolle; `start` startet genau einen Workspace und hebt nur dessen Drain auf.

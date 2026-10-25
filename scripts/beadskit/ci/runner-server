@@ -20,6 +20,10 @@
 # danach keiner mehr liefe (die CI bliebe in „Queued“). `setup` startet wieder alle, ersetzt aber
 # keine laufenden Container (sonst brächen deren Jobs ab, auch wenn nur das Image neu gebaut ist).
 # Neues Image oder geänderte Grenzen übernehmen: `setup --recreate`, wenn kein Job läuft.
+# CPU-Vorrang: Runner und MySQL laufen mit niedrigem `cpu_shares` (RUNNER_CPU_SHARES, Docker-Standard
+# 1024), nehmen also nur CPU, die Dienste auf dem Host gerade nicht brauchen. `cpus` begrenzt jeden
+# Runner nach oben, schützt den Host aber nicht, wenn alle zusammen mehr Kerne wollen als da sind.
+# `add` warnt, wenn Runner × RUNNER_CPUS mehr ist als die Kerne des Servers minus 2.
 # Die Anzahl steht in compose.yml auf dem Server (Dienste runner-1 … runner-N); `add` und `delete`
 # ändern sie, `delete` nimmt immer die höchste Nummer, damit die Nummern lückenlos bleiben, und
 # verweigert wie `stop` bei laufendem Job oder wenn danach keiner mehr liefe.
@@ -30,7 +34,7 @@
 #
 # Einstellungen per Umgebung (Standard in Klammern): RUNNER_SSH_HOST (server),
 # RUNNER_REPO (GitHub-Repo dieses Checkouts), RUNNER_LABEL (BK_SLUG), RUNNER_COUNT (Anzahl aus
-# compose.yml auf dem Server, ohne compose.yml 3), RUNNER_CPUS (2), RUNNER_MEM (6g),
+# compose.yml auf dem Server, ohne compose.yml 3), RUNNER_CPUS (2), RUNNER_CPU_SHARES (128), RUNNER_MEM (6g),
 # RUNNER_APT (zusätzliche apt-Pakete im Image), RUNNER_MYSQL (MySQL-Version, leer = kein MySQL).
 # beads.project.sh kann sie setzen. Ablage auf dem Server: /opt/<label>-runner (Dockerfile, compose.yml). Das Token zum Registrieren
 # gilt eine Stunde und wird nicht gespeichert; die Runner-Zugangsdaten liegen in den Volumes.
@@ -52,6 +56,8 @@ case $MYSQL_VERSION in *[!0-9.]*) echo "RUNNER_MYSQL ungültig: '$MYSQL_VERSION'
 COUNT=${RUNNER_COUNT:-}
 MAX=8
 CPUS=${RUNNER_CPUS:-2}
+CPU_SHARES=${RUNNER_CPU_SHARES:-128}
+case $CPU_SHARES in '' | 0* | 1 | *[!0-9]*) echo "RUNNER_CPU_SHARES ungültig: '$CPU_SHARES' (ganze Zahl ab 2)" >&2; exit 1 ;; esac
 MEM=${RUNNER_MEM:-6g}
 VERSION=2.337.0
 DIR=/opt/$LABEL-runner
@@ -94,6 +100,7 @@ x-runner: &runner
   command: ./run.sh
   restart: unless-stopped
   cpus: $CPUS
+  cpu_shares: $CPU_SHARES
   mem_limit: $MEM
   pids_limit: 4096
   security_opt: ["no-new-privileges:true"]
@@ -110,6 +117,7 @@ EOF
     command: ["--innodb-buffer-pool-size=256M", "--max-connections=200"]
     tmpfs: ["/var/lib/mysql"]
     cpus: 1
+    cpu_shares: $CPU_SHARES
     mem_limit: 1g
     security_opt: ["no-new-privileges:true"]
     networks: [ci]
@@ -314,8 +322,21 @@ cmd_add() {
     exit 1
   fi
   COUNT=$((COUNT + 1))
+  warn_cores
   setup_script "$(token registration-token)" "--no-recreate runner-$COUNT" "$COUNT" | remote bash -s
   echo "$LABEL-runner-$COUNT hinzugefügt."
+}
+
+# Warnung, wenn die Runner zusammen mehr Kerne beanspruchen, als der Server übrig hat (2 bleiben frei)
+warn_cores() {
+  cores=$(remote nproc 2>/dev/null || true)
+  case $cores in '' | *[!0-9]*) return 0 ;; esac
+  # RUNNER_CPUS darf eine Kommazahl sein (1.5): auf ganze Kerne aufrunden
+  need=$(awk -v n="$COUNT" -v c="$CPUS" 'BEGIN { x = n * c; printf "%d", (x == int(x)) ? x : int(x) + 1 }')
+  if [ "$need" -gt $((cores - 2)) ]; then
+    echo "Achtung: $COUNT Runner × $CPUS CPUs = $need, der Server hat $cores Kerne. Die Runner laufen mit" >&2
+    echo "niedrigem cpu_shares ($CPU_SHARES) nach den Diensten des Hosts, gleichzeitige Jobs werden aber langsamer." >&2
+  fi
 }
 
 # Löscht den Runner mit der höchsten Nummer: Container stoppen und löschen, Volume löschen,
