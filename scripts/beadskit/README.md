@@ -15,7 +15,9 @@ scripts/beadskit/
                         drain-check, repo-for, config (JSON für den Leitstand); Tests workers.test.mjs
   leitstand/            Web-Leitstand (inbox.mjs + inbox.html), Tests, Fernzugang (leitstand-remote),
                         host-agent.mjs (Worker dieses Rechners für den Leitstand auf dem anderen)
-  ci/runner-server      eigene GitHub-Actions-Runner als Docker-Container auf dem Server
+  ci/runner-pool        gemeinsamer CI-Runner-Pool aller Projekte auf dem Server (Dienst: runner-pool-daemon)
+  ci/runner-server      alte feste Runner je Repo (nur noch zum Abbauen: runner-server remove)
+  ci/lib.sh             Runner-Image, CI-Slice und Messung für beide
   templates/            Vorlagen für --adopt: beads.project.sh, Skills, reviews/README.md
 ```
 
@@ -97,20 +99,24 @@ Fernzugang: `scripts/beadskit/leitstand/leitstand-remote` (Login mit Token oder 
 (`LEITSTAND_PUBLIC_URL=…`). `install` übernimmt Token und Passwort eines früheren,
 projekteigenen Leitstands (`<git-dir>/<slug>-leitstand-*`) und entfernt dessen launchd-Dienste.
 
-**CI-Runner:** `scripts/beadskit/ci/runner-server setup|status|start|stop|add|delete|logs|remove`
-(Label = `BK_SLUG`, Repo aus `gh`, Ablage `/opt/<slug>-runner` auf dem Server). Der Workflow
-wählt sie mit `runs-on: [self-hosted, <slug>]`; dann zeigt der Leitstand den Abschnitt CI-Runner.
-Runner und MySQL laufen mit `cpu_shares` 128 (Docker-Standard 1024) und zusammen in der
-systemd-Slice `beadskit-ci.slice`. Alle Projekte auf dem Server teilen sie. Sie hat einen
-Gesamtdeckel (`RUNNER_CI_CPUS` Kerne, `RUNNER_CI_MEM`) und ein niedriges CPU- und IO-Gewicht.
-Mehr Runner machen die CI dadurch paralleler, den Server aber nicht langsamer. `setup` schreibt
-die Slice und setzt ihre Werte sofort. Neue Grenzen je Container übernimmt `setup --recreate`,
-wenn kein Job läuft. Der erste `--recreate` nach 1.4.0 hängt die Container in die Slice ein.
-`delete <n>` löscht genau Runner n, Lücken in den Nummern sind erlaubt, `add` füllt die
-kleinste. Ohne `n` wird wie bisher der Runner mit der höchsten Nummer gelöscht. `status` und der
-Leitstand zeigen CPU und RAM je Runner und für die ganze Slice. Die CI-MySQL
-(`RUNNER_MYSQL`) hat dort eine eigene Zeile. `start|stop mysql` schaltet sie einzeln,
-`stop mysql` verweigert bei laufendem Job, `start|stop all` nimmt sie mit.
+**CI-Runner-Pool:** Ein Runner unter einem persönlichen GitHub-Konto gilt immer nur für ein Repo.
+Deshalb teilen sich alle Projekte einen Pool: Der Dienst `beadskit-runner-pool` auf dem Server
+startet für jeden wartenden Job einen Einmal-Runner (JIT) für genau dieses Repo und nimmt dabei die
+ältesten Jobs zuerst, über alle Repos. Höchstens `SLOTS` laufen gleichzeitig (Vorgabe 4). Nach dem
+Job wird der Container gelöscht, ein Runner ohne Job nach 10 min. Die Workflows bleiben bei
+`runs-on: [self-hosted, <slug>]`.
+- Alle Container laufen in der systemd-Slice `beadskit-ci.slice` mit Gesamtdeckel
+  (`RUNNER_CI_CPUS` Kerne, `RUNNER_CI_MEM`) und niedrigem CPU- und IO-Gewicht.
+- Je Platz gibt es Volumes für `_work/_tool` und `~/.cache`.
+- Die CI-MySQL (Host `mysql`) läuft, sobald ein Projekt `RUNNER_MYSQL` setzt.
+- Befehle: `scripts/beadskit/ci/runner-pool setup|set-token|status|size <n>|start|stop|logs|remove`,
+  dazu `start|stop mysql`.
+- `setup` liest alle Projekte aus `~/.config/beadskit/projects.txt`, deren Workflows `self-hosted`
+  nutzen, und vereint ihre `RUNNER_APT` in einem Image. Nach jeder Änderung daran `setup` erneut.
+- Token: Fine-grained PAT für diese Repos mit Administration (Read and write) und Actions (Read),
+  einzugeben mit `runner-pool set-token`. Er liegt nur auf dem Server.
+- Der Leitstand zeigt im Abschnitt CI-Runner-Pool die Plätze, die Runner mit Projekt und Job,
+  wartende Jobs je Projekt, CPU/RAM und die CI-MySQL, mit Plätze −/+ und Pool an/aus.
 
 ## beads.project.sh
 
@@ -129,9 +135,9 @@ Leitstand zeigen CPU und RAM je Runner und für die ganze Slice. Die CI-MySQL
 | `BK_WS_<ws>_NAME` / `_ROLES` / `_START` / `_PHASES` | Anzeigename, Rollen, Vorgabe, Phasen (`key:Titel`) | – |
 | `bk_color <rolle>` | iTerm-Tabfarbe `"r g b"` (Funktion, optional) | je Rolle |
 | `BK_REPOS` | weitere Repos `<schlüssel>:<pfad>`; Label `modul:<schlüssel>` → dort bearbeiten | leer |
-| `RUNNER_APT`, `RUNNER_MYSQL` | Zusatzpakete und MySQL-Version im CI-Runner | leer |
-| `RUNNER_CPUS`, `RUNNER_MEM`, `RUNNER_CPU_SHARES` | Grenzen je Runner; `cpu_shares` = Gewicht gegenüber dem Host | `2`, `6g`, `128` |
-| `RUNNER_CI_CPUS`, `RUNNER_CI_MEM` | Deckel für alle CI-Container auf dem Server zusammen (Slice `beadskit-ci.slice`, der letzte `setup` gilt) | `4`, `24G` |
+| `RUNNER_APT`, `RUNNER_MYSQL` | Zusatzpakete und MySQL-Version im Pool-Image (alle Projekte vereint) | leer |
+| `RUNNER_CPUS`, `RUNNER_MEM` (Umgebung von `runner-pool setup`) | Grenzen je Pool-Runner | `2`, `6g` |
+| `RUNNER_CI_CPUS`, `RUNNER_CI_MEM` (ebenso) | Deckel für alle CI-Container zusammen (Slice `beadskit-ci.slice`) | `4`, `24G` |
 
 Rollen bestehen aus a-z und `-` (`club-add`). Ein Worker `<rolle>-<n>` gehört zum Workspace
 seiner Rolle; `start` startet genau einen Workspace und hebt nur dessen Drain auf.

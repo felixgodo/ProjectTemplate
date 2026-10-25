@@ -1,0 +1,208 @@
+#!/usr/bin/env bash
+# Gemeinsamer CI-Runner-Pool auf dem Server, für alle Repos in REPOS: Ein Repo unter einem
+# persönlichen GitHub-Konto kann keine Runner mit anderen teilen. Deshalb startet der Dienst für
+# jeden wartenden Job einen Einmal-Runner (JIT) für genau dieses Repo, als Docker-Container in
+# beadskit-ci.slice. Höchstens SLOTS gleichzeitig, die ältesten Jobs zuerst, über alle Repos.
+# Nach dem Job beendet sich der Runner und der Container wird gelöscht (--rm).
+# Teil des beadskit aus dem ProjectTemplate – nicht im Projekt ändern. Eingerichtet und
+# gesteuert über ci/runner-pool (lokal).
+#
+#   runner-pool-daemon          Schleife (systemd: beadskit-runner-pool.service)
+#   runner-pool-daemon once     eine Runde, z. B. zum Testen
+#   runner-pool-daemon plan     liest den Zustand als JSON von stdin, gibt die Aktionen aus (Tests)
+#
+# Konfiguration: /etc/beadskit-ci/pool.conf (POOL_CONF)
+#   REPOS="owner/repo:label …"  Repos und ihr runs-on-Label (BK_SLUG)
+#   SLOTS (4)  CPUS (2)  MEM (6g)  POLL (15 s)  IDLE_MAX (600 s: so lange darf ein Runner ohne Job warten)
+#   IMAGE (beadskit-runner:latest)  NETWORK (beadskit-ci)  SLICE (beadskit-ci.slice)
+# Token: /etc/beadskit-ci/token (POOL_TOKEN_FILE), Fine-grained PAT für die Repos mit
+# Administration: write (JIT-Registrierung, Runner löschen) und Actions: read.
+# Zustand für `runner-pool status`: /run/beadskit-runner-pool/state.json (POOL_STATE).
+#
+# Je Platz (1 … SLOTS) gibt es die Volumes beadskit-pool-tool-<k> (_work/_tool: setup-java,
+# Node, Flutter …) und beadskit-pool-cache-<k> (~/.cache). Ein Platz läuft nie doppelt, also
+# schreiben nie zwei Jobs gleichzeitig in denselben Cache.
+set -euo pipefail
+
+CONF=${POOL_CONF:-/etc/beadskit-ci/pool.conf}
+TOKEN_FILE=${POOL_TOKEN_FILE:-/etc/beadskit-ci/token}
+STATE=${POOL_STATE:-/run/beadskit-runner-pool/state.json}
+API=${GH_API:-https://api.github.com}
+
+REPOS="" SLOTS=4 CPUS=2 MEM=6g POLL=15 IDLE_MAX=600
+IMAGE=beadskit-runner:latest NETWORK=beadskit-ci SLICE=beadskit-ci.slice
+
+log() { printf '%s\n' "$*"; }
+
+load_conf() {
+  # shellcheck source=/dev/null
+  [ ! -f "$CONF" ] || . "$CONF"
+  case $SLOTS in '' | *[!0-9]*) log "SLOTS ungültig: $SLOTS"; exit 1 ;; esac
+  case $IDLE_MAX in '' | *[!0-9]*) log "IDLE_MAX ungültig: $IDLE_MAX"; exit 1 ;; esac
+  for r in $REPOS; do
+    printf '%s' "$r" | grep -Eq '^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+:[a-z0-9-]+$' || { log "REPOS-Eintrag ungültig: $r"; exit 1; }
+  done
+}
+
+# Entscheidet aus dem Zustand, was zu tun ist (reines jq, getestet über `plan`).
+# Eingabe: {slots, now (Unix-Sekunden), idleMax, queued: [{repo, label, created}],
+#           containers: [{name, label, repo, slot, started (Unix)}], runners: [{repo, name, status, busy, id}]}
+# Ausgabe: {start: [{repo, label, slot}], stop: [{name, repo, id}], forget: [{repo, id, name}]}
+# - start: je wartendem Job (älteste zuerst) einen Runner, außer ein freier Runner desselben
+#   Labels kann ihn nehmen; höchstens bis alle Plätze belegt sind, kleinste freie Platznummer.
+# - stop: Container, deren Runner seit idleMax keinen Job hat (ein anderer nahm ihn).
+# - forget: Pool-Runner bei GitHub ohne Container (abgestürzt, nie gestartet).
+# shellcheck disable=SC2016
+PLAN='
+  . as $s
+  | ($s.runners | map({key: .name, value: .}) | from_entries) as $gh
+  | [$s.containers[] | . + {busy: ($gh[.name].busy // false)}] as $cs
+  | ([$cs[] | select(.busy | not) | select(($s.now - .started) >= $s.idleMax)]) as $old
+  | ([$cs[] | select(.name as $n | $old | map(.name) | index($n) | not)]) as $keep
+  | (reduce ($keep[] | select(.busy | not)) as $c ({}; .[$c.label] += 1)) as $idle
+  | ([$keep[].slot] | map(tonumber)) as $used
+  | ([range(1; $s.slots + 1)] - $used) as $free
+  | (reduce ($s.queued | sort_by(.created))[] as $j ({idle: $idle, free: $free, start: []};
+      if (.idle[$j.label] // 0) > 0 then .idle[$j.label] -= 1
+      elif (.free | length) > 0 then .start += [{repo: $j.repo, label: $j.label, slot: .free[0]}] | .free = .free[1:]
+      else . end)) as $r
+  | {
+      start: $r.start,
+      stop: [$old[] | {name, repo, id: ($gh[.name].id // null)}],
+      forget: [$s.runners[] | select(.status == "offline")
+        | select(.name as $n | $s.containers | map(.name) | index($n) | not)
+        | {repo, id, name}]
+    }'
+
+api() {
+  local path=$1
+  shift
+  curl -fsS --max-time 20 -H "Authorization: Bearer $TOKEN" -H "Accept: application/vnd.github+json" \
+    -H "X-GitHub-Api-Version: 2022-11-28" "$@" "$API/$path"
+}
+
+# Wartende Jobs (status queued, Labels self-hosted + label) und laufende Jobs auf Pool-Runnern
+# eines Repos, je ein JSON-Objekt pro Zeile: {kind: queued|running, …}. Ein Lauf, der zwischen den
+# beiden Abfragen von queued nach in_progress wechselt, zählt nur einmal (sort -u).
+repo_jobs() {
+  local repo=$1 label=$2 id
+  for status in queued in_progress; do
+    api "repos/$repo/actions/runs?status=$status&per_page=30" | jq -r '.workflow_runs[] | "\(.id)\t\(.head_branch)\t\(.display_title)"'
+  done | sort -u | while IFS=$'\t' read -r id branch title; do
+    api "repos/$repo/actions/runs/$id/jobs?per_page=100" | jq -c --arg repo "$repo" --arg label "$label" \
+      --arg branch "$branch" --arg title "$title" '.jobs[]
+        | if .status == "queued" and (.labels | index("self-hosted")) and (.labels | index($label))
+          then {kind: "queued", repo: $repo, label: $label, created: .created_at}
+          elif .status == "in_progress" and ((.runner_name // "") | startswith("pool-"))
+          then {kind: "running", runner: .runner_name, name, url: .html_url, started: .started_at, branch: $branch, title: $title}
+          else empty end'
+  done
+}
+
+containers() {
+  local ids
+  ids=$(docker ps -q --filter label=beadskit.pool)
+  [ -n "$ids" ] || { echo '[]'; return; }
+  # shellcheck disable=SC2086
+  docker inspect $ids | jq '[.[] | {name: .Config.Labels["beadskit.runner"], label: .Config.Labels["beadskit.pool"],
+    repo: .Config.Labels["beadskit.repo"], slot: .Config.Labels["beadskit.slot"],
+    started: (.State.StartedAt | sub("\\.[0-9]+"; "") | fromdateiso8601? // 0)}]'
+}
+
+start_runner() {
+  local repo=$1 label=$2 slot=$3 name cfg
+  name="pool-$label-$(date +%m%d%H%M%S)-$slot"
+  cfg=$(api "repos/$repo/actions/runners/generate-jitconfig" -X POST \
+    -d "$(jq -cn --arg n "$name" --arg l "$label" '{name: $n, runner_group_id: 1, labels: ["self-hosted", "Linux", "X64", $l], work_folder: "_work"}')" |
+    jq -r '.encoded_jit_config // empty') || cfg=""
+  [ -n "$cfg" ] || { log "JIT-Registrierung für $repo fehlgeschlagen"; return 0; }
+  docker run -d --rm --name "$name" --cgroup-parent "$SLICE" --cpus "$CPUS" --memory "$MEM" --pids-limit 4096 \
+    --security-opt no-new-privileges:true --network "$NETWORK" \
+    --label beadskit.pool="$label" --label beadskit.repo="$repo" --label beadskit.runner="$name" --label beadskit.slot="$slot" \
+    -v "beadskit-pool-tool-$slot:/home/runner/_work/_tool" -v "beadskit-pool-cache-$slot:/home/runner/.cache" \
+    -e JIT="$cfg" "$IMAGE" bash -c 'exec ./run.sh --jitconfig "$JIT"' >/dev/null
+  log "gestartet: $name für $repo (Platz $slot)"
+}
+
+forget_runner() {
+  local repo=$1 id=$2 name=$3
+  [ "$id" != null ] || return 0
+  api "repos/$repo/actions/runners/$id" -X DELETE >/dev/null 2>&1 || true
+  log "abgemeldet: $name ($repo)"
+}
+
+round() {
+  load_conf
+  TOKEN=$(cat "$TOKEN_FILE")
+  local jobs runners cs label repo input plan
+  jobs=$(for r in $REPOS; do repo_jobs "${r%%:*}" "${r##*:}" || log "Jobs von ${r%%:*} nicht lesbar" >&2; done | jq -s .)
+  runners=$(for r in $REPOS; do
+    repo=${r%%:*}
+    api "repos/$repo/actions/runners?per_page=100" |
+      jq -c --arg repo "$repo" '.runners[] | select(.name | startswith("pool-")) | {repo: $repo, name, status, busy, id}' || true
+  done | jq -s .)
+  cs=$(containers)
+  input=$(jq -n --argjson j "$jobs" --argjson r "$runners" --argjson c "$cs" --argjson slots "$SLOTS" \
+    --argjson idle "$IDLE_MAX" '{slots: $slots, now: now | floor, idleMax: $idle,
+      queued: [$j[] | select(.kind == "queued")], containers: $c, runners: $r}')
+  plan=$(jq "$PLAN" <<<"$input")
+  jq -r '.stop[] | "\(.name)\t\(.repo)\t\(.id)"' <<<"$plan" | while IFS=$'\t' read -r name repo id; do
+    docker stop -t 5 "$name" >/dev/null 2>&1 || true
+    log "ohne Job beendet: $name"
+    forget_runner "$repo" "$id" "$name"
+  done
+  jq -r '.forget[] | "\(.repo)\t\(.id)\t\(.name)"' <<<"$plan" | while IFS=$'\t' read -r repo id name; do
+    forget_runner "$repo" "$id" "$name"
+  done
+  jq -r '.start[] | "\(.repo)\t\(.label)\t\(.slot)"' <<<"$plan" | while IFS=$'\t' read -r repo label slot; do
+    start_runner "$repo" "$label" "$slot"
+  done
+  write_state "$jobs" "$runners"
+}
+
+# Zustand für runner-pool status: Plätze, wartende Jobs je Label, Runner mit Job
+write_state() {
+  mkdir -p "$(dirname "$STATE")"
+  jq -n --argjson j "$1" --argjson r "$2" --argjson c "$(containers)" --argjson slots "$SLOTS" --arg repos "$REPOS" '
+    ($r | map({key: .name, value: .}) | from_entries) as $gh
+    | {at: (now | todate), slots: $slots,
+       repos: [$repos | splits(" ") | select(. != "") | {repo: split(":")[0], label: split(":")[1]}],
+       queued: (reduce ($j[] | select(.kind == "queued")) as $q ({}; .[$q.label] += 1)),
+       runners: [$c[] | .name as $n | {name, label, repo, slot, busy: ($gh[$n].busy // false),
+         github: ($gh[$n].status // "starting"),
+         job: ([$j[] | select(.kind == "running" and .runner == $n) | {name, branch, title, url, started}][0] // null)}]}' \
+    >"$STATE.tmp" && mv "$STATE.tmp" "$STATE"
+}
+
+# Beim Stoppen des Dienstes: wartende Runner ohne Job beenden, laufende Jobs zu Ende laufen lassen
+shutdown() {
+  load_conf
+  TOKEN=$(cat "$TOKEN_FILE" 2>/dev/null || true)
+  local cs runners
+  cs=$(containers)
+  for r in $REPOS; do
+    api "repos/${r%%:*}/actions/runners?per_page=100" |
+      jq -c --arg repo "${r%%:*}" '.runners[] | select(.name | startswith("pool-")) | {repo: $repo, name, busy, id}' || true
+  done | jq -r --argjson c "$cs" -s '.[] | select(.busy | not) | select(.name as $n | $c | map(.name) | index($n))
+    | "\(.name)\t\(.repo)\t\(.id)"' | while IFS=$'\t' read -r name repo id; do
+    docker stop -t 5 "$name" >/dev/null 2>&1 || true
+    forget_runner "$repo" "$id" "$name"
+  done
+  rm -f "$STATE"
+  exit 0
+}
+
+case ${1-} in
+  plan) jq "$PLAN" ;;
+  once) round ;;
+  '')
+    trap shutdown TERM INT
+    log "Runner-Pool läuft"
+    while :; do
+      round || log "Runde fehlgeschlagen"
+      sleep "$POLL" &
+      wait $! || true
+    done
+    ;;
+  *) sed -n '9,12s/^# \{0,1\}//p' "$0" >&2; exit 2 ;;
+esac

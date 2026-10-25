@@ -4,6 +4,8 @@
 # damit PR-Code die Produktion auf demselben Server nicht stört. ci.yml wählt sie per Label
 # (Standard: BK_SLUG aus beads.project.sh), z. B. `runs-on: [self-hosted, regiehub]`.
 # Teil des beadskit aus dem ProjectTemplate – nicht im Projekt ändern.
+# Abgelöst durch den gemeinsamen Pool (ci/runner-pool). Hier nur noch zum Abbauen alter Runner
+# (`remove`) und für Projekte, die den Pool noch nicht nutzen.
 #
 #   runner-server setup [--dry-run] [--recreate]  Image bauen, Runner registrieren (kurzlebiges Token), alle starten
 #   runner-server status [--json]     Container auf dem Server und Status bei GitHub
@@ -47,6 +49,8 @@
 # gilt eine Stunde und wird nicht gespeichert; die Runner-Zugangsdaten liegen in den Volumes.
 set -eu
 
+# shellcheck source=lib.sh
+. "$(dirname "$0")/lib.sh"
 ROOT=$(git -C "$(dirname "$0")" rev-parse --path-format=absolute --git-common-dir)
 ROOT=$(dirname "$ROOT")
 BK_SLUG=""
@@ -74,11 +78,11 @@ CI_MEM=${RUNNER_CI_MEM:-24G}
 printf '%s' "$CI_MEM" | grep -Eq '^[1-9][0-9]*[KMGT]?$' || { echo "RUNNER_CI_MEM ungültig: '$CI_MEM' (z. B. 24G)" >&2; exit 1; }
 SLICE=beadskit-ci.slice
 export SLICE
-VERSION=2.337.0
+VERSION=$RUNNER_VERSION
 DIR=/opt/$LABEL-runner
 
 usage() {
-  sed -n '6,13s/^# \{0,1\}//p' "$0" >&2
+  sed -n '10,17s/^# \{0,1\}//p' "$0" >&2
   exit 2
 }
 
@@ -176,58 +180,6 @@ EOF
   for i in $(runners); do
     printf '  runner-%s: {}\n' "$i"
   done
-}
-
-dockerfile() {
-  cat <<EOF
-# Erzeugt von beadskit ci/runner-server – nicht von Hand ändern.
-FROM ghcr.io/actions/actions-runner:$VERSION
-USER root
-# Was ubuntu-latest vorinstalliert hat und CIs meist brauchen: maven, rsync + shellcheck,
-# unzip/xz/jq, fontconfig + eine Systemschrift (AWT-Textrasterung; ohne sie wirft der
-# JDK-FontManager "Fontconfig head is null"); dazu RUNNER_APT des Projekts
-RUN apt-get update \\
- && apt-get install -y --no-install-recommends maven rsync shellcheck unzip zip xz-utils jq \\
-    fontconfig fonts-dejavu-core $EXTRA_APT \\
- && rm -rf /var/lib/apt/lists/* \\
- && rm -f /etc/sudoers.d/*
-USER runner
-EOF
-}
-
-# systemd-Slice für alle CI-Container auf dem Server (gemeinsam für alle Projekte, der letzte
-# `setup` bestimmt die Werte). set-property übernimmt sie sofort, auch bei laufenden Containern.
-slice_script() {
-  cat <<EOF
-cat >/etc/systemd/system/$SLICE <<'SLICE'
-# Erzeugt von beadskit ci/runner-server – nicht von Hand ändern.
-[Unit]
-Description=CI-Runner (beadskit), gemeinsamer Deckel für CPU und RAM
-
-[Slice]
-CPUQuota=${CI_CPUS}00%
-CPUWeight=20
-IOWeight=20
-MemoryHigh=$(mem_high)
-MemoryMax=$CI_MEM
-SLICE
-systemctl daemon-reload
-systemctl start $SLICE
-systemctl set-property --runtime $SLICE CPUQuota=${CI_CPUS}00% CPUWeight=20 IOWeight=20 MemoryHigh=$(mem_high) MemoryMax=$CI_MEM
-EOF
-}
-
-# MemoryHigh (ab hier drosselt der Kernel) = 90 % von RUNNER_CI_MEM
-mem_high() {
-  n=${CI_MEM%[KMGT]}
-  u=${CI_MEM#"$n"}
-  case $u in
-    G) echo "$((n * 1024 * 9 / 10))M" ;;
-    T) echo "$((n * 1024 * 9 / 10))G" ;;
-    M) echo "$((n * 9 / 10))M" ;;
-    K) echo "$((n * 9 / 10))K" ;;
-    *) echo "$((n * 9 / 10))" ;;
-  esac
 }
 
 # Skript für den Server; $1 = Registrierungs-Token, $2 = Argumente für `docker compose up -d`,
@@ -340,45 +292,6 @@ active_jobs() {
       done
       wait
     }
-}
-
-# Auslastung auf dem Server als JSON: {containers: {runner-1: {cpu, mem}}, slice: {cpuPct, cpus, mem}}.
-# cpu in % eines Kerns. Die Slice wird über die Dauer von `docker stats` gemessen (zwei Lesungen
-# von usage_usec), cpus ist die Quota in Kernen (null ohne Slice).
-usage_script() {
-  printf 'slice=%s\ndir=%s\n' "$SLICE" "$DIR"
-  cat <<'EOF'
-# Bindestriche im Namen sind für systemd Hierarchie (beadskit.slice/beadskit-ci.slice)
-cg=/sys/fs/cgroup$(systemctl show -p ControlGroup --value "$slice" 2>/dev/null)
-[ "$cg" != /sys/fs/cgroup ] || cg=/nicht-vorhanden
-u() { sed -n 's/^usage_usec //p' "$cg/cpu.stat" 2>/dev/null; }
-t0=$(date +%s%N) u0=$(u)
-stats=$(cd "$dir" 2>/dev/null && ids=$(docker compose ps -q 2>/dev/null) && [ -n "$ids" ] &&
-  docker stats --no-stream --format '{{.Name}}	{{.CPUPerc}}	{{.MemUsage}}' $ids 2>/dev/null || true)
-t1=$(date +%s%N) u1=$(u)
-quota=$(cut -d' ' -f1 "$cg/cpu.max" 2>/dev/null)
-mem=$(cat "$cg/memory.current" 2>/dev/null)
-printf '%s\n' "$stats" | awk -F'\t' -v u0="$u0" -v u1="$u1" -v t0="$t0" -v t1="$t1" -v q="$quota" -v m="$mem" '
-  function bytes(s,  n, u) {
-    n = s + 0; u = s; sub(/^[0-9.]+/, "", u)
-    return (n * (u == "KiB" ? 1024 : u == "MiB" ? 1048576 : u == "GiB" ? 1073741824 : u == "TiB" ? 1099511627776 : 1))
-  }
-  BEGIN { printf "{\"containers\":{"; sep = "" }
-  NF >= 3 {
-    if ($1 ~ /-mysql-[0-9]+$/) svc = "mysql"
-    else if (match($1, /runner-[0-9]+-[0-9]+$/)) { svc = substr($1, RSTART, RLENGTH); sub(/-[0-9]+$/, "", svc) }
-    else next
-    split($3, mm, " / "); cpu = $2; sub(/%/, "", cpu)
-    printf "%s\"%s\":{\"cpu\":%.1f,\"mem\":%.0f}", sep, svc, cpu + 0, bytes(mm[1]); sep = ","
-  }
-  END {
-    printf "},\"slice\":{"
-    if (u0 != "" && u1 != "" && t1 > t0) printf "\"cpuPct\":%.1f,", (u1 - u0) * 100000 / (t1 - t0); else printf "\"cpuPct\":null,"
-    if (q ~ /^[0-9]+$/) printf "\"cpus\":%.2f,", q / 100000; else printf "\"cpus\":null,"
-    if (m ~ /^[0-9]+$/) printf "\"mem\":%.0f", m; else printf "\"mem\":null"
-    print "}}"
-  }'
-EOF
 }
 
 # {runners: [… mit job (laufender Job oder null), cpu, mem], queued: Anzahl wartender Jobs, slice}

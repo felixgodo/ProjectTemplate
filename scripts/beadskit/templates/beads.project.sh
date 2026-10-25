@@ -39,16 +39,11 @@ BK_START="fix=2 search=1 verify=1 regress=0"
 # modul:<schlüssel> werden dort bearbeitet; der Leitstand zeigt deren PRs mit.
 # BK_REPOS="site:../MeineSite"
 
-# Eigene CI-Runner (ci/runner-server) nutzt das Projekt, sobald ein Workflow runs-on self-hosted
-# hat; dann zeigt der Leitstand den Abschnitt CI-Runner. Zusätzliche apt-Pakete im Runner-Image,
-# MySQL für DB-Tests:
+# CI-Runner: Nutzt ein Workflow runs-on [self-hosted, <slug>], läuft er im gemeinsamen Pool aller
+# Projekte (ci/runner-pool setup). Der Leitstand zeigt dann den Abschnitt CI-Runner-Pool.
+# Zusätzliche apt-Pakete im Pool-Image, MySQL für DB-Tests (Host mysql):
 # RUNNER_APT=${RUNNER_APT:-ffmpeg}
 # RUNNER_MYSQL=${RUNNER_MYSQL:-8.0}
-# CPU-Gewicht der Runner gegenüber dem Host (Docker-Standard 1024; niedrig = Prod hat Vorrang):
-# RUNNER_CPU_SHARES=${RUNNER_CPU_SHARES:-128}
-# Deckel für alle CI-Container des Servers zusammen (systemd-Slice beadskit-ci.slice, alle Projekte):
-# RUNNER_CI_CPUS=${RUNNER_CI_CPUS:-4}
-# RUNNER_CI_MEM=${RUNNER_CI_MEM:-24G}
 
 # Leitstand: Knöpfe, Zusatzlisten, Links an Karten und Texte je Workspace kommen aus der
 # optionalen beads.leitstand.mjs (siehe scripts/beadskit/README.md).
