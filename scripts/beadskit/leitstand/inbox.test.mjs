@@ -96,6 +96,21 @@ test('planRunnerAction: Plätze 1–8, Pool und CI-MySQL an/aus, --force nur bei
   assert.deepEqual(planRunnerAction({ action: 'start', n: 'mariadb' }), ['start', 'mariadb']);
   for (const n of [1, 'all', '--force']) assert.throws(() => planRunnerAction({ action: 'stop', n }), /Pool, mysql oder mariadb/);
   for (const action of ['add', 'delete', 'remove', 'setup']) assert.throws(() => planRunnerAction({ action }), /Aktion/);
+  for (const action of ['logs', 'set-token', 'status']) assert.throws(() => planRunnerAction({ action }), /Aktion/);
+});
+
+test('planRunnerAction: je Projekt Grenze 1–8 oder off, Pause und Fortsetzen, nur gültige Labels', () => {
+  assert.deepEqual(planRunnerAction({ action: 'limit', label: 'spot', n: 2 }), ['limit', 'spot', '2']);
+  assert.deepEqual(planRunnerAction({ action: 'limit', label: 'spot', n: 'off' }), ['limit', 'spot', 'off']);
+  assert.deepEqual(planRunnerAction({ action: 'pause', label: 'regie-hub2', n: 3, force: true }), ['pause', 'regie-hub2']);
+  assert.deepEqual(planRunnerAction({ action: 'resume', label: 'spot' }), ['resume', 'spot']);
+  for (const n of [0, 9, '2', 1.5, undefined, 'OFF']) {
+    assert.throws(() => planRunnerAction({ action: 'limit', label: 'spot', n }), /1–8 oder off/);
+  }
+  for (const label of [undefined, '', 'Spot', 'a;rm', '--force', 'a b', 'x'.repeat(65), 3]) {
+    assert.throws(() => planRunnerAction({ action: 'pause', label }), /Label/);
+    assert.throws(() => planRunnerAction({ action: 'limit', label, n: 2 }), /Label/);
+  }
 });
 
 test('prSummary: CI-Zustand aus den Checks, übersprungene ausgeblendet', () => {
@@ -469,6 +484,17 @@ test('parsePool: Dienst, Plätze, Pool-Runner nach Platz, wartende Jobs, verwirf
   const empty = parsePool(null);
   assert.deepEqual([empty.service, empty.token, empty.slots, empty.runners, empty.mysql, empty.mariadb], ['missing', false, null, [], null, null]);
   assert.equal(parsePool({ slots: 12 }).slots, null);
+  assert.equal(empty.limits, null);
+});
+
+test('parsePool: Grenzen je Projekt, null solange der Server sie nicht kennt', () => {
+  const p = parsePool({ limits: {
+    spot: { max: 2, paused: false }, regiehub: { paused: true }, 'A;x': { max: 1 }, c: { max: 12, paused: 'ja' }, d: 3,
+  } });
+  assert.deepEqual(p.limits, { spot: { max: 2, paused: false }, regiehub: { max: null, paused: true }, c: { max: null, paused: false } });
+  assert.deepEqual(parsePool({ limits: {} }).limits, {});
+  assert.equal(parsePool({ limits: [] }).limits, null);
+  assert.equal(parsePool({}).limits, null);
 });
 
 test('parseMysql: Zustand, CPU und RAM der CI-MySQL, null ohne', () => {

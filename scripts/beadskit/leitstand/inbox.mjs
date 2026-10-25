@@ -4,7 +4,8 @@
 // Claude-Session gerade tut, aus ihrem Transkript), Kanban-Board je Workspace, PRs mit CI-Stand,
 // CI-Runner. Steuert Issues (verschieben, Priorität, Unclaim, anlegen), Worker (start, add, drain,
 // stop, restart, Chat: Verlauf lesen, Nachricht ins Terminal senden) und die CI-Runner auf dem
-// Server (gemeinsamer Pool: Plätze, an/aus, CI-MySQL). Mit `workers autorestart` startet der Server Worker mit
+// Server (gemeinsamer Pool aller Projekte, Tab „CI“: Plätze, an/aus, CI-MySQL, je Projekt Grenze
+// und Pause). Mit `workers autorestart` startet der Server Worker mit
 // großem Kontext zwischen zwei Runden selbst neu (Prüfung jede Minute, siehe planRestarts).
 // Liest und schreibt nur über scripts/beadskit/{bdw,workers,ci/runner-pool}, `claude agents|logs`,
 // `gh` und die Transkripte unter ~/.claude/projects (nur lesend).
@@ -394,14 +395,23 @@ export function planWorkerAction({ action, role, name, force, off, counts, thres
   }
 }
 
+const POOL_LABEL_RE = /^[a-z0-9][a-z0-9-]{0,63}$/;
+
 /**
  * Argumente für scripts/beadskit/ci/runner-pool: Plätze (size 1–8), Dienst an/aus (start/stop ohne
- * n) und CI-Datenbank an/aus (n = mysql oder mariadb, stop mit --force trotz laufendem Job).
+ * n), CI-Datenbank an/aus (n = mysql oder mariadb, stop mit --force trotz laufendem Job) und je
+ * Projekt (label) Grenze (limit, n 1–8 oder 'off') und Pause (pause/resume).
  */
-export function planRunnerAction({ action, n, force }) {
+export function planRunnerAction({ action, n, force, label }) {
   if (action === 'size') {
     if (!(Number.isInteger(n) && n >= 1 && n <= 8)) throw new Error('Plätze: 1–8');
     return ['size', String(n)];
+  }
+  if (action === 'limit' || action === 'pause' || action === 'resume') {
+    if (typeof label !== 'string' || !POOL_LABEL_RE.test(label)) throw new Error('unbekanntes Projekt-Label');
+    if (action !== 'limit') return [action, label];
+    if (!(n === 'off' || (Number.isInteger(n) && n >= 1 && n <= 8))) throw new Error('Grenze: 1–8 oder off');
+    return ['limit', label, String(n)];
   }
   if (action !== 'start' && action !== 'stop') throw new Error('unbekannte Aktion');
   if (n == null) return [action];
@@ -410,8 +420,9 @@ export function planRunnerAction({ action, n, force }) {
 }
 
 /**
- * Normalisiert `runner-pool status --json`: Dienst, Plätze, laufende Pool-Runner (mit Projekt-Label,
- * Job, CPU, RAM), wartende Jobs je Label, CI-MySQL und Slice. Ungültiges fällt weg.
+ * Normalisiert `runner-pool status --json`: Dienst, Plätze, Grenzen je Projekt, laufende Pool-Runner
+ * (mit Projekt-Label, Job, CPU, RAM), wartende Jobs je Label, CI-MySQL und Slice. Ungültiges fällt
+ * weg. limits ist null, solange der Dienst auf dem Server noch keine Grenzen kennt (setup fehlt).
  */
 export function parsePool(d) {
   const job = (j) => (j && typeof j === 'object' ? {
@@ -432,6 +443,14 @@ export function parsePool(d) {
       .filter((r) => r && typeof r.repo === 'string' && typeof r.label === 'string')
       .map((r) => ({ repo: r.repo, label: r.label })),
     queued: Object.fromEntries(Object.entries(queued).filter(([, v]) => Number.isInteger(v) && v > 0)),
+    limits: o.limits && typeof o.limits === 'object' && !Array.isArray(o.limits)
+      ? Object.fromEntries(Object.entries(o.limits)
+        .filter(([k, v]) => POOL_LABEL_RE.test(k) && v && typeof v === 'object')
+        .map(([k, v]) => [k, {
+          max: Number.isInteger(v.max) && v.max >= 1 && v.max <= 8 ? v.max : null,
+          paused: v.paused === true,
+        }]))
+      : null,
     runners: (Array.isArray(o.runners) ? o.runners : [])
       .filter((r) => r && typeof r.name === 'string' && r.name.startsWith('pool-'))
       .map((r) => ({
@@ -1756,6 +1775,48 @@ function startServer(token, selfRoot) {
     return (Array.isArray(shown) ? shown[0] : shown) || null;
   }
 
+  // Gemeinsamer CI-Runner-Pool, unabhängig vom gewählten Projekt: Status, Log und Steuerung über
+  // ci/runner-pool des ersten Projekts mit runners (alle sprechen denselben Dienst auf dem Server an).
+  // Eigene Route: ssh zum Server dauert, ein Fehler soll das Board nicht stören.
+  async function pool(req, res, path) {
+    const list = await projects.all();
+    const own = list.find((c) => c.runners);
+    if (!own) return send(res, 404, { error: 'kein Projekt mit CI-Runner-Pool' });
+    const t = tools(own);
+    if (req.method === 'GET' && path === '/api/pool') {
+      try {
+        const { stdout } = await run(t.runnerCmd, ['status', '--json'], { cwd: t.root, timeout: 30_000 });
+        return send(res, 200, {
+          ...parsePool(JSON.parse(stdout)),
+          // Label → Projektname für die Anzeige; Label ist BK_SLUG (ohne eigenes RUNNER_LABEL)
+          names: Object.fromEntries(list.map((c) => [c.slug, c.name])),
+          at: new Date().toISOString(),
+        });
+      } catch (e) {
+        const msg = stripAnsi(`${e.stderr || ''}`).trim() || e.message;
+        return send(res, 502, { error: `Runner-Status nicht lesbar: ${msg}` });
+      }
+    }
+    if (req.method === 'GET' && path === '/api/pool/logs') {
+      try {
+        const r = await run(t.runnerCmd, ['logs'], { cwd: t.root, timeout: 30_000 });
+        return send(res, 200, { output: stripAnsi(r.stdout).trim() });
+      } catch (e) {
+        return send(res, 502, { error: cmdOutput(e) });
+      }
+    }
+    if (req.method !== 'POST' || path !== '/api/pool') return send(res, 404, { error: 'nicht gefunden' });
+    if (!isSameOrigin(req.headers)) return send(res, 403, { error: 'nur von der Leitstand-Seite' });
+    let args;
+    try { args = planRunnerAction(await readBody(req)); } catch (e) { return send(res, e.code || 400, { error: e.message }); }
+    try {
+      const r = await run(t.runnerCmd, args, { cwd: t.root, timeout: 60_000 });
+      return send(res, 200, { ok: true, output: stripAnsi(`${r.stdout}${r.stderr}`).trim() });
+    } catch (e) {
+      return send(res, 409, { error: cmdOutput(e) });
+    }
+  }
+
   const server = createServer(async (req, res) => {
     try {
       if (!isOwnHost(req.headers)) return send(res, 403, { error: 'falscher Host' });
@@ -1766,6 +1827,7 @@ function startServer(token, selfRoot) {
         return send(res, 200, await readFile(join(HERE, 'inbox.html'), 'utf8'), 'text/html; charset=utf-8');
       }
       if (req.method === 'GET' && path === '/api/projects') return send(res, 200, await projectList());
+      if (path === '/api/pool' || path === '/api/pool/logs') return await pool(req, res, path);
 
       // Alles Weitere gehört zu einem Projekt
       const slug = url.searchParams.get('p') || '';
@@ -1801,21 +1863,6 @@ function startServer(token, selfRoot) {
         return data ? send(res, 200, data) : send(res, 404, { error: 'Worker läuft nicht' });
       }
       if (req.method === 'GET' && path === '/api/system') return send(res, 200, await systems(cfg.root, ext.servers));
-      if (req.method === 'GET' && path === '/api/runners') {
-        if (!cfg.runners) return send(res, 404, { error: 'keine eigenen CI-Runner' });
-        // eigene Route: ssh zum Server dauert, ein Fehler soll das Board nicht stören
-        try {
-          const { stdout } = await run(t.runnerCmd, ['status', '--json'], { cwd: t.root, timeout: 30_000 });
-          return send(res, 200, {
-            ...parsePool(JSON.parse(stdout)),
-            label: cfg.slug,
-            at: new Date().toISOString(),
-          });
-        } catch (e) {
-          const msg = stripAnsi(`${e.stderr || ''}`).trim() || e.message;
-          return send(res, 502, { error: `Runner-Status nicht lesbar: ${msg}` });
-        }
-      }
       if (req.method !== 'POST') return send(res, 404, { error: 'nicht gefunden' });
       if (!isSameOrigin(req.headers)) return send(res, 403, { error: 'nur von der Leitstand-Seite' });
       let body;
@@ -1892,18 +1939,6 @@ function startServer(token, selfRoot) {
           remoteCache.clear();
         }
         return failed ? send(res, 409, { error: out.join('\n').trim() }) : send(res, 200, { ok: true, output: out.join('\n').trim() });
-      }
-      if (path === '/api/runners') {
-        if (!cfg.runners) return send(res, 404, { error: 'keine eigenen CI-Runner' });
-        let args;
-        try { args = planRunnerAction(body); } catch (e) { return send(res, 400, { error: e.message }); }
-        try {
-          // add baut das Image und registriert, das dauert bis zu einigen Minuten
-          const r = await run(t.runnerCmd, args, { cwd: t.root, timeout: 60_000 });
-          return send(res, 200, { ok: true, output: stripAnsi(`${r.stdout}${r.stderr}`).trim() });
-        } catch (e) {
-          return send(res, 409, { error: cmdOutput(e) });
-        }
       }
       send(res, 404, { error: 'nicht gefunden' });
     } catch (e) {

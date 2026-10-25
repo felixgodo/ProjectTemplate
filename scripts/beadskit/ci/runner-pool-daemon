@@ -18,6 +18,8 @@
 # Token: /etc/beadskit-ci/token (POOL_TOKEN_FILE), Fine-grained PAT für die Repos mit
 # Administration: write (JIT-Registrierung, Runner löschen) und Actions: read.
 # Zustand für `runner-pool status`: /run/beadskit-runner-pool/state.json (POOL_STATE).
+# Grenzen je Projekt: /etc/beadskit-ci/projects.json (POOL_LIMITS), {label: {max: 1–8, paused: true}},
+# geschrieben von `runner-pool limit|pause|resume`. Fehlt sie oder ist sie ungültig, gilt keine Grenze.
 #
 # Je Platz (1 … SLOTS) gibt es die Volumes beadskit-pool-tool-<k> (_work/_tool: setup-java,
 # Node, Flutter …) und beadskit-pool-cache-<k> (~/.cache). Ein Platz läuft nie doppelt, also
@@ -29,6 +31,7 @@ set -euo pipefail
 CONF=${POOL_CONF:-/etc/beadskit-ci/pool.conf}
 TOKEN_FILE=${POOL_TOKEN_FILE:-/etc/beadskit-ci/token}
 STATE=${POOL_STATE:-/run/beadskit-runner-pool/state.json}
+LIMITS_FILE=${POOL_LIMITS:-/etc/beadskit-ci/projects.json}
 API=${GH_API:-https://api.github.com}
 
 REPOS="" SLOTS=4 CPUS=2 MEM=6g POLL=15 IDLE_MAX=600
@@ -46,27 +49,42 @@ load_conf() {
   done
 }
 
+# Grenzen je Label aus LIMITS_FILE, Ungültiges fällt weg: {label: {max: 1–8 | null, paused: bool}}
+limits() {
+  jq -c 'if type == "object" then with_entries(select(.key | test("^[a-z0-9-]+$")) | select(.value | type == "object")
+    | .value = {max: (.value.max | if type == "number" and . >= 1 and . <= 8 and floor == . then . else null end),
+      paused: (.value.paused == true)}) else {} end' "$LIMITS_FILE" 2>/dev/null || echo '{}'
+}
+
 # Entscheidet aus dem Zustand, was zu tun ist (reines jq, getestet über `plan`).
 # Eingabe: {slots, now (Unix-Sekunden), idleMax, queued: [{repo, label, created}],
-#           containers: [{name, label, repo, slot, started (Unix)}], runners: [{repo, name, status, busy, id}]}
+#           containers: [{name, label, repo, slot, started (Unix)}], runners: [{repo, name, status, busy, id}],
+#           limits: {label: {max, paused}} (optional)}
 # Ausgabe: {start: [{repo, label, slot}], stop: [{name, repo, id}], forget: [{repo, id, name}]}
 # - start: je wartendem Job (älteste zuerst) einen Runner, außer ein freier Runner desselben
 #   Labels kann ihn nehmen; höchstens bis alle Plätze belegt sind, kleinste freie Platznummer.
-# - stop: Container, deren Runner seit idleMax keinen Job hat (ein anderer nahm ihn).
+#   Ein pausiertes Label bekommt keinen Runner, eines mit max höchstens max Container gleichzeitig.
+# - stop: Container, deren Runner seit idleMax keinen Job hat (ein anderer nahm ihn), bei einem
+#   pausierten Label sofort; laufende Jobs laufen zu Ende.
 # - forget: Pool-Runner bei GitHub ohne Container (abgestürzt, nie gestartet).
 # shellcheck disable=SC2016
 PLAN='
   . as $s
+  | ($s.limits // {}) as $lim
   | ($s.runners | map({key: .name, value: .}) | from_entries) as $gh
   | [$s.containers[] | . + {busy: ($gh[.name].busy // false)}] as $cs
-  | ([$cs[] | select(.busy | not) | select(($s.now - .started) >= $s.idleMax)]) as $old
+  | ([$cs[] | select(.busy | not) | select((($s.now - .started) >= $s.idleMax) or ($lim[.label].paused == true))]) as $old
   | ([$cs[] | select(.name as $n | $old | map(.name) | index($n) | not)]) as $keep
   | (reduce ($keep[] | select(.busy | not)) as $c ({}; .[$c.label] += 1)) as $idle
   | ([$keep[].slot] | map(tonumber)) as $used
   | ([range(1; $s.slots + 1)] - $used) as $free
-  | (reduce ($s.queued | sort_by(.created))[] as $j ({idle: $idle, free: $free, start: []};
+  | (reduce $keep[] as $c ({}; .[$c.label] += 1)) as $per
+  | (reduce ($s.queued | sort_by(.created))[] as $j ({idle: $idle, free: $free, per: $per, start: []};
       if (.idle[$j.label] // 0) > 0 then .idle[$j.label] -= 1
+      elif $lim[$j.label].paused == true then .
+      elif (.per[$j.label] // 0) >= ($lim[$j.label].max // $s.slots) then .
       elif (.free | length) > 0 then .start += [{repo: $j.repo, label: $j.label, slot: .free[0]}] | .free = .free[1:]
+        | .per[$j.label] += 1
       else . end)) as $r
   | {
       start: $r.start,
@@ -136,7 +154,8 @@ forget_runner() {
 round() {
   load_conf
   TOKEN=$(cat "$TOKEN_FILE")
-  local jobs runners cs label repo input plan
+  local jobs runners cs label repo input plan lim
+  lim=$(limits)
   jobs=$(for r in $REPOS; do repo_jobs "${r%%:*}" "${r##*:}" || log "Jobs von ${r%%:*} nicht lesbar" >&2; done | jq -s .)
   runners=$(for r in $REPOS; do
     repo=${r%%:*}
@@ -145,8 +164,8 @@ round() {
   done | jq -s .)
   cs=$(containers)
   input=$(jq -n --argjson j "$jobs" --argjson r "$runners" --argjson c "$cs" --argjson slots "$SLOTS" \
-    --argjson idle "$IDLE_MAX" '{slots: $slots, now: now | floor, idleMax: $idle,
-      queued: [$j[] | select(.kind == "queued")], containers: $c, runners: $r}')
+    --argjson idle "$IDLE_MAX" --argjson lim "$lim" '{slots: $slots, now: now | floor, idleMax: $idle,
+      queued: [$j[] | select(.kind == "queued")], containers: $c, runners: $r, limits: $lim}')
   plan=$(jq "$PLAN" <<<"$input")
   jq -r '.stop[] | "\(.name)\t\(.repo)\t\(.id)"' <<<"$plan" | while IFS=$'\t' read -r name repo id; do
     docker stop -t 5 "$name" >/dev/null 2>&1 || true
@@ -159,15 +178,16 @@ round() {
   jq -r '.start[] | "\(.repo)\t\(.label)\t\(.slot)"' <<<"$plan" | while IFS=$'\t' read -r repo label slot; do
     start_runner "$repo" "$label" "$slot"
   done
-  write_state "$jobs" "$runners"
+  write_state "$jobs" "$runners" "$lim"
 }
 
-# Zustand für runner-pool status: Plätze, wartende Jobs je Label, Runner mit Job
+# Zustand für runner-pool status: Plätze, Grenzen, wartende Jobs je Label, Runner mit Job
 write_state() {
   mkdir -p "$(dirname "$STATE")"
-  jq -n --argjson j "$1" --argjson r "$2" --argjson c "$(containers)" --argjson slots "$SLOTS" --arg repos "$REPOS" '
+  jq -n --argjson j "$1" --argjson r "$2" --argjson c "$(containers)" --argjson slots "$SLOTS" --arg repos "$REPOS" \
+    --argjson lim "$3" '
     ($r | map({key: .name, value: .}) | from_entries) as $gh
-    | {at: (now | todate), slots: $slots,
+    | {at: (now | todate), slots: $slots, limits: $lim,
        repos: [$repos | splits(" ") | select(. != "") | {repo: split(":")[0], label: split(":")[1]}],
        queued: (reduce ($j[] | select(.kind == "queued")) as $q ({}; .[$q.label] += 1)),
        runners: [$c[] | .name as $n | {name, label: .label, repo, slot, busy: ($gh[$n].busy // false),

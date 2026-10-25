@@ -81,7 +81,7 @@ test('plan: ohne freie Plätze startet nichts', () => {
 });
 
 // Falsches curl (Antwort je URL aus FIXTURES/<pfad>.json) und docker (ps leer, run protokolliert)
-function round(fixtures, conf) {
+function round(fixtures, conf, limits) {
   const dir = mkdtempSync(join(tmpdir(), 'runner-pool-'));
   const fx = join(dir, 'fx');
   mkdirSync(fx);
@@ -97,9 +97,10 @@ cat "$FX/$key" 2>/dev/null || echo '{}'
   chmodSync(join(dir, 'docker'), 0o755);
   writeFileSync(join(dir, 'pool.conf'), conf);
   writeFileSync(join(dir, 'token'), 'ghp_test\n');
+  if (limits !== undefined) writeFileSync(join(dir, 'projects.json'), typeof limits === 'string' ? limits : JSON.stringify(limits));
   const r = spawnSync('bash', [DAEMON, 'once'], { encoding: 'utf8', env: {
     ...process.env, PATH: `${dir}:${process.env.PATH}`, FX: fx, LOG: log, GH_API: 'https://api.test',
-    POOL_CONF: join(dir, 'pool.conf'), POOL_TOKEN_FILE: join(dir, 'token'), POOL_STATE: join(dir, 'state.json'),
+    POOL_CONF: join(dir, 'pool.conf'), POOL_TOKEN_FILE: join(dir, 'token'), POOL_STATE: join(dir, 'state.json'), POOL_LIMITS: join(dir, 'projects.json'),
   } });
   const out = { ...r, log: readFileSync(log, 'utf8'), state: JSON.parse(readFileSync(join(dir, 'state.json'), 'utf8')) };
   rmSync(dir, { recursive: true, force: true });
@@ -220,4 +221,107 @@ test('setup: CI-MariaDB, sobald ein Projekt RUNNER_MARIADB setzt, neben der MySQ
   const none = setupDry([{ slug: 'a', repo: 'o/a' }]);
   assert.match(none.stdout, /docker rm -f beadskit-ci-mariadb/);
   assert.match(setupDry([{ slug: 'a', repo: 'o/a', mariadb: '11;x' }]).stderr, /RUNNER_MARIADB ungültig/);
+});
+
+test('plan: Grenze je Projekt zählt laufende und freie Container, andere Projekte nutzen die Plätze', () => {
+  const p = plan({ ...base, limits: { a: { max: 1 } }, queued: [
+    job('o/a', 'a', '1'), job('o/a', 'a', '2'), job('o/a', 'a', '3'), job('o/b', 'b', '4'),
+  ] });
+  assert.deepEqual(p.start, [{ repo: 'o/a', label: 'a', slot: 1 }, { repo: 'o/b', label: 'b', slot: 2 }]);
+  // ein beschäftigter Container von a belegt die Grenze schon
+  const full = plan({ ...base, limits: { a: { max: 1 } }, queued: [job('o/a', 'a', '1')],
+    containers: [{ name: 'pool-a-1', label: 'a', repo: 'o/a', slot: '1', started: 1 }],
+    runners: [{ repo: 'o/a', name: 'pool-a-1', status: 'online', busy: true, id: 1 }] });
+  assert.deepEqual(full.start, []);
+  // ein freier Container von a darf den Job trotz Grenze übernehmen
+  const idle = plan({ ...base, limits: { a: { max: 1 } }, queued: [job('o/a', 'a', '1'), job('o/a', 'a', '2')],
+    containers: [{ name: 'pool-a-1', label: 'a', repo: 'o/a', slot: '1', started: 9_900 }],
+    runners: [{ repo: 'o/a', name: 'pool-a-1', status: 'online', busy: false, id: 1 }] });
+  assert.deepEqual(idle.start, []);
+  assert.deepEqual(idle.stop, []);
+});
+
+test('plan: pausiertes Projekt bekommt keinen Runner, freie Container enden sofort, Jobs laufen zu Ende', () => {
+  const p = plan({ ...base, limits: { a: { paused: true, max: null } }, queued: [job('o/a', 'a', '1'), job('o/b', 'b', '2')],
+    containers: [
+      { name: 'pool-a-1', label: 'a', repo: 'o/a', slot: '1', started: 9_990 },
+      { name: 'pool-a-2', label: 'a', repo: 'o/a', slot: '2', started: 1 },
+    ],
+    runners: [
+      { repo: 'o/a', name: 'pool-a-1', status: 'online', busy: false, id: 1 },
+      { repo: 'o/a', name: 'pool-a-2', status: 'online', busy: true, id: 2 },
+    ] });
+  assert.deepEqual(p.stop, [{ name: 'pool-a-1', repo: 'o/a', id: 1 }]);
+  assert.deepEqual(p.start, [{ repo: 'o/b', label: 'b', slot: 1 }]);
+});
+
+test('plan: ohne limits wie bisher', () => {
+  const q = [job('o/a', 'a', '1'), job('o/a', 'a', '2')];
+  assert.deepEqual(plan({ ...base, queued: q }).start, plan({ ...base, queued: q, limits: {} }).start);
+  assert.equal(plan({ ...base, queued: q }).start.length, 2);
+});
+
+test('Runde: Grenzen aus projects.json (Ungültiges fällt weg) wirken und stehen im Zustand', () => {
+  const fx = {
+    'repos_o_a_actions_runs': { workflow_runs: [{ id: 11, head_branch: 'x', display_title: 'X' }] },
+    'repos_o_a_actions_runs_11_jobs': { jobs: [
+      { status: 'queued', labels: ['self-hosted', 'a'], created_at: '2026-10-25T10:00:00Z' },
+    ] },
+    'repos_o_a_actions_runners': { runners: [] },
+    'repos_o_a_actions_runners_generate-jitconfig': { encoded_jit_config: 'JITCFG' },
+  };
+  const conf = 'REPOS="o/a:a"\nSLOTS=2\n';
+  const paused = round(fx, conf, { a: { paused: true }, 'B;x': { max: 2 }, c: { max: 99 } });
+  assert.equal(paused.status, 0, paused.stderr);
+  assert.ok(!paused.log.includes('docker run'), paused.log);
+  assert.deepEqual(paused.state.limits, { a: { max: null, paused: true }, c: { max: null, paused: false } });
+  const broken = round(fx, conf, 'kein json');
+  assert.equal(broken.status, 0, broken.stderr);
+  assert.ok(broken.log.includes('docker run'), broken.log);
+  assert.deepEqual(broken.state.limits, {});
+});
+
+// limit/pause/resume: falsches ssh führt das Server-Skript lokal aus, /etc/beadskit-ci → Testordner
+function poolCmd(args, { repos = 'o/a:a o/b:spot-x', limits } = {}) {
+  const dir = mkdtempSync(join(tmpdir(), 'runner-pool-l-'));
+  const etc = join(dir, 'etc');
+  mkdirSync(etc);
+  writeFileSync(join(etc, 'pool.conf'), `REPOS="${repos}"\nSLOTS=4\n`);
+  if (limits !== undefined) writeFileSync(join(etc, 'projects.json'), limits);
+  writeFileSync(join(dir, 'ssh'), `#!/bin/bash\n[ "\${@: -2:1}" = bash ] || { echo "ssh $*" >>"$ETC/ssh.log"; exit 0; }\nsed "s#/etc/beadskit-ci#$ETC#g" | bash -s\n`);
+  chmodSync(join(dir, 'ssh'), 0o755);
+  const r = spawnSync('sh', [POOL, ...args], { encoding: 'utf8',
+    env: { ...process.env, PATH: `${dir}:${process.env.PATH}`, ETC: etc } });
+  let file = null;
+  try { file = JSON.parse(readFileSync(join(etc, 'projects.json'), 'utf8')); } catch { /* fehlt */ }
+  rmSync(dir, { recursive: true, force: true });
+  return { ...r, file };
+}
+
+test('limit, pause, resume schreiben projects.json und lassen andere Projekte stehen', () => {
+  const l = poolCmd(['limit', 'a', '2'], { limits: '{"spot-x":{"paused":true}}' });
+  assert.equal(l.status, 0, l.stderr);
+  assert.deepEqual(l.file, { 'spot-x': { paused: true }, a: { max: 2 } });
+  const p = poolCmd(['pause', 'a'], { limits: '{"a":{"max":2}}' });
+  assert.deepEqual(p.file, { a: { max: 2, paused: true } });
+  // leere Einträge fallen weg, eine kaputte Datei wird ersetzt
+  assert.deepEqual(poolCmd(['resume', 'a'], { limits: '{"a":{"paused":true}}' }).file, {});
+  assert.deepEqual(poolCmd(['limit', 'spot-x', 'off'], { limits: 'kaputt' }).file, {});
+  assert.deepEqual(poolCmd(['limit', 'a', '8']).file, { a: { max: 8 } });
+});
+
+test('limit, pause, resume prüfen Label und Plätze', () => {
+  const unknown = poolCmd(['pause', 'zz']);
+  assert.equal(unknown.status, 1);
+  assert.match(unknown.stderr, /nicht im Pool/);
+  // Präfix eines anderen Labels zählt nicht
+  assert.equal(poolCmd(['pause', 'spot']).status, 1);
+  for (const args of [['limit', 'a', '0'], ['limit', 'a', '9'], ['limit', 'a', 'x']]) {
+    const r = poolCmd(args);
+    assert.equal(r.status, 2);
+    assert.match(r.stderr, /1–8 oder off/);
+  }
+  for (const l of ['A', 'a;rm', 'a b', '', '-x']) assert.equal(poolCmd(['pause', l]).status, 2, l);
+  assert.equal(poolCmd(['pause']).status, 2);
+  assert.equal(poolCmd(['limit', 'a']).status, 2);
 });

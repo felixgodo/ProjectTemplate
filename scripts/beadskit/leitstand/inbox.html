@@ -81,6 +81,28 @@
   .runner.warn .dot { background: var(--warn); }
   .runner.missing { opacity: .7; }
   .runner.other { opacity: .75; }
+  .pooltbl { display: grid; grid-template-columns: minmax(0, 1.4fr) repeat(2, minmax(0, .8fr)) minmax(0, 1.4fr) auto;
+    align-items: center; gap: 6px 12px; margin-bottom: 14px; padding: 8px 12px; font-size: 13px;
+    background: var(--panel); border: 1px solid var(--line); border-radius: 10px; }
+  .pooltbl > .th { font-size: 12px; color: var(--muted); font-weight: 600; }
+  .pooltbl .lim { display: flex; align-items: center; gap: 4px; white-space: nowrap; }
+  .pooltbl .pname { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .pooltbl .pname.own b { color: var(--accent); }
+  .pooltbl .paused { color: var(--warn); font-weight: 600; }
+  .poolsub { margin: 14px 0 8px; font-size: 14px; }
+  .poollog summary { cursor: pointer; font-size: 14px; font-weight: 600; margin: 14px 0 8px; }
+  .poollog pre { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 11.5px; background: var(--panel);
+    border: 1px solid var(--line); border-radius: 10px; padding: 8px 10px; max-height: 420px; overflow: auto; }
+  #ci-line { margin: 14px 0 0; font-size: 13px; }
+  .pooltbl .prow { display: contents; }
+  @media (max-width: 640px) {
+    .pooltbl { display: block; padding: 2px 12px; }
+    .pooltbl > .th, .pooltbl .repo { display: none; }
+    .pooltbl .prow { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 4px 10px; padding: 8px 0; }
+    .pooltbl .prow + .prow { border-top: 1px solid var(--line); }
+    .pooltbl .pname { grid-area: 1 / 1; } .pooltbl .ppause { grid-area: 1 / 2; justify-self: end; }
+    .pooltbl .cnt { grid-area: 2 / 1; font-size: 12px; } .pooltbl .pctl { grid-area: 2 / 2; justify-self: end; }
+  }
 
   /* Kennzahlen */
   .kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(118px, 1fr)); gap: 8px; }
@@ -416,6 +438,7 @@
     <button data-tab="board" role="tab" title="Board (3)"><svg viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="18" rx="1.5"/><rect x="14" y="3" width="7" height="11" rx="1.5"/></svg><span class="tl">Board</span><span class="tb calm" id="tb-board"></span></button>
     <button data-tab="prs" role="tab" title="PRs (4)"><svg viewBox="0 0 24 24"><circle cx="6" cy="6" r="2.5"/><circle cx="6" cy="18" r="2.5"/><circle cx="18" cy="18" r="2.5"/><path d="M6 8.5v7M18 15.5V9a3 3 0 0 0-3-3h-4"/><path d="M13 3.5L10.5 6 13 8.5"/></svg><span class="tl">PRs</span><span class="tb calm" id="tb-prs"></span></button>
     <button data-tab="system" role="tab" title="System (5)"><svg viewBox="0 0 24 24"><path d="M3 12h4l3-8 4 16 3-8h4"/></svg><span class="tl">System</span><span class="tb" id="tb-system"></span></button>
+    <button data-tab="ci" role="tab" title="CI-Runner-Pool (6)" hidden><svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="6" rx="1.5"/><rect x="3" y="14" width="18" height="6" rx="1.5"/><path d="M7 7h.01M7 17h.01M11 7h6M11 17h6"/></svg><span class="tl">CI</span><span class="tb calm" id="tb-ci"></span></button>
   </nav>
   <div id="errors"></div>
 
@@ -432,9 +455,17 @@
     <h2>Worker <span class="sub muted" id="workers-n"></span></h2>
     <div class="roles" id="roles"></div>
 
-    <div id="runners-wrap" hidden><h2>CI-Runner-Pool <span class="sub muted" id="runners-n"></span>
+    <p class="muted" id="ci-line" hidden></p>
+  </section>
+
+  <section data-pane="ci" hidden>
+    <h2>CI-Runner-Pool <span class="sub muted" id="runners-n"></span>
       <span id="runners-ctl"></span></h2>
-    <div class="runners" id="runners"><span class="muted" style="font-size:13px">lädt …</span></div></div>
+    <p class="muted" style="margin:-4px 0 10px;font-size:13px" id="pool-hint">Ein Pool für alle Projekte: Plätze und an/aus gelten für alle, Grenze und Pause je Projekt. Laufende Jobs laufen immer zu Ende.</p>
+    <div class="pooltbl" id="pool-projects"><span class="muted">lädt …</span></div>
+    <h3 class="poolsub">Runner und CI-Datenbanken</h3>
+    <div class="runners" id="runners"><span class="muted" style="font-size:13px">lädt …</span></div>
+    <details class="poollog" id="pool-log"><summary>Log des Dienstes</summary><pre id="pool-log-text">lädt …</pre></details>
   </section>
 
   <section data-pane="board" hidden>
@@ -511,7 +542,7 @@ const keys = {};               // letzte Render-Schlüssel je Bereich
 let dragging = null;
 let drawer = null;             // { kind: 'issue'|'worker'|'create', id }
 // Bereiche als Tabs; der aktive steht im Hash (#<projekt>/<tab>) und im Browser
-const TABS = ['decide', 'worker', 'board', 'prs', 'system'];
+const TABS = ['decide', 'worker', 'board', 'prs', 'system', 'ci'];
 let TAB = 'decide';
 // Finger statt Maus (iPhone): kein Drag & Drop, Bestätigen per zweitem Tippen
 const TOUCH = matchMedia('(pointer: coarse)').matches;
@@ -954,7 +985,6 @@ function renderSwitch() {
   $('ws-switch').hidden = !html;
   document.querySelector('.tabs [data-tab="prs"]').hidden = !meta().prs;
   if (TAB === 'prs' && !meta().prs) showTab('decide');
-  $('runners-wrap').hidden = !st.project.runners;
   // humanHint kommt aus beads.leitstand.mjs des Projekts (HTML), sonst der Standardtext
   $('human-hint').innerHTML = meta().humanHint
     || `Entscheidung eintragen und <b>${esc(meta().release)}</b>: Die Notiz landet am Issue, das Label <code>human</code> fällt weg, und der nächste Worker übernimmt. <b>Notiz</b> ergänzt nur.${TOUCH ? '' : ' Karten vom Board lassen sich hierher ziehen.'}`;
@@ -984,32 +1014,46 @@ function renderPanels() {
     : '<div class="row muted">keine</div>'}</div>`).join('');
 }
 
-// ---- CI-Runner ----
+// ---- CI-Runner-Pool (Tab „CI“, für alle Projekte gleich) ----
 // Eigener Abruf (ssh zum Server), höchstens alle 30 s, außer nach ↻ oder einer Aktion
 let runners = null;
 let runnersAt = 0;
-let runnersOf = '';
-async function loadRunners(force = false) {
-  if (!st?.project?.runners) return;
-  if (runnersOf !== P) { runners = null; runnersAt = 0; runnersOf = P; renderRunners(); }
-  if (loadRunners.busy || (!force && Date.now() - runnersAt < 30_000)) return;
-  loadRunners.busy = true;
+// offen: alle 10 s, sonst alle 30 s für Zeile im Worker-Tab und Zähler am Tab
+async function loadPool(force = false) {
+  if (!hasPool()) return;
+  if (loadPool.busy || (!force && Date.now() - runnersAt < (TAB === 'ci' ? 10_000 : 30_000))) return;
+  loadPool.busy = true;
   runnersAt = Date.now();
   const slug = P;
   try {
-    const r = await fetch(withP('/api/runners'));
+    const r = await fetch('/api/pool');
     if (r.status === 401) { location.href = '/login'; return; }
     const res = await r.json().catch(() => ({}));
     if (slug !== P) return;   // Antwort zu einem vorher gewählten Projekt
     runners = r.ok ? res : { error: res.error || r.statusText };
   } catch (e) {
     runners = { error: e.message };
-  } finally { loadRunners.busy = false; }
+  } finally { loadPool.busy = false; }
   renderRunners();
+  if ($('pool-log').open) loadPoolLog();
 }
-// Ein Einmal-Runner des gemeinsamen Pools: Projekt (Label), Job, CPU/RAM; das eigene Projekt hervorgehoben
+async function loadPoolLog() {
+  try {
+    const r = await fetch('/api/pool/logs');
+    const res = await r.json().catch(() => ({}));
+    const pre = $('pool-log-text');
+    // neueste Zeilen unten: am Ende bleiben, außer man hat hochgescrollt
+    const atEnd = pre.scrollTop + pre.clientHeight >= pre.scrollHeight - 20 || pre.textContent === 'lädt …';
+    pre.textContent = r.ok ? res.output || '(leer)' : res.error || r.statusText;
+    if (atEnd) pre.scrollTop = pre.scrollHeight;
+  } catch (e) { $('pool-log-text').textContent = e.message; }
+}
+$('pool-log').addEventListener('toggle', () => { if ($('pool-log').open) loadPoolLog(); });
+setInterval(() => { if (TAB === 'ci' && !document.hidden) loadPool(); }, 10_000);
+const poolName = (label) => runners?.names?.[label] || label;
+// Ein Einmal-Runner des gemeinsamen Pools: Projekt (Label), Job, CPU/RAM; das gewählte Projekt hervorgehoben
 function runnerChip(r) {
-  const own = r.label === runners?.label;
+  const own = r.label === P;
   const state = r.busy ? 'Job' : r.github === 'starting' ? 'startet' : 'wartet auf Job';
   const use = r.cpu != null || r.mem != null
     ? `<div class="use muted">CPU ${r.cpu != null ? `${Math.round(r.cpu)} %` : '?'} · RAM ${gib(r.mem)}</div>` : '';
@@ -1020,7 +1064,7 @@ function runnerChip(r) {
       <span class="muted">· ${esc(j.branch)}${j.started ? ` · seit ${esc(dur(ms(j.started)))}` : ''}</span></div>`
     : `<div class="job muted">${r.busy ? 'Job läuft' : 'wartet auf einen Job'}</div>`;
   return `<div class="runner on${r.busy ? ' busy' : ''}${own ? '' : ' other'}"><div class="rhead"><span class="dot"></span>
-    <b>${esc(r.label)}</b><span class="muted" title="${esc(`${r.name} · ${r.repo}`)}">Platz ${esc(r.slot ?? '?')} · ${esc(state)}</span>
+    <b>${esc(poolName(r.label))}</b><span class="muted" title="${esc(`${r.name} · ${r.repo}`)}">Platz ${esc(r.slot ?? '?')} · ${esc(state)}</span>
     ${r.busy ? '<span class="badge warn" title="arbeitet gerade an einem CI-Job">Job</span>' : ''}</div>${job}${use}</div>`;
 }
 // CI-Datenbank (RUNNER_MYSQL bzw. RUNNER_MARIADB): eigene Karte, An/Aus; stop verweigert der Server bei laufendem Job
@@ -1044,21 +1088,57 @@ function sliceText(s) {
   const cap = s.cpus != null ? ` von ${Math.round(s.cpus * 100)} %` : ' (ohne Deckel)';
   return ` · CI gesamt ${Math.round(s.cpuPct)} %${cap} CPU, ${gib(s.mem)}`;
 }
+// Je Projekt im Pool: Runner, wartende Jobs, Grenze −/+ (bis „ohne Grenze“), Pause
+function poolProjects(p) {
+  const limits = p.limits;
+  const rows = (p.repos || []).map((r) => {
+    const mine = (p.runners || []).filter((x) => x.label === r.label);
+    const busy = mine.filter((x) => x.busy).length;
+    const wait = p.queued?.[r.label] || 0;
+    const l = limits?.[r.label] || { max: null, paused: false };
+    const lb = esc(r.label);
+    // ohne Grenze: − setzt auf Plätze − 1; bei 1 nicht weiter; + bis zu den Plätzen heißt ohne Grenze
+    const max = l.max;
+    const down = max ? (max > 1 ? max - 1 : null) : (p.slots > 1 ? p.slots - 1 : null);
+    const up = max ? (max + 1 >= (p.slots ?? 8) ? 'off' : max + 1) : null;
+    const ctl = !limits ? '<span class="muted" title="scripts/beadskit/ci/runner-pool setup">Server-Setup nötig</span>'
+      : `<span class="lim"><button class="small" data-ra="limit" data-label="${lb}" data-n="${down ?? ''}" ${down ? '' : 'disabled'} title="Höchstens einen Platz weniger für dieses Projekt">−</button>
+        <span>${max ? `höchstens ${esc(max)}` : 'ohne Grenze'}</span>
+        <button class="small" data-ra="limit" data-label="${lb}" data-n="${up ?? ''}" ${up ? '' : 'disabled'} title="${up === 'off' ? 'Grenze aufheben' : 'Einen Platz mehr'}">+</button></span>`;
+    const pause = !limits ? '' : l.paused
+      ? `<button class="small" data-ra="resume" data-label="${lb}">Fortsetzen</button>`
+      : `<button class="small danger" data-ra="pause" data-label="${lb}" title="Keine neuen Runner für dieses Projekt; laufende Jobs laufen zu Ende">Pausieren</button>`;
+    return `<div class="prow"><div class="pname${r.label === P ? ' own' : ''}" title="${esc(r.label)}"><b>${esc(poolName(r.label))}</b>${l.paused ? ' <span class="paused">pausiert</span>' : ''}</div>
+      <div class="repo muted">${esc(r.repo)}</div>
+      <div class="cnt">${mine.length} Runner${busy ? `, ${busy} mit Job` : ''}${wait ? ` · <b>${wait} wartend</b>` : ''}</div>
+      <div class="pctl">${ctl}</div><div class="ppause">${pause}</div></div>`;
+  });
+  return rows.length ? `<div class="th">Projekt</div><div class="th">Repo</div><div class="th">Runner / wartend</div><div class="th">Plätze</div><div class="th"></div>${rows.join('')}`
+    : '<span class="muted">keine Projekte im Pool (runner-pool setup)</span>';
+}
 function renderRunners() {
+  const p = runners || {};
+  const wait = Object.values(p.queued || {}).reduce((a, b) => a + b, 0);
+  $('tb-ci').textContent = wait || '';
+  $('tb-ci').title = wait ? `${wait} CI-Jobs warten auf einen Runner` : '';
+  $('ci-line').hidden = !runners;
+  $('ci-line').innerHTML = !runners ? '' : runners.error ? `CI-Runner-Pool: <span class="bad">${esc(runners.error)}</span>`
+    : `CI-Runner-Pool: ${(p.runners || []).filter((r) => r.busy).length} von ${p.slots ?? '?'} Plätzen mit Job${wait ? ` · ${wait} wartend` : ''} · <a href="#" data-goto="ci">Tab CI</a>`;
   if (runners?.error) {
     $('runners').innerHTML = `<span class="msg bad">${esc(runners.error)}</span>`;
     $('runners-n').textContent = '';
     $('runners-ctl').innerHTML = '';
+    $('pool-projects').innerHTML = '';
     return;
   }
-  const p = runners || {};
+  $('pool-projects').innerHTML = runners ? poolProjects(p) : '<span class="muted">lädt …</span>';
   const list = p.runners || [];
   const on = p.service === 'active';
   const busy = list.filter((r) => r.busy).length;
-  const wait = Object.entries(p.queued || {}).map(([l, n]) => `${l} ${n}`).join(', ');
+  const waitBy = Object.entries(p.queued || {}).map(([l, n]) => `${poolName(l)} ${n}`).join(', ');
   const svc = p.service === 'missing' ? 'nicht eingerichtet' : on ? (p.token ? 'an' : 'an, Token fehlt') : 'aus';
   $('runners-n').textContent = runners
-    ? `${svc} · ${busy} von ${p.slots ?? '?'} Plätzen mit Job${wait ? ` · wartend: ${wait}` : ''}${sliceText(p.slice)} · Stand ${clock(p.at)}`
+    ? `${svc} · ${busy} von ${p.slots ?? '?'} Plätzen mit Job${waitBy ? ` · wartend: ${waitBy}` : ''}${sliceText(p.slice)} · Stand ${clock(p.at)}`
     : '';
   const n = p.slots;
   $('runners-ctl').innerHTML = !runners || p.service === 'missing' ? ''
@@ -1102,7 +1182,7 @@ async function load() {
     $('updated2').textContent = $('updated').textContent;
     renderBadges();
     if (TAB === 'system' && !sysData) loadSystem();
-    loadRunners();
+    loadPool();
   } catch (e) {
     $('errors').innerHTML = `<div class="error">Server nicht erreichbar (${esc(e.message)}). Läuft <code>scripts/beadskit/leitstand/inbox.mjs</code>?</div>`;
   }
@@ -1448,18 +1528,23 @@ document.addEventListener('click', async (e) => {
     return;
   }
 
+  const go = e.target.closest('a[data-goto]');
+  if (go) { e.preventDefault(); showTab(go.dataset.goto); return; }
+
   const ra = e.target.closest('button[data-ra]');
   if (ra) {
     const action = ra.dataset.ra;
-    const n = ['mysql', 'mariadb'].includes(ra.dataset.n) ? ra.dataset.n : ra.dataset.n ? Number(ra.dataset.n) : undefined;
+    const label = ra.dataset.label || undefined;
+    const n = ['mysql', 'mariadb', 'off'].includes(ra.dataset.n) ? ra.dataset.n : ra.dataset.n ? Number(ra.dataset.n) : undefined;
     const force = !!ra.dataset.force;
-    const ask = force ? 'Job abbrechen?' : action === 'stop' ? `${{ mysql: 'CI-MySQL', mariadb: 'CI-MariaDB' }[n] ?? 'Pool'} aus?` : null;
+    const ask = force ? 'Job abbrechen?' : action === 'stop' ? `${{ mysql: 'CI-MySQL', mariadb: 'CI-MariaDB' }[n] ?? 'Pool'} aus?`
+      : action === 'pause' ? `${poolName(label)} pausieren?` : null;
     if (ask && !armed(ra, ask)) return;
     ra.disabled = true;
     try {
-      const r = await post('/api/runners', { action: ra.dataset.ra, n, force });
+      const r = await post('/api/pool', { action, n, force, label });
       toast(r.output?.split('\n').pop() || 'ok');
-      await loadRunners(true);
+      await loadPool(true);
     } catch (err) {
       toast(err.message, true);
       // CI-MySQL verweigert (Job läuft): beim nächsten Klick mit --force
@@ -1636,8 +1721,8 @@ document.addEventListener('keydown', (e) => {
     const dc = !drawer && onDecide && /^[1-9]$/.test(e.key) && [...document.querySelectorAll('#inbox .card.decide')].find((c) => c.querySelector('button[data-choose]'));
     const ob = dc && dc.querySelector(`button[data-choose="${e.key}"]`);
     if (ob) { e.preventDefault(); chooseOption(ob); return; }
-    // sonst 1–5 wechselt den Tab
-    if (!drawer && /^[1-5]$/.test(e.key)) { e.preventDefault(); showTab(TABS[Number(e.key) - 1]); }
+    // sonst 1–6 wechselt den Tab
+    if (!drawer && /^[1-6]$/.test(e.key)) { e.preventDefault(); showTab(TABS[Number(e.key) - 1]); }
     return;
   }
   if (e.key === 'Enter') {
@@ -1655,7 +1740,7 @@ document.addEventListener('keydown', (e) => {
 $('new-issue').onclick = openCreate;
 $('logout').onclick = async () => { await post('/logout', {}).catch(() => {}); location.href = '/login'; };
 document.addEventListener('click', (e) => { if (e.target.id === 'start-open') openStart(); });
-$('refresh').onclick = () => { loadRunners(true); return reload(); };
+$('refresh').onclick = () => { loadPool(true); return reload(); };
 
 // Inbox-Entscheidungen
 $('inbox').addEventListener('input', (e) => {
@@ -1798,6 +1883,7 @@ function showTab(tab, first = false) {
   if (!first && P && location.hash.slice(1) !== hashFor()) history.replaceState(null, '', `#${hashFor()}`);
   if (tab === 'decide') $('tb-decide').classList.remove('pulse');
   if (tab === 'system') loadSystem();
+  if (tab === 'ci') loadPool(true);
   if (changed && !first) window.scrollTo({ top: 0 });
 }
 
@@ -1984,7 +2070,10 @@ async function loadProjects() {
     PROJECTS = await r.json();
   } catch { /* Fehler zeigt load() */ }
   renderProjects();
+  document.querySelector('.tabs [data-tab="ci"]').hidden = !hasPool();
+  if (TAB === 'ci' && !hasPool()) showTab('decide');
 }
+const hasPool = () => PROJECTS.some((p) => p.runners);
 function selectProject(slug, first = false) {
   if (!PROJECTS.some((p) => p.slug === slug)) slug = PROJECTS[0]?.slug || '';
   if (slug === P) return;

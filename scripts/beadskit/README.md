@@ -113,12 +113,18 @@ Job wird der Container gelöscht, ein Runner ohne Job nach 10 min. Die Workflows
   sich je Lauf eine eigene Datenbank an. Pool-Runner haben kein Docker, Testcontainers geht dort nicht.
 - Befehle: `scripts/beadskit/ci/runner-pool setup|set-token|status|size <n>|start|stop|logs|remove`,
   dazu `start|stop mysql|mariadb`.
+- Je Projekt (Label): `runner-pool limit <label> <1–8|off>` begrenzt die gleichzeitigen Runner des
+  Projekts, `pause|resume <label>` lässt es keine neuen Runner bekommen (freie enden sofort, laufende
+  Jobs laufen zu Ende). Steht in `/etc/beadskit-ci/projects.json` auf dem Server, `setup` lässt sie
+  stehen und wirkt ab der nächsten Runde.
 - `setup` liest alle Projekte aus `~/.config/beadskit/projects.txt`, deren Workflows `self-hosted`
   nutzen, und vereint ihre `RUNNER_APT` in einem Image. Nach jeder Änderung daran `setup` erneut.
 - Token: Fine-grained PAT für diese Repos mit Administration (Read and write) und Actions (Read),
   einzugeben mit `runner-pool set-token`. Er liegt nur auf dem Server.
-- Der Leitstand zeigt im Abschnitt CI-Runner-Pool die Plätze, die Runner mit Projekt und Job,
-  wartende Jobs je Projekt, CPU/RAM und die CI-MySQL, mit Plätze −/+ und Pool an/aus.
+- Der Leitstand zeigt im Tab „CI“ (für alle Projekte gleich, Taste 6) die Plätze, je Projekt Runner,
+  wartende Jobs, Grenze −/+ und Pausieren/Fortsetzen, die Runner mit Projekt und Job, CPU/RAM, die
+  CI-Datenbanken und das Log des Dienstes, mit Plätze −/+ und Pool an/aus. Der Worker-Tab zeigt nur
+  noch eine Zeile dazu.
 
 ## beads.project.sh
 
