@@ -97,8 +97,11 @@ doctor() {
   code=$(curl -s -o /dev/null -w '%{http_code}' -m 5 "http://127.0.0.1:$PORT/api/projects" || true)
   case $code in 200|401) ok "http://127.0.0.1:$PORT antwortet ($code)" ;; *) bad "http://127.0.0.1:$PORT antwortet nicht (pc leitstand install)" ;; esac
   if pgrep -f 'leitstand/inbox\.mjs' >/dev/null; then bad "ein Leitstand läuft auch auf dem Mac (leitstand-remote install --helper ersetzt ihn durch den Link)"; fi
-  ssh "$PC_SSH" 'systemctl is-enabled suspend.target' 2>/dev/null | grep -q masked && ok "$PC_NAME schläft nie" || bad "$PC_NAME kann schlafen (setup-linux.sh nosleep)"
-  ssh "$PC_SSH" 'loginctl show-user "$USER" -p Linger --value' 2>/dev/null | grep -q yes && ok "Dienste ohne Anmeldung" || bad "linger aus (setup-linux.sh nosleep)"
+  # erst einlesen: grep -q in der Pipe beendet ssh vorzeitig, mit pipefail zählte das als Fehler
+  v=$(ssh "$PC_SSH" 'systemctl is-enabled suspend.target' 2>/dev/null || true)
+  [ "$v" = masked ] && ok "$PC_NAME schläft nie" || bad "$PC_NAME kann schlafen (setup-linux.sh nosleep)"
+  v=$(ssh "$PC_SSH" 'loginctl show-user "$USER" -p Linger --value' 2>/dev/null || true)
+  [ "$v" = yes ] && ok "Dienste ohne Anmeldung" || bad "linger aus (setup-linux.sh nosleep)"
   return "$rc"
 }
 
