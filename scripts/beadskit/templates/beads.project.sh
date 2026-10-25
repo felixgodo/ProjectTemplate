@@ -44,6 +44,8 @@ BK_START="fix=2 search=1 verify=1 regress=0"
 # MySQL für DB-Tests:
 # RUNNER_APT=${RUNNER_APT:-ffmpeg}
 # RUNNER_MYSQL=${RUNNER_MYSQL:-8.0}
+# CPU-Gewicht der Runner gegenüber dem Host (Docker-Standard 1024; niedrig = Prod hat Vorrang):
+# RUNNER_CPU_SHARES=${RUNNER_CPU_SHARES:-128}
 
 # Leitstand: Knöpfe, Zusatzlisten, Links an Karten und Texte je Workspace kommen aus der
 # optionalen beads.leitstand.mjs (siehe scripts/beadskit/README.md).
