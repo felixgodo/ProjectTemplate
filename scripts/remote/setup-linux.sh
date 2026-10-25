@@ -190,6 +190,8 @@ step_env() {
   printf '%s\n' '# scripts/remote/setup-linux.sh: PATH für Befehle per ssh (scripts/beadskit/on-host)' \
     "export PATH=\"\$HOME/.local/bin:\$PATH\"" >"$CONF/env"
   ok "$CONF/env"
+  ln -sf "$TEMPLATE/scripts/beadskit/leitstand/top.mjs" "$BIN/beads-top"
+  ok "beads-top: Live-Übersicht aller Worker (q beendet)"
   if [ ! -f "$CONF/hosts.conf" ]; then
     # vorläufig, setup-mac.sh schreibt die endgültige Fassung mit dem Mac
     printf '%s\n' "LEADER=$PC_NAME" "HOSTS=\"$PC_NAME\"" "SELF=$PC_NAME" "BK_HOST_BASE=$PC_HOST_BASE" \
