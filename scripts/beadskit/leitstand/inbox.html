@@ -1023,19 +1023,19 @@ function runnerChip(r) {
     <b>${esc(r.label)}</b><span class="muted" title="${esc(`${r.name} · ${r.repo}`)}">Platz ${esc(r.slot ?? '?')} · ${esc(state)}</span>
     ${r.busy ? '<span class="badge warn" title="arbeitet gerade an einem CI-Job">Job</span>' : ''}</div>${job}${use}</div>`;
 }
-// CI-MySQL (RUNNER_MYSQL): eigene Zeile, An/Aus; stop verweigert der Server bei laufendem Job
-function mysqlChip(m) {
+// CI-Datenbank (RUNNER_MYSQL bzw. RUNNER_MARIADB): eigene Karte, An/Aus; stop verweigert der Server bei laufendem Job
+function dbChip(m, key, title) {
   const on = m.container === 'running';
   const state = m.container === 'missing' ? 'nicht eingerichtet' : on ? 'an' : 'aus';
   const btn = m.container === 'missing'
     ? '<span class="muted" style="font-size:12px" title="scripts/beadskit/ci/runner-pool setup">setup nötig</span>'
-    : on ? '<button class="small danger" data-ra="stop" data-n="mysql" title="Nur ausschalten, wenn kein Job DB-Tests braucht">Ausschalten</button>'
-      : '<button class="small" data-ra="start" data-n="mysql">Einschalten</button>';
+    : on ? `<button class="small danger" data-ra="stop" data-n="${key}" title="Nur ausschalten, wenn kein Job DB-Tests braucht">Ausschalten</button>`
+      : `<button class="small" data-ra="start" data-n="${key}">Einschalten</button>`;
   const use = on && (m.cpu != null || m.mem != null)
     ? `<div class="use muted">CPU ${m.cpu != null ? `${Math.round(m.cpu)} %` : '?'} · RAM ${gib(m.mem)}</div>` : '';
   return `<div class="runner ${on ? 'on' : m.container === 'missing' ? 'missing' : ''}"><div class="rhead"><span class="dot"></span>
-    <b>CI-MySQL</b><span class="muted">${esc(state)}</span><span class="rbtns">${btn}</span></div>
-    <div class="job muted">Datenbank für die DB-Tests aller Projekte (Host mysql)</div>${use}</div>`;
+    <b>${title}</b><span class="muted">${esc(state)}</span><span class="rbtns">${btn}</span></div>
+    <div class="job muted">Datenbank für die DB-Tests aller Projekte (Host ${key})</div>${use}</div>`;
 }
 const gib = (b) => (b != null ? `${(b / 2 ** 30).toFixed(1)} GiB` : '?');
 // „CI gesamt 380 % von 400 %, 9.1 GiB“: Auslastung der gemeinsamen Slice beadskit-ci.slice
@@ -1066,7 +1066,8 @@ function renderRunners() {
       <button class="small" data-ra="size" data-n="${n + 1}" ${n < 8 ? '' : 'disabled'} title="Ein Platz mehr (höchstens 8; die CI bleibt im Deckel der Slice)">+ Platz</button>` : ''}
       ${on ? '<button class="small danger" data-ra="stop" title="Keine neuen Runner starten; laufende Jobs laufen zu Ende">Pool aus</button>'
         : '<button class="small" data-ra="start">Pool an</button>'}`;
-  const chips = [...list.map(runnerChip), ...(p.mysql ? [mysqlChip(p.mysql)] : [])];
+  const chips = [...list.map(runnerChip), ...(p.mysql ? [dbChip(p.mysql, 'mysql', 'CI-MySQL')] : []),
+    ...(p.mariadb ? [dbChip(p.mariadb, 'mariadb', 'CI-MariaDB')] : [])];
   $('runners').innerHTML = chips.length ? chips.join('')
     : `<span class="muted" style="font-size:13px">${p.service === 'missing' ? 'Pool nicht eingerichtet: scripts/beadskit/ci/runner-pool setup' : 'kein Runner aktiv, startet bei Bedarf'}</span>`;
 }
@@ -1450,9 +1451,9 @@ document.addEventListener('click', async (e) => {
   const ra = e.target.closest('button[data-ra]');
   if (ra) {
     const action = ra.dataset.ra;
-    const n = ra.dataset.n === 'mysql' ? 'mysql' : ra.dataset.n ? Number(ra.dataset.n) : undefined;
+    const n = ['mysql', 'mariadb'].includes(ra.dataset.n) ? ra.dataset.n : ra.dataset.n ? Number(ra.dataset.n) : undefined;
     const force = !!ra.dataset.force;
-    const ask = force ? 'Job abbrechen?' : action === 'stop' ? `${n === 'mysql' ? 'CI-MySQL' : 'Pool'} aus?` : null;
+    const ask = force ? 'Job abbrechen?' : action === 'stop' ? `${{ mysql: 'CI-MySQL', mariadb: 'CI-MariaDB' }[n] ?? 'Pool'} aus?` : null;
     if (ask && !armed(ra, ask)) return;
     ra.disabled = true;
     try {
@@ -1462,7 +1463,7 @@ document.addEventListener('click', async (e) => {
     } catch (err) {
       toast(err.message, true);
       // CI-MySQL verweigert (Job läuft): beim nächsten Klick mit --force
-      if (err.status === 409 && action === 'stop' && n === 'mysql' && !force && ra.isConnected) {
+      if (err.status === 409 && action === 'stop' && (n === 'mysql' || n === 'mariadb') && !force && ra.isConnected) {
         ra.dataset.force = '1'; ra.textContent = 'Trotzdem (--force)';
       }
     } finally { ra.disabled = false; }

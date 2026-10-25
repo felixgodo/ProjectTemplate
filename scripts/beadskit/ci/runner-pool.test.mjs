@@ -144,11 +144,11 @@ test('Runde: ungültiger REPOS-Eintrag bricht ab', () => {
 // Projekte für setup --dry-run: je ein Verzeichnis mit beads.project.sh und Workflow
 function projects(list) {
   const dir = mkdtempSync(join(tmpdir(), 'runner-pool-p-'));
-  const paths = list.map(({ slug, repo, apt = '', mysql = '', selfHosted = true }) => {
+  const paths = list.map(({ slug, repo, apt = '', mysql = '', mariadb = '', selfHosted = true }) => {
     const p = join(dir, slug);
     mkdirSync(join(p, '.github/workflows'), { recursive: true });
     writeFileSync(join(p, 'beads.project.sh'),
-      `BK_SLUG="${slug}"\nRUNNER_REPO="${repo}"\nRUNNER_APT="${apt}"\nRUNNER_MYSQL="${mysql}"\n`);
+      `BK_SLUG="${slug}"\nRUNNER_REPO="${repo}"\nRUNNER_APT="${apt}"\nRUNNER_MYSQL="${mysql}"\nRUNNER_MARIADB="${mariadb}"\n`);
     writeFileSync(join(p, '.github/workflows/ci.yml'), `jobs:\n  t:\n    runs-on: ${selfHosted ? '[self-hosted, x]' : 'ubuntu-latest'}\n`);
     return p;
   });
@@ -206,4 +206,18 @@ test('size und set-token prüfen ihre Eingaben, bevor sie den Server ansprechen'
   const t = spawnSync('sh', [POOL, 'set-token'], { encoding: 'utf8', env, input: 'kein-token\n' });
   assert.equal(t.status, 1);
   assert.match(t.stderr, /nicht nach einem GitHub-Token/);
+});
+
+test('setup: CI-MariaDB, sobald ein Projekt RUNNER_MARIADB setzt, neben der MySQL', () => {
+  const r = setupDry([
+    { slug: 'spot', repo: 'o/spot', mysql: '8.0' },
+    { slug: 'controlhub', repo: 'o/LicenseHub', mariadb: '11' },
+  ]);
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout, /--name beadskit-ci-mariadb [^\n]*--network-alias mariadb[\s\S]*-e MARIADB_ROOT_PASSWORD=ci mariadb:11 /);
+  assert.match(r.stdout, /--name beadskit-ci-mysql [^\n]*--network-alias mysql[\s\S]*-e MYSQL_ROOT_PASSWORD=ci mysql:8\.0 /);
+  assert.match(r.stdout, /\nREPOS="o\/spot:spot o\/LicenseHub:controlhub"\n/);
+  const none = setupDry([{ slug: 'a', repo: 'o/a' }]);
+  assert.match(none.stdout, /docker rm -f beadskit-ci-mariadb/);
+  assert.match(setupDry([{ slug: 'a', repo: 'o/a', mariadb: '11;x' }]).stderr, /RUNNER_MARIADB ungültig/);
 });

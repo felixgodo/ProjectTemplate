@@ -77,7 +77,7 @@ t0=$(date +%s%N) u0=$(u)
 if [ -n "$dir" ]; then
   ids=$(cd "$dir" 2>/dev/null && docker compose ps -q 2>/dev/null || true)
 else
-  ids=$(docker ps -q --filter label=beadskit.pool; docker ps -q --filter name='^beadskit-ci-mysql$')
+  ids=$(docker ps -q --filter label=beadskit.pool; docker ps -q --filter name='^beadskit-ci-(mysql|mariadb)$')
 fi
 stats=$([ -n "$ids" ] && docker stats --no-stream --format '{{.Name}}	{{.CPUPerc}}	{{.MemUsage}}' $ids 2>/dev/null || true)
 t1=$(date +%s%N) u1=$(u)
@@ -91,6 +91,7 @@ printf '%s\n' "$stats" | awk -F'\t' -v u0="$u0" -v u1="$u1" -v t0="$t0" -v t1="$
   BEGIN { printf "{\"containers\":{"; sep = "" }
   NF >= 3 {
     if ($1 ~ /-mysql-[0-9]+$/ || $1 == "beadskit-ci-mysql") svc = "mysql"
+    else if ($1 == "beadskit-ci-mariadb") svc = "mariadb"
     else if (match($1, /runner-[0-9]+-[0-9]+$/)) { svc = substr($1, RSTART, RLENGTH); sub(/-[0-9]+$/, "", svc) }
     else if ($1 ~ /^pool-/) svc = $1
     else next

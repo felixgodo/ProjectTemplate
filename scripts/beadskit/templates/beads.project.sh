@@ -44,6 +44,7 @@ BK_START="fix=2 search=1 verify=1 regress=0"
 # Zusätzliche apt-Pakete im Pool-Image, MySQL für DB-Tests (Host mysql):
 # RUNNER_APT=${RUNNER_APT:-ffmpeg}
 # RUNNER_MYSQL=${RUNNER_MYSQL:-8.0}
+# RUNNER_MARIADB=${RUNNER_MARIADB:-11}   # CI-MariaDB (Host mariadb) statt Testcontainers
 
 # Leitstand: Knöpfe, Zusatzlisten, Links an Karten und Texte je Workspace kommen aus der
 # optionalen beads.leitstand.mjs (siehe scripts/beadskit/README.md).

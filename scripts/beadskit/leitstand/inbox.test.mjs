@@ -93,7 +93,8 @@ test('planRunnerAction: Plätze 1–8, Pool und CI-MySQL an/aus, --force nur bei
   assert.deepEqual(planRunnerAction({ action: 'start', n: 'mysql', force: true }), ['start', 'mysql']);
   assert.deepEqual(planRunnerAction({ action: 'stop', n: 'mysql', force: true }), ['stop', 'mysql', '--force']);
   assert.deepEqual(planRunnerAction({ action: 'stop', n: 'mysql' }), ['stop', 'mysql']);
-  for (const n of [1, 'all', '--force']) assert.throws(() => planRunnerAction({ action: 'stop', n }), /Pool oder mysql/);
+  assert.deepEqual(planRunnerAction({ action: 'start', n: 'mariadb' }), ['start', 'mariadb']);
+  for (const n of [1, 'all', '--force']) assert.throws(() => planRunnerAction({ action: 'stop', n }), /Pool, mysql oder mariadb/);
   for (const action of ['add', 'delete', 'remove', 'setup']) assert.throws(() => planRunnerAction({ action }), /Aktion/);
 });
 
@@ -451,8 +452,10 @@ test('parsePool: Dienst, Plätze, Pool-Runner nach Platz, wartende Jobs, verwirf
       { name: 'spot-runner-1' }, null,
     ],
     mysql: { container: 'running', cpu: 1, mem: 2 },
+    mariadb: { container: 'exited' },
     slice: { cpuPct: 120, cpus: 4, mem: 3e9 },
   });
+  assert.deepEqual(p.mariadb, { container: 'exited', cpu: null, mem: null });
   assert.equal(p.service, 'active');
   assert.equal(p.slots, 4);
   assert.deepEqual(p.repos, [{ repo: 'o/spot', label: 'spot' }]);
@@ -464,7 +467,7 @@ test('parsePool: Dienst, Plätze, Pool-Runner nach Platz, wartende Jobs, verwirf
   assert.deepEqual(p.mysql, { container: 'running', cpu: 1, mem: 2 });
   assert.deepEqual(p.slice, { cpuPct: 120, cpus: 4, mem: 3e9 });
   const empty = parsePool(null);
-  assert.deepEqual([empty.service, empty.token, empty.slots, empty.runners, empty.mysql], ['missing', false, null, [], null]);
+  assert.deepEqual([empty.service, empty.token, empty.slots, empty.runners, empty.mysql, empty.mariadb], ['missing', false, null, [], null, null]);
   assert.equal(parsePool({ slots: 12 }).slots, null);
 });
 
