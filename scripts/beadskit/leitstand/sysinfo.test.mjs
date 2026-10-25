@@ -1,7 +1,7 @@
 // node --test scripts/beadskit/leitstand/sysinfo.test.mjs
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { cpuPercent, cpuTimes, launchdState, parseDf, parseMeminfo, parseVmStat, systemStats } from './sysinfo.mjs';
+import { corePercents, cpuPercent, cpuTimes, launchdState, parseDf, parseMeminfo, parseVmStat, systemStats } from './sysinfo.mjs';
 
 test('parseMeminfo: belegt = gesamt − verfügbar', () => {
   const t = 'MemTotal:       32114848 kB\nMemFree:        21457724 kB\nMemAvailable:   27938556 kB\n';
@@ -34,10 +34,19 @@ test('cpuPercent aus zwei Messungen', () => {
   assert.equal(cpuPercent(a, a), null);
 });
 
+test('corePercents je Kern, bei ungleicher Länge die kürzere', () => {
+  const a = [{ times: { user: 100, idle: 900 } }, { times: { user: 0, idle: 1000 } }];
+  const b = [{ times: { user: 400, idle: 1600 } }, { times: { user: 0, idle: 2000 } }, { times: { idle: 5 } }];
+  assert.deepEqual(corePercents(a, b), [30, 0]);
+  assert.deepEqual(corePercents(a, a), [null, null]);
+  assert.deepEqual(corePercents(null, b), []);
+});
+
 test('systemStats auf diesem Rechner: Grundwerte vorhanden', async () => {
   const s = await systemStats();
   assert.ok(s.cpu.cores > 0);
   assert.equal(s.cpu.load.length, 3);
+  assert.equal(s.cpu.perCore.length, s.cpu.cores);
   assert.ok(s.mem === null || (s.mem.used > 0 && s.mem.total >= s.mem.used));
   assert.ok(s.uptime > 0);
   assert.ok(Number.isInteger(s.claude));

@@ -1,6 +1,6 @@
 #!/usr/bin/env node
-// Live-Übersicht im Terminal: oben je Rechner (hosts.conf) CPU und RAM mit Verlauf, Temperatur,
-// Load, Platte, Uptime, laufende claude-Prozesse, Docker-Container und Dienste (beads-dolt,
+// Live-Übersicht im Terminal: oben je Rechner (hosts.conf) CPU und RAM mit Verlauf, Auslastung
+// je Kern, Temperatur, Load, Platte, Uptime, laufende claude-Prozesse, Docker-Container und Dienste (beads-dolt,
 // Leitstand, Tunnel, Sicherung); darunter alle Projekte aus ~/.config/beadskit/projects.txt mit
 // Board-Spalten, ihren Workern (Rechner, Status, Issue, letzte Aktion, was sie gerade sagen,
 // Ruhezeit, Kontext), offenen PRs mit CI, was auf dich wartet und was zuletzt erledigt wurde.
@@ -101,6 +101,27 @@ export function serviceLine(sys, { p, nameW }) {
   return `   ${' '.repeat(nameW)}${p.dim('Dienste')}  ${items.join('   ')}`;
 }
 
+/**
+ * Auslastung je Kern in einer Zeile: ein Blockzeichen je Kern (Skala wie spark), eingefärbt wie die
+ * CPU, dazu der höchste Kern und wie viele über 90 % liegen. null ohne Werte je Kern.
+ */
+export function coreLine(sys, { p, nameW }) {
+  const list = sys.ok ? sys.stats?.cpu?.perCore : null;
+  if (!Array.isArray(list) || !list.length) return null;
+  const chars = '▁▂▃▄▅▆▇█';
+  const level = (v) => (v >= 90 ? p.red : v >= 70 ? p.yellow : p.green);
+  const cells = list.map((v) => (Number.isFinite(v)
+    ? level(v)(chars[Math.min(7, Math.max(0, Math.floor((v / 100) * 8)))]) : p.dim('·')));
+  const vals = list.filter(Number.isFinite);
+  const max = vals.length ? Math.max(...vals) : null;
+  const hot = vals.filter((v) => v >= 90).length;
+  const facts = [
+    Number.isFinite(max) ? `${p.dim('max')} ${level(max)(`${max} %`)} ${p.dim(`(#${list.indexOf(max)})`)}` : null,
+    hot ? p.red(`${hot} ≥ 90 %`) : null,
+  ].filter(Boolean);
+  return `   ${' '.repeat(nameW)}${p.dim('Kerne')}  ${cells.join('')}${facts.length ? `   ${facts.join('   ')}` : ''}`;
+}
+
 /** Eine Zeile je Rechner; ab 140 Spalten mit Temperatur, Uptime, Docker und Verlauf. */
 export function systemLine(sys, { p, wide, nameW }) {
   const name = `${sys.name}${sys.leader ? ' ★' : ''}`;
@@ -177,6 +198,8 @@ function build(data, { width, color, now, multi, board, prs: prMax, texts, list:
     const sysNameW = Math.max(...systems.map((x) => x.name.length + (x.leader ? 2 : 0)));
     for (const sys of systems) {
       out.push(systemLine(sys, { p, wide, nameW: sysNameW }));
+      const cores = coreLine(sys, { p, nameW: sysNameW });
+      if (cores) out.push(cores);
       const svc = wide ? serviceLine(sys, { p, nameW: sysNameW }) : null;
       if (svc) out.push(svc);
     }

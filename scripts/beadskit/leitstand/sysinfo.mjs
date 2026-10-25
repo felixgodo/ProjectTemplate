@@ -1,5 +1,6 @@
-// Systemwerte eines Rechners für beads-top (top.mjs) und host-agent.mjs: CPU-Auslastung, Load,
-// RAM, Platte, Temperatur, Uptime, laufende claude-Prozesse und Docker-Container. Nur lesend;
+// Systemwerte eines Rechners für beads-top (top.mjs) und host-agent.mjs: CPU-Auslastung (gesamt
+// und je Kern), Load, RAM, Platte, Temperatur, Uptime, laufende claude-Prozesse und
+// Docker-Container. Nur lesend;
 // jede Messung für sich, was fehlt (kein Sensor, kein Docker-Zugriff), bleibt null.
 // Teil des beadskit aus dem ProjectTemplate – nicht im Projekt ändern.
 import { execFile } from 'node:child_process';
@@ -28,6 +29,12 @@ export function cpuPercent(a, b) {
   const total = b.total - a.total;
   if (!(total > 0)) return null;
   return Math.max(0, Math.min(100, Math.round((1 - (b.idle - a.idle) / total) * 100)));
+}
+
+/** Auslastung je Kern in % zwischen zwei os.cpus()-Listen; null je Kern ohne Zeitdifferenz. */
+export function corePercents(a, b) {
+  const n = Math.min(a?.length || 0, b?.length || 0);
+  return Array.from({ length: n }, (_, i) => cpuPercent(cpuTimes([a[i]]), cpuTimes([b[i]])));
 }
 
 /** /proc/meminfo → { used, total } in Bytes (belegt = gesamt − verfügbar). */
@@ -129,7 +136,7 @@ export async function services() {
 
 /** Alle Werte dieses Rechners; die CPU wird über 300 ms gemessen. */
 export async function systemStats() {
-  const a = cpuTimes(cpus());
+  const before = cpus();
   const [mem, disk, temp, claude, docker, svc] = await Promise.all([
     quiet(memory),
     quiet(async () => parseDf((await run('df', ['-kP', homedir()])).stdout)),
@@ -140,9 +147,15 @@ export async function systemStats() {
     quiet(services).then((x) => x ?? []),
     sleep(300),
   ]);
+  const after = cpus();
   return {
     host: hostname().split('.')[0],
-    cpu: { percent: cpuPercent(a, cpuTimes(cpus())), cores: cpus().length, load: loadavg().map((x) => Math.round(x * 10) / 10) },
+    cpu: {
+      percent: cpuPercent(cpuTimes(before), cpuTimes(after)),
+      perCore: corePercents(before, after),
+      cores: after.length,
+      load: loadavg().map((x) => Math.round(x * 10) / 10),
+    },
     mem,
     disk,
     tempC: temp,
