@@ -57,6 +57,8 @@ hängt daran) und endet mit genau einer dieser Formen:
   Der Leitstand zeigt jede Option als Knopf. Die Wahl kommt als Notiz
   `User-Entscheidung <datum>: Option 2: …` zurück, `human` fällt weg; wer das Issue danach
   nimmt, setzt genau diese Option um (ergänzender Text des Users gilt mit).
+  Gibt man ein Issue zurück, darf der Block auch am Ende der Notiz stehen: Der Leitstand liest
+  die Notes nach der letzten `User-Entscheidung` und zieht deren Optionen der Beschreibung vor.
 - **Aufgabe nur für den User** (Zugang, Server, Konto, Geld): eine Zeile `Zu tun (User): …` mit
   dem, was zu tun ist. Der Leitstand zeigt dafür „Erledigt“, das schließt das Issue.
 

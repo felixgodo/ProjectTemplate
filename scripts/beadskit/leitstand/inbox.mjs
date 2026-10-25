@@ -594,6 +594,22 @@ export function parseDecision(description) {
   return options.length || todo ? { options, todo } : null;
 }
 
+/**
+ * Entscheidung eines human-Issues aus Beschreibung und Notes. Gibt ein Worker ein Issue zurück,
+ * steht der Block „Optionen:“ oft am Ende der Notes. Gelesen wird nur der Teil nach der letzten
+ * „User-Entscheidung“ (ältere Blöcke sind entschieden); Optionen dort gehen vor die der Beschreibung.
+ */
+export function decisionOf({ description, notes } = {}) {
+  const lines = String(notes || '').split('\n');
+  let last = -1;
+  lines.forEach((l, i) => { if (/^\s*User-Entscheidung\b/.test(l)) last = i; });
+  const fromNotes = parseDecision(lines.slice(last + 1).join('\n'));
+  const fromDesc = parseDecision(description);
+  const options = fromNotes?.options.length ? fromNotes.options : fromDesc?.options || [];
+  const todo = Boolean(fromNotes?.todo || fromDesc?.todo);
+  return options.length || todo ? { options, todo } : null;
+}
+
 /** Tasten, die der Leitstand an eine Rückfrage schicken darf (workers press). */
 export const PRESS_KEYS = ['1', '2', '3', '4', '5', '6', '7', '8', '9', 'Escape', 'Enter'];
 
@@ -1523,7 +1539,7 @@ function startServer(token, selfRoot) {
         if (x) it.x = x;
         if (it.metadata?.pr) it.pr_repo = repoOfIssue(it, cfg.repos);
         if ((it.labels || []).includes('human')) {
-          const d = parseDecision(it.description);
+          const d = decisionOf(it);
           if (d) it.decision = d;
         }
       }

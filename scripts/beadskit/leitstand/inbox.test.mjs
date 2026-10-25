@@ -7,7 +7,7 @@ import {
   planIssueAction, planRestarts, planRunnerAction, planWorkerAction, prSummary, publicConfig, readBody, repoOfIssue,
   RESTART_COOLDOWN_MS, safeEqual, signSession, today, verifySession, hashPassword, parsePasswordLine, verifyPassword,
   workerRe, wsOfIssue, parseHostsConf, mapRoot, shQuote, remoteCommand, mergeHostWorkers, parseMarkers, routeWorkerAction,
-  parsePrompt, parseDecision, collectServers, collectSystems, QUICK, waitsOf,
+  parsePrompt, parseDecision, decisionOf, collectServers, collectSystems, QUICK, waitsOf,
 } from './inbox.mjs';
 import { readFileSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
@@ -814,6 +814,21 @@ test('parseDecision: Block „Optionen:“, Hinweis „Entscheidung nötig“ mi
   assert.equal(parseDecision('Schritte:\n1. a\n2. b'), null);
   assert.equal(parseDecision('Optionen:\n1. nur eine'), null);
   assert.equal(parseDecision(''), null);
+});
+
+test('decisionOf: Optionen aus den Notes nach der letzten User-Entscheidung, sonst Beschreibung', () => {
+  const desc = 'Kandidat.\n\nOptionen:\n1. alt A\n2. alt B';
+  const back = 'Place angelegt.\nUser-Entscheidung 2026-10-25: verschoben nach phase:place\nclub-add-101: Place fertig.\n\nOptionen:\n1. Zurück nach phase:settings (empfohlen)\n2. Status 2 setzen\n3. Place-Daten ändern';
+  // nur in den Notes (spot-k9k.307) und Notes vor Beschreibung
+  assert.deepEqual(decisionOf({ description: 'Kandidat.', notes: back }).options.map((o) => o.label),
+    ['Zurück nach phase:settings (empfohlen)', 'Status 2 setzen', 'Place-Daten ändern']);
+  assert.equal(decisionOf({ description: desc, notes: back }).options[0].label, 'Zurück nach phase:settings (empfohlen)');
+  // ein Block vor der letzten User-Entscheidung ist erledigt: zurück auf die Beschreibung
+  const done = 'Optionen:\n1. x\n2. y\nUser-Entscheidung 2026-10-25: Option 1: x';
+  assert.equal(decisionOf({ description: 'nichts', notes: done }), null);
+  assert.equal(decisionOf({ description: desc, notes: done }).options[0].label, 'alt A');
+  assert.deepEqual(decisionOf({ description: 'Kern.', notes: 'Zu tun (User): Schlüssel anlegen' }), { options: [], todo: true });
+  assert.equal(decisionOf({}), null);
 });
 
 test('collectSystems: ein Rechner ohne hosts.conf, zwei mit; ein Fehler betrifft nur diesen', async () => {
