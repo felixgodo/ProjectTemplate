@@ -2,6 +2,8 @@
 // und je Kern), Load, RAM, Platte, Temperatur, Uptime, laufende claude-Prozesse und
 // Docker-Container. Nur lesend;
 // jede Messung für sich, was fehlt (kein Sensor, kein Docker-Zugriff), bleibt null.
+// Server ohne beadskit und ohne node (servers in beads.leitstand.mjs) misst serverCommand: ein
+// sh-Skript per ssh liefert die Rohwerte, parseServerStats wertet sie hier aus.
 // Teil des beadskit aus dem ProjectTemplate – nicht im Projekt ändern.
 import { execFile } from 'node:child_process';
 import { access, readdir, readFile, stat } from 'node:fs/promises';
@@ -166,14 +168,89 @@ export async function systemStats() {
   };
 }
 
+// Rohwerte eines Linux-Servers in Abschnitten @@<name>, Argumente = systemd-Units. /proc/stat
+// zweimal im Abstand von 300 ms; docker nur, wenn ps klappt (sonst kein Abschnittsinhalt).
+export const SERVER_SCRIPT = `echo @@stat1; grep '^cpu[0-9]' /proc/stat
+sleep 0.3
+echo @@stat2; grep '^cpu[0-9]' /proc/stat
+echo @@mem; cat /proc/meminfo
+echo @@df; df -kP / 2>/dev/null
+echo @@load; cat /proc/loadavg
+echo @@uptime; cat /proc/uptime
+echo @@temp
+for d in /sys/class/hwmon/*; do
+  case "$(cat "$d/name" 2>/dev/null)" in k10temp|coretemp|zenpower) cat "$d/temp1_input" 2>/dev/null; break ;; esac
+done
+echo @@docker
+if out=$(docker ps -q 2>/dev/null); then printf '%s\n' "$out" | grep -c .; fi
+echo @@svc
+for u in "$@"; do printf '%s %s\n' "$u" "$(systemctl is-active "$u" 2>/dev/null)"; done
+`;
+
+/** systemd-Unit wie spot, mysql.service oder runner@1, nie eine Option. */
+export const UNIT_RE = /^[A-Za-z0-9@_][A-Za-z0-9@._-]{0,63}$/;
+
+const shWord = (s) => `'${String(s).replace(/'/g, "'\\''")}'`;
+
+/** Befehlszeile für `ssh <ziel> <zeile>`: SERVER_SCRIPT mit den Units als Argumenten. */
+export function serverCommand(services = []) {
+  const units = services.filter((u) => UNIT_RE.test(u));
+  return ['sh', '-c', shWord(SERVER_SCRIPT), 'sh', ...units.map(shWord)].join(' ');
+}
+
+/** Zeilen `cpuN user nice system idle iowait irq softirq steal …` → Liste wie os.cpus(). */
+export function parseProcStat(text) {
+  return String(text || '').split('\n').filter((l) => /^cpu\d+\s/.test(l)).map((l) => {
+    const [user, nice, sys, idle, iowait, irq, softirq, steal] = l.trim().split(/\s+/).slice(1).map((x) => Number(x) || 0);
+    return { times: { user, nice, sys, idle: idle + (iowait || 0), irq: (irq || 0) + (softirq || 0) + (steal || 0) } };
+  });
+}
+
+/** Ausgabe von SERVER_SCRIPT → dieselbe Form wie systemStats(); was fehlt, bleibt null. */
+export function parseServerStats(text) {
+  const sec = {};
+  let cur = null;
+  for (const line of String(text || '').split('\n')) {
+    const m = /^@@([a-z0-9]+)$/.exec(line.trim());
+    if (m) { cur = m[1]; sec[cur] = []; } else if (cur) sec[cur].push(line);
+  }
+  const get = (k) => (sec[k] || []).join('\n').trim();
+  if (!get('stat2')) throw new Error('keine Werte vom Server');
+  const before = parseProcStat(get('stat1'));
+  const after = parseProcStat(get('stat2'));
+  const load = get('load').split(/\s+/).slice(0, 3).map(Number);
+  const up = get('uptime') ? Number(get('uptime').split(/\s+/)[0]) : NaN;
+  const temp = Number(get('temp').split('\n')[0]);
+  const docker = get('docker');
+  return {
+    cpu: {
+      percent: cpuPercent(cpuTimes(before), cpuTimes(after)),
+      perCore: corePercents(before, after),
+      cores: after.length,
+      load: load.length === 3 && load.every(Number.isFinite) ? load.map((x) => Math.round(x * 10) / 10) : [],
+    },
+    mem: parseMeminfo(get('mem')),
+    disk: parseDf(get('df')),
+    tempC: Number.isFinite(temp) && temp > 0 ? Math.round(temp / 1000) : null,
+    uptime: Number.isFinite(up) ? Math.round(up) : null,
+    claude: null,
+    docker: /^\d+$/.test(docker) ? Number(docker) : null,
+    services: get('svc').split('\n').filter(Boolean).map((l) => {
+      const [name, state = ''] = l.trim().split(/\s+/);
+      return { name, ok: state === 'active', state: state || '?' };
+    }),
+  };
+}
+
 /**
- * Hängt die Werte eines Rechners ({ name, ok, stats }) an seinen Verlauf in `map` (nur im Speicher,
- * höchstens `max` Punkte) und gibt ihn mit `history: { at, cpu, mem, cores }` zurück; at = Zeitpunkte
+ * Hängt die Werte eines Rechners ({ name, key?, ok, stats }) an seinen Verlauf in `map` (nur im
+ * Speicher, je key, sonst je name, höchstens `max` Punkte) und gibt ihn mit `history: { at, cpu, mem, cores }` zurück; at = Zeitpunkte
  * in ms, cores je Kern.
  */
 export function pushHistory(map, sys, max = 60, now = Date.now()) {
   if (!sys?.ok || !sys.stats) return sys;
-  const h = map.get(sys.name) || { at: [], cpu: [], mem: [], cores: [] };
+  const key = sys.key || sys.name;
+  const h = map.get(key) || { at: [], cpu: [], mem: [], cores: [] };
   const s = sys.stats;
   h.at = [...h.at, now].slice(-max);
   h.cpu = [...h.cpu, s.cpu?.percent ?? null].slice(-max);
@@ -181,6 +258,6 @@ export function pushHistory(map, sys, max = 60, now = Date.now()) {
   const per = s.cpu?.perCore || [];
   if (h.cores.length !== per.length) h.cores = per.map(() => []);
   h.cores = h.cores.map((c, i) => [...c, per[i] ?? null].slice(-max));
-  map.set(sys.name, h);
+  map.set(key, h);
   return { ...sys, history: h };
 }

@@ -36,7 +36,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { promisify } from 'node:util';
 import { chatTranscript, readTail, sessionSummary, transcriptPath } from './sessions.mjs';
-import { pushHistory, systemStats } from './sysinfo.mjs';
+import { parseServerStats, pushHistory, serverCommand, systemStats, UNIT_RE } from './sysinfo.mjs';
 
 const run = promisify(execFile);
 const scrypt = promisify(scryptCb);
@@ -538,6 +538,8 @@ export function parseWorkers(agents, wtDir, workspaces) {
 }
 
 const HOST_RE = /^[a-z0-9]{1,20}$/;
+// ssh-Ziel wie pc, felix@pc oder pc.tail1234.ts.net, nie eine ssh-Option
+const SSH_TARGET_RE = /^[A-Za-z0-9][A-Za-z0-9._@-]*$/;
 
 const LIST_ITEM_RE = /^\s*(?:(\d{1,2})[.)]|[-*•])\s+(.+?)\s*$/;
 const DECISION_HEAD_RE = /^\s*(?:\*\*)?(Optionen|Options)(?:\*\*)?\s*:?\s*(?:\*\*)?\s*$/i;
@@ -658,8 +660,7 @@ export function parseHostsConf(text) {
       const root = v[`HOST_${name}_ROOT`];
       return {
         name,
-        // nur ein Ziel wie pc, felix@pc oder pc.tail1234.ts.net, nie eine ssh-Option
-        ssh: /^[A-Za-z0-9][A-Za-z0-9._@-]*$/.test(ssh || '') ? ssh : name,
+        ssh: SSH_TARGET_RE.test(ssh || '') ? ssh : name,
         root: typeof root === 'string' && root.startsWith('/') ? root.replace(/\/+$/, '') : null,
       };
     }),
@@ -686,6 +687,17 @@ export function remoteCommand(root, cmd, args = []) {
   return [`${root}/scripts/beadskit/on-host`, root, cmd, ...args].map(shQuote).join(' ');
 }
 
+// Ein Messwert oder der Fehler (letzte Zeile, gekürzt) eines Rechners oder Servers
+async function measure(base, f) {
+  try {
+    const stats = await f();
+    if (!stats || typeof stats !== 'object') throw new Error('keine Werte');
+    return { ...base, ok: true, stats };
+  } catch (e) {
+    return { ...base, ok: false, error: String(e.message || e).trim().split('\n').at(-1).slice(0, 300) };
+  }
+}
+
 /**
  * Systemwerte je Rechner (sysinfo.mjs): ohne hosts.conf nur dieser, sonst alle; local() misst hier,
  * remote(name) holt die Werte des anderen Rechners. Ein Fehler betrifft nur diesen Rechner.
@@ -693,16 +705,20 @@ export function remoteCommand(root, cmd, args = []) {
  */
 export async function collectSystems(conf, { local, remote, self = 'local' }) {
   const hosts = conf ? conf.hosts.map((h) => h.name) : [self];
-  return Promise.all(hosts.map(async (name) => {
+  return Promise.all(hosts.map((name) => {
     const base = { name, leader: conf ? name === conf.leader : true, self: conf ? name === conf.self : true };
-    try {
-      const stats = base.self ? await local() : await remote(name);
-      if (!stats || typeof stats !== 'object') throw new Error('keine Werte');
-      return { ...base, ok: true, stats };
-    } catch (e) {
-      return { ...base, ok: false, error: String(e.message || e).trim().split('\n').at(-1).slice(0, 300) };
-    }
+    return measure(base, () => (base.self ? local() : remote(name)));
   }));
+}
+
+/**
+ * Systemwerte der Server eines Projekts (servers aus beads.leitstand.mjs), server(s) misst per ssh;
+ * Server, die wie ein Rechner heißen (skip), fallen weg. key trennt den Verlauf von dem der Rechner.
+ * → [{ name, key, kind: 'server', leader, self, ok, error?, stats? }]
+ */
+export async function collectServers(servers, { server, skip = [] }) {
+  return Promise.all((servers || []).filter((s) => !skip.includes(s.name)).map((s) => measure(
+    { name: s.name, key: `server:${s.ssh}`, kind: 'server', leader: false, self: false }, () => server(s))));
 }
 
 /**
@@ -865,11 +881,19 @@ export function normalizeExt(mod, warn = () => {}) {
     if (!ok) warn(`Liste ${p?.key ?? '?'} ohne key/title/items, ignoriert`);
     return ok;
   });
+  const servers = (Array.isArray(x.servers) ? x.servers : []).filter((v) => {
+    const units = v?.services ?? [];
+    const ok = v && HOST_RE.test(v.name) && SSH_TARGET_RE.test(v.ssh || '')
+      && Array.isArray(units) && units.length <= 12 && units.every((u) => UNIT_RE.test(u));
+    if (!ok) warn(`Server ${v?.name ?? '?'} ohne gültigen name/ssh/services, ignoriert`);
+    return ok;
+  }).slice(0, 4).map((v) => ({ name: v.name, ssh: v.ssh, services: [...(v.services || [])] }));
   return {
     workspaces: x.workspaces && typeof x.workspaces === 'object' ? x.workspaces : {},
     card: fn(x.card),
     actions,
     panels,
+    servers,
   };
 }
 
@@ -1326,28 +1350,47 @@ function startServer(token, selfRoot) {
     }));
   }
 
-  // Systemwerte aller Rechner mit Verlauf (Tab System); 2 s zwischengespeichert, damit mehrere
-  // offene Seiten nicht mehrfach messen
+  // Systemwerte aller Rechner und der Server des Projekts mit Verlauf (Tab System). Je Teil 2 s
+  // zwischengespeichert (Rechner gemeinsam für alle Projekte, Server je Liste), damit mehrere
+  // offene Seiten nicht mehrfach messen und der Verlauf keine doppelten Punkte bekommt.
   const sysHistory = new Map();
-  let sysCache = { at: 0, value: null };
-  async function systems(root) {
-    if (sysCache.value && Date.now() - sysCache.at < 2_000) return sysCache.value;
-    const conf = await hostsConf();
-    const list = await collectSystems(conf, {
-      self: hostname().split('.')[0],
-      local: systemStats,
-      remote: async (host) => {
-        try {
-          const { stdout } = await onHost(conf, host, root, 'scripts/beadskit/leitstand/host-agent.mjs', ['system'], { timeout: 15_000 });
-          return JSON.parse(stdout);
-        } catch (e) {
-          throw new Error(e.code === 'ETIMEDOUT' || e.killed ? 'keine Antwort' : cmdOutput(e));
-        }
-      },
-    });
-    const value = { at: new Date().toISOString(), systems: list.map((x) => pushHistory(sysHistory, x)) };
-    sysCache = { at: Date.now(), value };
+  const sysCache = new Map();
+  function sysCached(key, f) {
+    const hit = sysCache.get(key);
+    if (hit && Date.now() - hit.at < 2_000) return hit.value;
+    const value = f().then((list) => list.map((x) => pushHistory(sysHistory, x)));
+    sysCache.set(key, { at: Date.now(), value });
     return value;
+  }
+  const sshError = (e) => new Error(e.code === 'ETIMEDOUT' || e.killed ? 'keine Antwort' : cmdOutput(e));
+  async function systems(root, servers = []) {
+    const conf = await hostsConf();
+    const [hosts, srv] = await Promise.all([
+      sysCached('hosts', () => collectSystems(conf, {
+        self: hostname().split('.')[0],
+        local: systemStats,
+        remote: async (host) => {
+          try {
+            const { stdout } = await onHost(conf, host, root, 'scripts/beadskit/leitstand/host-agent.mjs', ['system'], { timeout: 15_000 });
+            return JSON.parse(stdout);
+          } catch (e) {
+            throw sshError(e);
+          }
+        },
+      })),
+      servers.length ? sysCached(`servers:${JSON.stringify(servers)}`, () => collectServers(servers, {
+        skip: conf ? conf.hosts.map((h) => h.name) : [hostname().split('.')[0]],
+        server: async (s) => {
+          try {
+            const { stdout } = await run('ssh', [...SSH_OPTS, s.ssh, serverCommand(s.services)], { timeout: 15_000 });
+            return parseServerStats(stdout);
+          } catch (e) {
+            throw sshError(e);
+          }
+        },
+      })) : [],
+    ]);
+    return { at: new Date().toISOString(), systems: [...hosts, ...srv] };
   }
 
   // Drain-Markierungen und Schwelle des Auto-Neustarts (null wenn aus): Dateien oder bd kv
@@ -1680,7 +1723,7 @@ function startServer(token, selfRoot) {
         const data = await workerView(p, name, 'detail');
         return data ? send(res, 200, data) : send(res, 404, { error: 'Worker läuft nicht' });
       }
-      if (req.method === 'GET' && path === '/api/system') return send(res, 200, await systems(cfg.root));
+      if (req.method === 'GET' && path === '/api/system') return send(res, 200, await systems(cfg.root, ext.servers));
       if (req.method === 'GET' && path === '/api/runners') {
         if (!cfg.runners) return send(res, 404, { error: 'keine eigenen CI-Runner' });
         // eigene Route: ssh zum Server dauert, ein Fehler soll das Board nicht stören

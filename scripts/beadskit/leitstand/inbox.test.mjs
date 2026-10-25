@@ -7,7 +7,7 @@ import {
   planIssueAction, planRestarts, planRunnerAction, planWorkerAction, prSummary, publicConfig, readBody, repoOfIssue,
   RESTART_COOLDOWN_MS, safeEqual, signSession, today, verifySession, hashPassword, parsePasswordLine, verifyPassword,
   workerRe, wsOfIssue, parseHostsConf, mapRoot, shQuote, remoteCommand, mergeHostWorkers, parseMarkers, routeWorkerAction,
-  parsePrompt, parseDecision, collectSystems, QUICK,
+  parsePrompt, parseDecision, collectServers, collectSystems, QUICK,
 } from './inbox.mjs';
 import { readFileSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
@@ -824,6 +824,42 @@ test('collectSystems: ein Rechner ohne hosts.conf, zwei mit; ein Fehler betrifft
   const two = await collectSystems(conf, { local: async () => stats, remote: async () => { throw new Error('ssh: x\nConnection refused'); } });
   assert.equal(two[0].ok, true);
   assert.deepEqual(two[1], { name: 'pc', leader: false, self: false, ok: false, error: 'Connection refused' });
+});
+
+test('collectServers: mit kind und key; Fehler nur bei diesem, Namensgleiche mit Rechnern fallen weg', async () => {
+  const stats = { cpu: { percent: 50, perCore: [50], cores: 1 } };
+  const servers = [{ name: 'prod', ssh: 'server', services: [] }, { name: 'tot', ssh: 'x', services: [] }, { name: 'mac', ssh: 'y', services: [] }];
+  const seen = [];
+  const list = await collectServers(servers, {
+    skip: ['mac', 'pc'],
+    server: async (s) => { seen.push(s.name); if (s.name === 'tot') throw new Error('ssh: connect\nkeine Antwort'); return stats; },
+  });
+  assert.deepEqual(seen, ['prod', 'tot']);
+  assert.deepEqual(list[0], { name: 'prod', key: 'server:server', kind: 'server', leader: false, self: false, ok: true, stats });
+  assert.deepEqual(list[1], { name: 'tot', key: 'server:x', kind: 'server', leader: false, self: false, ok: false, error: 'keine Antwort' });
+  assert.deepEqual(await collectServers(null, { server: async () => stats }), []);
+});
+
+test('normalizeExt: servers nur mit gültigem Namen, ssh-Ziel und Units, höchstens 4', () => {
+  const warns = [];
+  const ext = normalizeExt({ servers: [
+    { name: 'prod', ssh: 'root@server.example.de', services: ['spot', 'mysql.service', 'runner@1'] },
+    { name: 'ohne', ssh: 'h' },
+    { name: 'opt', ssh: '-oProxyCommand=touch /tmp/x' },
+    { name: 'unit', ssh: 'h', services: ['spot; rm -rf /'] },
+    { name: 'flag', ssh: 'h', services: ['--user'] },
+    { name: 'Gross', ssh: 'h' },
+    { name: 'viele', ssh: 'h', services: Array(13).fill('a') },
+    null,
+  ] }, (m) => warns.push(m));
+  assert.deepEqual(ext.servers, [
+    { name: 'prod', ssh: 'root@server.example.de', services: ['spot', 'mysql.service', 'runner@1'] },
+    { name: 'ohne', ssh: 'h', services: [] },
+  ]);
+  assert.equal(warns.length, 6);
+  assert.deepEqual(normalizeExt({}).servers, []);
+  const many = normalizeExt({ servers: ['a', 'b', 'c', 'd', 'e'].map((name) => ({ name, ssh: name })) });
+  assert.deepEqual(many.servers.map((x) => x.name), ['a', 'b', 'c', 'd']);
 });
 
 test('buildWorkspaces: Schnellantworten mit Vorgaben, aus beads.leitstand.mjs überschreibbar und gekürzt', () => {
