@@ -11,6 +11,7 @@
 // wenn die Ausgabe kein Terminal ist).
 // Teil des beadskit aus dem ProjectTemplate – nicht im Projekt ändern.
 import { execFile } from 'node:child_process';
+import { realpathSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
@@ -261,6 +262,7 @@ async function main(argv) {
   await draw();
 }
 
-if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
+// realpath: als beads-top über einen Symlink aufgerufen
+if (process.argv[1] && realpathSync(process.argv[1]) === realpathSync(fileURLToPath(import.meta.url))) {
   main(process.argv.slice(2)).catch((e) => { console.error(e.message); process.exit(1); });
 }
