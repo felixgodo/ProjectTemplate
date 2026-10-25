@@ -7,6 +7,7 @@
 //   host-agent.mjs workers          Worker dieses Rechners mit Aktivität (wie im Board)
 //   host-agent.mjs chat <name>      Chatverlauf eines Workers, null wenn er hier nicht läuft
 //   host-agent.mjs detail <name>    ausführliche Aktivität (und claude logs), null wenn nicht hier
+//   host-agent.mjs system           Systemwerte dieses Rechners (CPU, RAM, Platte …) für beads-top
 //
 // Teil des beadskit aus dem ProjectTemplate – nicht im Projekt ändern.
 import { execFile } from 'node:child_process';
@@ -16,12 +17,15 @@ import { promisify } from 'node:util';
 import {
   buildWorkspaces, localWorkers, normalizeConfig, normalizeExt, parseWorkers, workerChatOf, workerDetailOf, workerRe,
 } from './inbox.mjs';
+import { systemStats } from './sysinfo.mjs';
 
 const run = promisify(execFile);
 const here = dirname(fileURLToPath(import.meta.url));
 const root = dirname(dirname(dirname(here)));
 
 async function main([what, name]) {
+  // braucht kein Projekt (beads-top ruft es im ProjectTemplate auf)
+  if (what === 'system') return systemStats();
   const { stdout } = await run(join(root, 'scripts/beadskit/workers'), ['config'], { cwd: root, maxBuffer: 8 * 1024 * 1024 });
   const cfg = normalizeConfig(JSON.parse(stdout));
   if (!cfg) throw new Error('workers config unbrauchbar');
@@ -37,7 +41,7 @@ async function main([what, name]) {
     if (!w) return null;
     return what === 'chat' ? workerChatOf(w) : workerDetailOf(w, root);
   }
-  throw new Error('Aufruf: host-agent.mjs workers | chat <name> | detail <name>');
+  throw new Error('Aufruf: host-agent.mjs workers | chat <name> | detail <name> | system');
 }
 
 try {
