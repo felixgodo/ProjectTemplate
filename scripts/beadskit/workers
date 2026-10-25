@@ -11,7 +11,7 @@
 #   workers logs <name>         letzte Ausgabe eines Hintergrund-Workers
 #   workers drain [rolle…] [--ws <ws>] [--host <h>] [--off]   Worker (alle, Rollen, Workspace, Rechner) auslaufen lassen
 #   workers drain-check [rolle]   DRAIN, wenn dieser Worker auslaufen soll (Rolle sonst aus dem Worktree)
-#   workers stop <name>|--all [--force]   Hintergrund-Worker sofort stoppen
+#   workers stop <name>|--all [--force]   Worker sofort stoppen (Hintergrund und Terminal)
 #   workers restart <name> [--force] [--term …] [--dry-run]   Worker mit frischem Kontext neu starten
 #   workers autorestart [--over 200k] [--off]   Leitstand startet große Kontexte selbst neu
 #   workers send <name> [--] <text>   Nachricht oder /befehl in das Terminal eines Workers tippen
@@ -742,10 +742,9 @@ cmd_drain_check() {
   fi
 }
 
-# Bricht ab, solange ein Hintergrund-Worker nicht idle ist, mit Hinweis auf drain.
-# Terminal-Worker beendet stop ohnehin nicht. --force übergeht die Prüfung.
+# Bricht ab, solange ein Worker nicht idle ist, mit Hinweis auf drain. --force übergeht die Prüfung.
 guard_busy() {
-  busy=$(running | awk ${1:+-v only="$1"} '$2 == "background" && (only == "" || $1 == only) && $3 != "idle" { print $1 }')
+  busy=$(running | awk ${1:+-v only="$1"} '(only == "" || $1 == only) && $3 != "idle" { print $1 }')
   [ -z "$busy" ] && return 0
   echo "noch aktiv: $(echo "$busy" | tr '\n' ' ')" >&2
   if [ -n "$(drained)" ]; then
@@ -755,6 +754,23 @@ guard_busy() {
     echo "Besser: scripts/beadskit/workers drain, dann warten; sonst --force" >&2
   fi
   exit 1
+}
+
+# Beendet einen Terminal-Worker: SIGTERM an die Session (wie restart; ein getipptes /exit wird nicht
+# zuverlässig abgeschickt), unter tmux danach sein Fenster. Ein iTerm-Tab bleibt mit seiner Shell offen.
+stop_terminal() {
+  case $2 in ''|*[!0-9]*) echo "$1: keine PID" >&2; return 1 ;; esac
+  kill -TERM "$2" 2>/dev/null || true
+  n=0
+  while kill -0 "$2" 2>/dev/null && [ "$n" -lt 20 ]; do sleep 1; n=$((n + 1)); done
+  if kill -0 "$2" 2>/dev/null; then
+    echo "$1: Session beendet sich nicht (PID $2)" >&2
+    return 1
+  fi
+  if command -v tmux >/dev/null 2>&1 &&
+    tmux list-windows -t "=$TMUX_SESSION" -F '#{window_name}' 2>/dev/null | grep -qxF "$1"; then
+    tmux kill-window -t "=$TMUX_SESSION:=$1" 2>/dev/null || true
+  fi
 }
 
 cmd_stop() {
@@ -772,21 +788,24 @@ cmd_stop() {
   if [ "$target" = --all ]; then
     # Ohne Pipe, damit $failed die Schleife überlebt; ein Fehler stoppt die übrigen nicht
     list=$(running) failed=""
-    while read -r wt kind _ _ _ ref; do
+    while read -r wt kind _ _ pid ref; do
       [ -n "$wt" ] || continue
+      echo "stoppe $wt"
       if [ "$kind" = background ]; then
-        echo "stoppe $wt"
         claude stop "$ref" || failed="$failed $wt"
       else
-        echo "$wt läuft in einem Terminal, dort beenden"
+        stop_terminal "$wt" "$pid" || failed="$failed $wt"
       fi
     done <<EOF
 $list
 EOF
     [ -z "$failed" ] || { echo "nicht gestoppt:$failed" >&2; exit 1; }
   else
-    session=$(session_of "$target")
-    claude stop "$session"
+    line=$(running | awk -v n="$target" '$1 == n || $4 == n { print; exit }')
+    [ -n "$line" ] || { echo "kein laufender Worker $target (scripts/beadskit/workers ls)" >&2; exit 1; }
+    # shellcheck disable=SC2086 # Absicht: "<worktree> <kind> <status> <name> <pid> <ref>" zerlegen
+    set -- $line
+    if [ "$2" = background ]; then claude stop "$6"; else stop_terminal "$1" "$5"; fi
   fi
 }
 
