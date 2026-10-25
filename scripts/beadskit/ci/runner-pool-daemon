@@ -23,6 +23,8 @@
 # Node, Flutter …) und beadskit-pool-cache-<k> (~/.cache). Ein Platz läuft nie doppelt, also
 # schreiben nie zwei Jobs gleichzeitig in denselben Cache.
 set -euo pipefail
+# jq auf dem Server ist 1.6: `label` ist dort ein Schlüsselwort, also nie als $label oder als
+# Kurzform {label} verwenden, sondern label: .label
 
 CONF=${POOL_CONF:-/etc/beadskit-ci/pool.conf}
 TOKEN_FILE=${POOL_TOKEN_FILE:-/etc/beadskit-ci/token}
@@ -89,10 +91,10 @@ repo_jobs() {
   for status in queued in_progress; do
     api "repos/$repo/actions/runs?status=$status&per_page=30" | jq -r '.workflow_runs[] | "\(.id)\t\(.head_branch)\t\(.display_title)"'
   done | sort -u | while IFS=$'\t' read -r id branch title; do
-    api "repos/$repo/actions/runs/$id/jobs?per_page=100" | jq -c --arg repo "$repo" --arg label "$label" \
+    api "repos/$repo/actions/runs/$id/jobs?per_page=100" | jq -c --arg repo "$repo" --arg lbl "$label" \
       --arg branch "$branch" --arg title "$title" '.jobs[]
-        | if .status == "queued" and (.labels | index("self-hosted")) and (.labels | index($label))
-          then {kind: "queued", repo: $repo, label: $label, created: .created_at}
+        | if .status == "queued" and (.labels | index("self-hosted")) and (.labels | index($lbl))
+          then {kind: "queued", repo: $repo, label: $lbl, created: .created_at}
           elif .status == "in_progress" and ((.runner_name // "") | startswith("pool-"))
           then {kind: "running", runner: .runner_name, name, url: .html_url, started: .started_at, branch: $branch, title: $title}
           else empty end'
@@ -168,7 +170,7 @@ write_state() {
     | {at: (now | todate), slots: $slots,
        repos: [$repos | splits(" ") | select(. != "") | {repo: split(":")[0], label: split(":")[1]}],
        queued: (reduce ($j[] | select(.kind == "queued")) as $q ({}; .[$q.label] += 1)),
-       runners: [$c[] | .name as $n | {name, label, repo, slot, busy: ($gh[$n].busy // false),
+       runners: [$c[] | .name as $n | {name, label: .label, repo, slot, busy: ($gh[$n].busy // false),
          github: ($gh[$n].status // "starting"),
          job: ([$j[] | select(.kind == "running" and .runner == $n) | {name, branch, title, url, started}][0] // null)}]}' \
     >"$STATE.tmp" && mv "$STATE.tmp" "$STATE"
