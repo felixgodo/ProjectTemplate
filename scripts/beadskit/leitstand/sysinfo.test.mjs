@@ -1,7 +1,7 @@
 // node --test scripts/beadskit/leitstand/sysinfo.test.mjs
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { cpuPercent, cpuTimes, parseDf, parseMeminfo, parseVmStat, systemStats } from './sysinfo.mjs';
+import { cpuPercent, cpuTimes, launchdState, parseDf, parseMeminfo, parseVmStat, systemStats } from './sysinfo.mjs';
 
 test('parseMeminfo: belegt = gesamt − verfügbar', () => {
   const t = 'MemTotal:       32114848 kB\nMemFree:        21457724 kB\nMemAvailable:   27938556 kB\n';
@@ -41,4 +41,10 @@ test('systemStats auf diesem Rechner: Grundwerte vorhanden', async () => {
   assert.ok(s.mem === null || (s.mem.used > 0 && s.mem.total >= s.mem.used));
   assert.ok(s.uptime > 0);
   assert.ok(Number.isInteger(s.claude));
+});
+
+test('launchdState: running, anderer Zustand oder aus', () => {
+  assert.equal(launchdState('gui/501/x = {\n\tactive count = 1\n\tstate = running\n'), 'running');
+  assert.equal(launchdState('\tstate = not running\n'), 'not');
+  assert.equal(launchdState(''), 'aus');
 });

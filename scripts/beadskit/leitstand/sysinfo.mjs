@@ -3,7 +3,7 @@
 // jede Messung für sich, was fehlt (kein Sensor, kein Docker-Zugriff), bleibt null.
 // Teil des beadskit aus dem ProjectTemplate – nicht im Projekt ändern.
 import { execFile } from 'node:child_process';
-import { readdir, readFile } from 'node:fs/promises';
+import { access, readdir, readFile, stat } from 'node:fs/promises';
 import { cpus, homedir, hostname, loadavg, platform, totalmem, uptime } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
@@ -84,16 +84,60 @@ async function count(cmd, args) {
   return stdout.split('\n').filter(Boolean).length;
 }
 
+const exists = (f) => access(f).then(() => true, () => false);
+
+/** Zustand aus `launchctl print` (macOS): running, sonst der angegebene state bzw. „aus“. */
+export function launchdState(text) {
+  return /^\s*state = (\S+)/m.exec(String(text || ''))?.[1] ?? 'aus';
+}
+
+/**
+ * Dienste dieses Rechners, soweit eingerichtet: beads-dolt und Leitstand-Dienste (systemd --user
+ * bzw. launchd) und die letzte Sicherung in ~/beads-backup. [{ name, ok, state, at? }]
+ */
+export async function services() {
+  const out = [];
+  const units = [['beads-dolt', 'beads-dolt'], ['Leitstand', 'eu.beadskit.leitstand.server'],
+    ['Tunnel', 'eu.beadskit.leitstand.tunnel'], ['Link', 'eu.beadskit.leitstand.link']];
+  if (platform() === 'linux') {
+    const dir = join(process.env.XDG_CONFIG_HOME || join(homedir(), '.config'), 'systemd/user');
+    for (const [name, unit] of units) {
+      if (!(await exists(join(dir, `${unit}.service`)))) continue;
+      // is-active endet bei inaktiven Diensten mit Exit ≠ 0, schreibt den Zustand aber trotzdem
+      const state = (await run('systemctl', ['--user', 'is-active', `${unit}.service`]).then((r) => r.stdout, (e) => e.stdout || '')).trim() || '?';
+      out.push({ name, ok: state === 'active', state });
+    }
+  } else if (platform() === 'darwin') {
+    const uid = process.getuid?.();
+    for (const [name, unit] of units.slice(1)) {
+      if (!(await exists(join(homedir(), 'Library/LaunchAgents', `${unit}.plist`)))) continue;
+      const state = launchdState(await run('launchctl', ['print', `gui/${uid}/${unit}`]).then((r) => r.stdout, () => ''));
+      out.push({ name, ok: state === 'running', state });
+    }
+  }
+  // letzte Sicherung (beads-backup.timer, setup-linux.sh): neuester Tagesordner
+  const days = (await quiet(() => readdir(join(homedir(), 'beads-backup')))) || [];
+  const last = days.filter((d) => /^\d{4}-\d{2}-\d{2}$/.test(d)).sort().at(-1);
+  if (last) {
+    const at = (await stat(join(homedir(), 'beads-backup', last))).mtime;
+    out.push({ name: 'Sicherung', ok: Date.now() - at.getTime() < 26 * 3600_000, state: 'vorhanden', at: at.toISOString() });
+  } else if (await exists(join(homedir(), '.config/systemd/user/beads-backup.timer'))) {
+    out.push({ name: 'Sicherung', ok: true, state: 'noch keine' });
+  }
+  return out;
+}
+
 /** Alle Werte dieses Rechners; die CPU wird über 300 ms gemessen. */
 export async function systemStats() {
   const a = cpuTimes(cpus());
-  const [mem, disk, temp, claude, docker] = await Promise.all([
+  const [mem, disk, temp, claude, docker, svc] = await Promise.all([
     quiet(memory),
     quiet(async () => parseDf((await run('df', ['-kP', homedir()])).stdout)),
     quiet(tempC),
     // pgrep endet mit 1, wenn nichts läuft
     quiet(() => count('pgrep', ['-x', 'claude'])).then((n) => n ?? 0),
     quiet(() => count('docker', ['ps', '-q'])),
+    quiet(services).then((x) => x ?? []),
     sleep(300),
   ]);
   return {
@@ -105,5 +149,6 @@ export async function systemStats() {
     uptime: Math.round(uptime()),
     claude,
     docker,
+    services: svc,
   };
 }
