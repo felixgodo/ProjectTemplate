@@ -1846,7 +1846,7 @@ for (const t of ['pointermove', 'pointerdown']) document.addEventListener(t, spa
 document.addEventListener('pointerleave', sparkHover, true);
 
 function sysCard(h, multi) {
-  const head = (extra = '') => `<div class="sys-head"><b>${esc(h.name)}</b>${multi && h.leader ? '<span class="badge">Leitrechner</span>' : ''}${extra}</div>`;
+  const head = (extra = '') => `<div class="sys-head"><b>${esc(h.name)}</b>${h.kind === 'server' ? '<span class="badge">Server</span>' : multi && h.leader ? '<span class="badge">Leitrechner</span>' : ''}${extra}</div>`;
   if (!h.ok) return `<article class="sys">${head()}<div class="msg bad">nicht erreichbar: ${esc(h.error || '?')}</div></article>`;
   const s = h.stats || {}, c = s.cpu || {}, hist = h.history || {};
   const per = c.perCore || [];
@@ -1874,7 +1874,7 @@ function sysCard(h, multi) {
       <div class="row2">${meter(diskPct, lvl(diskPct, 80, 92))}<span class="sub2">${gb(s.disk.total - s.disk.used)} GB frei von ${gb(s.disk.total)} GB${lvlText(diskPct, 80, 92)}</span></div></div>` : '';
   const more = [
     Number.isFinite(s.tempC) ? `<span class="chip">🌡 ${esc(String(Math.round(s.tempC)))} °C</span>` : '',
-    `<span class="chip">claude-Prozesse ${esc(s.claude ?? 0)}</span>`,
+    s.claude != null ? `<span class="chip">claude-Prozesse ${esc(s.claude)}</span>` : '',
     s.docker != null ? `<span class="chip">Docker ${esc(s.docker)}</span>` : '',
   ].join('');
   const svc = (s.services || []).map((x) => `<span class="chip ${x.ok ? '' : 'bad'}" title="${esc(x.state)}${x.at ? ` · ${esc(stamp(x.at))}` : ''}"><span class="dot"></span>${esc(x.name)}${x.ok ? '' : ` · ${esc(x.state)}`}</span>`).join('');
@@ -1890,11 +1890,12 @@ function renderSystem() {
   const hot = list.some((h) => !h.ok || h.stats?.cpu?.percent >= 90 || (h.stats?.mem && h.stats.mem.used / h.stats.mem.total >= 0.9));
   $('tb-system').className = `tb${hot ? ' dot' : ''}`;
   $('tb-system').textContent = hot ? ' ' : '';
-  $('tb-system').title = hot ? 'Rechner offline oder ausgelastet' : '';
+  $('tb-system').title = hot ? 'Rechner oder Server offline oder ausgelastet' : '';
   if (TAB !== 'system') return;
   if (d?.error) { $('systems').innerHTML = `<div class="error">${esc(d.error)}</div>`; $('system-sub').textContent = ''; return; }
   if (!d) return;
-  $('system-sub').textContent = `${list.length > 1 ? `${list.length} Rechner · ` : ''}Stand ${clock(d.at)} · alle ${SYS_EVERY / 1000} s`;
+  const nSrv = list.filter((h) => h.kind === 'server').length, nHost = list.length - nSrv;
+  $('system-sub').textContent = `${nHost > 1 || nSrv ? `${nHost} Rechner · ` : ''}${nSrv ? `${nSrv} Server · ` : ''}Stand ${clock(d.at)} · alle ${SYS_EVERY / 1000} s`;
   $('systems').innerHTML = list.map((h) => sysCard(h, list.length > 1)).join('') || '<span class="muted">keine Werte</span>';
 }
 

@@ -1,0 +1,26 @@
+@@stat1
+cpu0 100 0 50 800 50 0 0 0 0 0
+cpu1 0 0 0 1000 0 0 0 0 0 0
+@@stat2
+cpu0 400 0 50 1400 150 0 0 0 0 0
+cpu1 50 0 50 1900 0 0 0 0 0 0
+@@mem
+MemTotal:       65699000 kB
+MemFree:        10000000 kB
+MemAvailable:   45000000 kB
+@@df
+Filesystem     1024-blocks      Used Available Capacity Mounted on
+/dev/md2         456943168 322337384 111419372      75% /
+@@load
+2.34 1.5 0.96 3/812 12345
+@@uptime
+1245274.53 9000000.00
+@@temp
+61000
+@@docker
+9
+@@svc
+spot active
+mysql active
+runner@1 failed
+gibtsnicht inactive

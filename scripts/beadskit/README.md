@@ -84,7 +84,8 @@ Kontext selbst neu. Tests: `node --test scripts/beadskit/leitstand/*.test.mjs`.
 Die Seite hat fünf Tabs (oben, auf dem iPhone unten; `#<slug>/<tab>`, Tasten 1–5): **Entscheiden**
 (Rückfragen und `human`), **Worker** (Kennzahlen, Steuerung, CI-Runner), **Board**, **PRs** und
 **System** (`/api/system`: CPU gesamt und je Kern mit Verlauf, Load, RAM, Platte, Temperatur,
-Dienste je Rechner aus hosts.conf, über `host-agent.mjs system`). Über Eingabefeldern stehen
+Dienste je Rechner aus hosts.conf, über `host-agent.mjs system`; dazu die `servers` aus
+`beads.leitstand.mjs`, gemessen per ssh mit einem sh-Skript, ohne node und beadskit dort). Über Eingabefeldern stehen
 Antworten zum Antippen (Entscheidung, Schließgrund, Chat, Titel-Vorlagen, Filter); auf Touch-Geräten
 ersetzt der Knopf ⇄ an der Karte das Ziehen. Als Web-App auf den Home-Bildschirm legbar.
 
@@ -159,5 +160,8 @@ export default {
   }],
   // Zusatzlisten unter dem Board: items(issues, now) → [{ id, title, text, href, linkText, at }]
   panels: [{ key: 'cities', title: 'Neue Städte', ws: 'clubs', items: (issues, now) => [] }],
+  // Server ohne beadskit im Tab System (Linux, höchstens 4): ssh-Ziel ohne Optionen, Dienste =
+  // systemd-Units (höchstens 12), nur lesend über /proc, df, docker ps und systemctl is-active
+  servers: [{ name: 'prod', ssh: 'server', services: ['nginx', 'mysql'] }],
 };
 ```

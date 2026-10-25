@@ -1,7 +1,11 @@
 // node --test scripts/beadskit/leitstand/sysinfo.test.mjs
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { corePercents, cpuPercent, cpuTimes, launchdState, parseDf, parseMeminfo, parseVmStat, pushHistory, systemStats } from './sysinfo.mjs';
+import { readFileSync } from 'node:fs';
+import {
+  corePercents, cpuPercent, cpuTimes, launchdState, parseDf, parseMeminfo, parseProcStat, parseServerStats, parseVmStat,
+  pushHistory, serverCommand, systemStats,
+} from './sysinfo.mjs';
 
 test('parseMeminfo: belegt = gesamt − verfügbar', () => {
   const t = 'MemTotal:       32114848 kB\nMemFree:        21457724 kB\nMemAvailable:   27938556 kB\n';
@@ -69,4 +73,57 @@ test('pushHistory: Verlauf je Rechner, gekappt, je Kern; Fehler bleiben ohne Ver
   assert.deepEqual(out.history.cores, [[30, 40, 50], [70, 60, 50]]);
   const off = { name: 'b', ok: false, error: 'weg' };
   assert.equal(pushHistory(map, off), off);
+});
+
+test('pushHistory: Verlauf je key, wenn gesetzt (Server und Rechner gleichen Namens getrennt)', () => {
+  const map = new Map();
+  const sys = (key, pct) => ({ name: 'prod', key, ok: true, stats: { cpu: { percent: pct, perCore: [] } } });
+  pushHistory(map, sys('server:a', 10));
+  const out = pushHistory(map, sys('server:b', 20));
+  assert.deepEqual(out.history.cpu, [20]);
+  assert.deepEqual([...map.keys()], ['server:a', 'server:b']);
+});
+
+test('parseProcStat: Kerne wie os.cpus(), iowait zählt als idle, Summenzeile cpu fällt weg', () => {
+  const t = 'cpu  9 9 9 9 9 9 9 9\ncpu0 10 1 5 80 20 2 3 4 0 0\ncpu1 1 2 3 4\nintr 5\n';
+  assert.deepEqual(parseProcStat(t), [
+    { times: { user: 10, nice: 1, sys: 5, idle: 100, irq: 9 } },
+    { times: { user: 1, nice: 2, sys: 3, idle: 4, irq: 0 } },
+  ]);
+  assert.deepEqual(parseProcStat(''), []);
+});
+
+test('parseServerStats: alle Abschnitte in der Form von systemStats', () => {
+  const s = parseServerStats(readFileSync(new URL('./testdata/server-stats.txt', import.meta.url), 'utf8'));
+  // cpu0: 300 von 1000 Ticks belegt (iowait 100 ist idle), cpu1: 100 von 1000
+  assert.deepEqual(s.cpu, { percent: 20, perCore: [30, 10], cores: 2, load: [2.3, 1.5, 1] });
+  assert.deepEqual(s.mem, { used: (65699000 - 45000000) * 1024, total: 65699000 * 1024 });
+  assert.deepEqual(s.disk, { used: 322337384 * 1024, total: 456943168 * 1024 });
+  assert.equal(s.tempC, 61);
+  assert.equal(s.uptime, 1245275);
+  assert.equal(s.claude, null);
+  assert.equal(s.docker, 9);
+  assert.deepEqual(s.services, [
+    { name: 'spot', ok: true, state: 'active' }, { name: 'mysql', ok: true, state: 'active' },
+    { name: 'runner@1', ok: false, state: 'failed' }, { name: 'gibtsnicht', ok: false, state: 'inactive' },
+  ]);
+});
+
+test('parseServerStats: fehlende Werte bleiben null, ohne CPU-Messung ein Fehler', () => {
+  const s = parseServerStats('@@stat1\ncpu0 1 0 0 9\n@@stat2\ncpu0 2 0 0 18\n@@df\nkaputt\n@@temp\n@@docker\n@@svc\n');
+  assert.deepEqual(s.cpu, { percent: 10, perCore: [10], cores: 1, load: [] });
+  assert.equal(s.mem, null);
+  assert.equal(s.disk, null);
+  assert.equal(s.tempC, null);
+  assert.equal(s.uptime, null);
+  assert.equal(s.docker, null);
+  assert.deepEqual(s.services, []);
+  assert.throws(() => parseServerStats('Permission denied'), /keine Werte/);
+});
+
+test('serverCommand: Skript und Units als einzelne Wörter, Optionen und Unsinn fallen weg', () => {
+  const cmd = serverCommand(['spot', '-x', "a'b", 'runner@1', 'mysql.service']);
+  assert.match(cmd, /^sh -c '/);
+  assert.ok(cmd.endsWith(" sh 'spot' 'runner@1' 'mysql.service'"));
+  assert.equal(serverCommand().split("' sh").length, 2);
 });
