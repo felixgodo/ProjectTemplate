@@ -124,7 +124,7 @@ step_claude() {
 install_release() {
   local repo=$1 tag=$2 bin=$3 pattern=$4 url tmp f
   url=$(curl -fsSL "https://api.github.com/repos/$repo/releases/tags/$tag" |
-    jq -r --arg p "$pattern" '.assets[] | select(.name | test($p)) | .browser_download_url' | head -n 1)
+    jq -r --arg p "$pattern" '.assets[] | select(.name | test($p)) | .browser_download_url' | head -n 1 || true)
   [ -n "$url" ] || die "$repo $tag: kein Archiv für linux/$ARCH gefunden"
   tmp=$(mktemp -d)
   curl -fsSL "$url" | tar -xz -C "$tmp"
