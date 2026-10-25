@@ -116,8 +116,9 @@ chmod 600 "$cred"
 nc -z -G 5 "$PC_NAME" "$DOLT_PORT" >/dev/null 2>&1 && ok "$PC_NAME:$DOLT_PORT erreichbar, Zugang in ~/.config/beads/credentials" ||
   warn "$PC_NAME:$DOLT_PORT nicht erreichbar (auf $PC_NAME: systemctl --user status beads-dolt)"
 for v in "bd version" "dolt version"; do
-  here=$($v 2>/dev/null | head -n 1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -n 1)
-  there=$(ssh "$PC_NAME" ". ~/.config/beadskit/env; $v" 2>/dev/null | head -n 1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -n 1)
+  # || true: head schließt die Pipe vor dem Ende der Ausgabe, mit pipefail bräche das Skript sonst ab
+  here=$($v 2>/dev/null | head -n 1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -n 1 || true)
+  there=$(ssh "$PC_NAME" ". ~/.config/beadskit/env; $v" 2>/dev/null | head -n 1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -n 1 || true)
   [ "$here" = "$there" ] && ok "${v% *} $here auf beiden" || warn "${v% *}: Mac $here, $PC_NAME ${there:-fehlt} (versions.conf, setup-linux.sh beads)"
 done
 
