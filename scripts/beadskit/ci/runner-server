@@ -7,10 +7,10 @@
 #
 #   runner-server setup [--dry-run] [--recreate]  Image bauen, Runner registrieren (kurzlebiges Token), alle starten
 #   runner-server status [--json]     Container auf dem Server und Status bei GitHub
-#   runner-server start <n…|all>      Runner einschalten, nimmt wieder Jobs an
-#   runner-server stop <n…|all> [--force]  Runner ausschalten
-#   runner-server add                 einen Runner mehr (nächste Nummer, höchstens 8)
-#   runner-server delete [--force]    den Runner mit der höchsten Nummer löschen
+#   runner-server start <n…|mysql|all>  Runner (oder die CI-MySQL) einschalten, nimmt wieder Jobs an
+#   runner-server stop <n…|mysql|all> [--force]  Runner (oder die CI-MySQL) ausschalten
+#   runner-server add                 einen Runner mehr (kleinste freie Nummer, höchstens 8)
+#   runner-server delete [n] [--force]  Runner n löschen (ohne n: den mit der höchsten Nummer)
 #   runner-server logs                letzte Zeilen der Runner-Logs
 #   runner-server remove              Runner bei GitHub abmelden, Container und Volumes löschen
 #
@@ -22,19 +22,26 @@
 # Neues Image oder geänderte Grenzen übernehmen: `setup --recreate`, wenn kein Job läuft.
 # CPU-Vorrang: Runner und MySQL laufen mit niedrigem `cpu_shares` (RUNNER_CPU_SHARES, Docker-Standard
 # 1024), nehmen also nur CPU, die Dienste auf dem Host gerade nicht brauchen. `cpus` begrenzt jeden
-# Runner nach oben, schützt den Host aber nicht, wenn alle zusammen mehr Kerne wollen als da sind.
-# `add` warnt, wenn Runner × RUNNER_CPUS mehr ist als die Kerne des Servers minus 2.
-# Die Anzahl steht in compose.yml auf dem Server (Dienste runner-1 … runner-N); `add` und `delete`
-# ändern sie, `delete` nimmt immer die höchste Nummer, damit die Nummern lückenlos bleiben, und
-# verweigert wie `stop` bei laufendem Job oder wenn danach keiner mehr liefe.
-# `status --json` nennt je Runner auch den laufenden Job und zählt die wartenden Jobs.
+# Runner nach oben. Gesamtdeckel: alle Container liegen in der systemd-Slice beadskit-ci.slice
+# (CPUQuota = RUNNER_CI_CPUS Kerne, MemoryMax = RUNNER_CI_MEM, niedriges CPU- und IO-Gewicht), die
+# alle beadskit-Projekte auf dem Server teilen; `setup` schreibt sie und setzt die Werte sofort.
+# Mehr Runner machen die CI dann nur paralleler, nicht den Host langsamer.
+# Die Runner stehen als Dienste runner-<n> in compose.yml auf dem Server. `add` nimmt die kleinste
+# freie Nummer, `delete n` löscht genau Runner n (Lücken sind erlaubt) und verweigert wie `stop`
+# bei laufendem Job oder wenn danach keiner mehr liefe.
+# `status --json` nennt je Runner auch den laufenden Job, CPU (% eines Kerns) und RAM (Bytes), zählt
+# die wartenden Jobs und misst die Slice (cpuPct, Quota in Kernen, RAM).
 # Mit RUNNER_MYSQL (z. B. 8.0) läuft neben den Runnern der Dienst `mysql` (nur im Netz ci, Daten im
-# RAM, root-Passwort ci) für DB-Tests; `setup` startet ihn mit, `start`/`stop`/`add`/`delete` lassen
-# ihn in Ruhe. Gesteuert auch aus dem Leitstand (Abschnitt CI-Runner).
+# RAM, root-Passwort ci) für DB-Tests; `setup` und `start all` starten ihn mit, `stop all` hält ihn
+# mit an. Einzeln: `start mysql` / `stop mysql` (verweigert, solange ein Runner einen Job hat, weil
+# dessen DB-Tests abbrächen). `add`/`delete` lassen ihn in Ruhe. `status --json` meldet ihn unter
+# mysql (container, cpu, mem; null ohne RUNNER_MYSQL und ohne Container). Gesteuert auch aus dem
+# Leitstand (Abschnitt CI-Runner).
 #
 # Einstellungen per Umgebung (Standard in Klammern): RUNNER_SSH_HOST (server),
 # RUNNER_REPO (GitHub-Repo dieses Checkouts), RUNNER_LABEL (BK_SLUG), RUNNER_COUNT (Anzahl aus
 # compose.yml auf dem Server, ohne compose.yml 3), RUNNER_CPUS (2), RUNNER_CPU_SHARES (128), RUNNER_MEM (6g),
+# RUNNER_CI_CPUS (4, Kerne für alle CI-Container zusammen), RUNNER_CI_MEM (24G),
 # RUNNER_APT (zusätzliche apt-Pakete im Image), RUNNER_MYSQL (MySQL-Version, leer = kein MySQL).
 # beads.project.sh kann sie setzen. Ablage auf dem Server: /opt/<label>-runner (Dockerfile, compose.yml). Das Token zum Registrieren
 # gilt eine Stunde und wird nicht gespeichert; die Runner-Zugangsdaten liegen in den Volumes.
@@ -43,8 +50,10 @@ set -eu
 ROOT=$(git -C "$(dirname "$0")" rev-parse --path-format=absolute --git-common-dir)
 ROOT=$(dirname "$ROOT")
 BK_SLUG=""
+# BK_PROJECT_FILE: andere Projektdatei (Tests: /dev/null, damit die Einstellungen des Projekts nicht greifen)
+PROJECT_FILE=${BK_PROJECT_FILE:-$ROOT/beads.project.sh}
 # shellcheck source=/dev/null
-[ ! -f "$ROOT/beads.project.sh" ] || . "$ROOT/beads.project.sh"
+[ ! -f "$PROJECT_FILE" ] || . "$PROJECT_FILE"
 SSH_HOST=${RUNNER_SSH_HOST:-server}
 REPO=${RUNNER_REPO:-$(cd "$ROOT" && gh repo view --json nameWithOwner --jq .nameWithOwner 2>/dev/null || true)}
 LABEL=${RUNNER_LABEL:-$BK_SLUG}
@@ -59,6 +68,12 @@ CPUS=${RUNNER_CPUS:-2}
 CPU_SHARES=${RUNNER_CPU_SHARES:-128}
 case $CPU_SHARES in '' | 0* | 1 | *[!0-9]*) echo "RUNNER_CPU_SHARES ungültig: '$CPU_SHARES' (ganze Zahl ab 2)" >&2; exit 1 ;; esac
 MEM=${RUNNER_MEM:-6g}
+CI_CPUS=${RUNNER_CI_CPUS:-4}
+case $CI_CPUS in '' | 0* | *[!0-9]*) echo "RUNNER_CI_CPUS ungültig: '$CI_CPUS' (ganze Zahl ab 1)" >&2; exit 1 ;; esac
+CI_MEM=${RUNNER_CI_MEM:-24G}
+printf '%s' "$CI_MEM" | grep -Eq '^[1-9][0-9]*[KMGT]?$' || { echo "RUNNER_CI_MEM ungültig: '$CI_MEM' (z. B. 24G)" >&2; exit 1; }
+SLICE=beadskit-ci.slice
+export SLICE
 VERSION=2.337.0
 DIR=/opt/$LABEL-runner
 
@@ -71,22 +86,52 @@ remote() {
   ssh -o BatchMode=yes "$SSH_HOST" "$@"
 }
 
-# COUNT aus RUNNER_COUNT, sonst aus den Diensten in compose.yml auf dem Server, sonst 3
+# Nummern 1 … $1, eine je Zeile
+seq_to() {
+  i=1
+  while [ "$i" -le "$1" ]; do
+    echo "$i"
+    i=$((i + 1))
+  done
+}
+
+# NUMS (Nummern der Runner, durch Leerzeichen getrennt) und COUNT: aus RUNNER_COUNT (1 … n),
+# sonst aus den Diensten in compose.yml auf dem Server, sonst 1 … 3
 load_count() {
-  [ -z "$COUNT" ] || return 0
-  # ohne Server keine Schätzung: add/delete schrieben sonst compose.yml mit falscher Anzahl
-  COUNT=$(remote "grep -c '^  runner-[0-9]*:\$' $DIR/compose.yml 2>/dev/null || true") || {
+  if [ -n "$COUNT" ]; then
+    NUMS=$(seq_to "$COUNT" | tr '\n' ' ')
+    return 0
+  fi
+  # ohne Server keine Schätzung: add/delete schrieben sonst compose.yml mit falschen Runnern
+  NUMS=$(remote "sed -n 's/^  runner-\([0-9]*\):\$/\1/p' $DIR/compose.yml 2>/dev/null || true") || {
     echo "$SSH_HOST nicht erreichbar" >&2
     exit 1
   }
-  case $COUNT in '' | 0 | *[!0-9]*) COUNT=3 ;; esac
+  # shellcheck disable=SC2086
+  NUMS=$(printf '%s\n' $NUMS | grep -E '^[1-9][0-9]*$' | sort -n -u | tr '\n' ' ' || true)
+  [ -n "$NUMS" ] || NUMS=$(seq_to 3 | tr '\n' ' ')
+  set_count
+}
+
+set_count() {
+  # shellcheck disable=SC2086
+  COUNT=$(printf '%s\n' $NUMS | grep -c . || true)
 }
 
 runners() {
-  i=1
-  while [ "$i" -le "$COUNT" ]; do
-    echo "$i"
-    i=$((i + 1))
+  # shellcheck disable=SC2086
+  printf '%s\n' $NUMS
+}
+
+has_runner() {
+  case " $NUMS " in *" $1 "*) return 0 ;; esac
+  return 1
+}
+
+# Kleinste freie Nummer 1 … MAX
+free_number() {
+  for i in $(seq_to "$MAX"); do
+    has_runner "$i" || { echo "$i"; return; }
   done
 }
 
@@ -99,6 +144,7 @@ x-runner: &runner
   image: $LABEL-runner:$VERSION
   command: ./run.sh
   restart: unless-stopped
+  cgroup_parent: $SLICE
   cpus: $CPUS
   cpu_shares: $CPU_SHARES
   mem_limit: $MEM
@@ -116,6 +162,7 @@ EOF
       MYSQL_ROOT_PASSWORD: ci
     command: ["--innodb-buffer-pool-size=256M", "--max-connections=200"]
     tmpfs: ["/var/lib/mysql"]
+    cgroup_parent: $SLICE
     cpus: 1
     cpu_shares: $CPU_SHARES
     mem_limit: 1g
@@ -148,12 +195,48 @@ USER runner
 EOF
 }
 
+# systemd-Slice für alle CI-Container auf dem Server (gemeinsam für alle Projekte, der letzte
+# `setup` bestimmt die Werte). set-property übernimmt sie sofort, auch bei laufenden Containern.
+slice_script() {
+  cat <<EOF
+cat >/etc/systemd/system/$SLICE <<'SLICE'
+# Erzeugt von beadskit ci/runner-server – nicht von Hand ändern.
+[Unit]
+Description=CI-Runner (beadskit), gemeinsamer Deckel für CPU und RAM
+
+[Slice]
+CPUQuota=${CI_CPUS}00%
+CPUWeight=20
+IOWeight=20
+MemoryHigh=$(mem_high)
+MemoryMax=$CI_MEM
+SLICE
+systemctl daemon-reload
+systemctl start $SLICE
+systemctl set-property --runtime $SLICE CPUQuota=${CI_CPUS}00% CPUWeight=20 IOWeight=20 MemoryHigh=$(mem_high) MemoryMax=$CI_MEM
+EOF
+}
+
+# MemoryHigh (ab hier drosselt der Kernel) = 90 % von RUNNER_CI_MEM
+mem_high() {
+  n=${CI_MEM%[KMGT]}
+  u=${CI_MEM#"$n"}
+  case $u in
+    G) echo "$((n * 1024 * 9 / 10))M" ;;
+    T) echo "$((n * 1024 * 9 / 10))G" ;;
+    M) echo "$((n * 9 / 10))M" ;;
+    K) echo "$((n * 9 / 10))K" ;;
+    *) echo "$((n * 9 / 10))" ;;
+  esac
+}
+
 # Skript für den Server; $1 = Registrierungs-Token, $2 = Argumente für `docker compose up -d`,
 # $3 = Nummern der Runner, die registriert sein müssen
 setup_script() {
   cat <<EOF
 set -euo pipefail
 T='$1'
+$(slice_script)
 mkdir -p $DIR && cd $DIR
 cat >Dockerfile <<'DOCKERFILE'
 $(dockerfile)
@@ -217,16 +300,25 @@ cmd_status() {
   remote "cd $DIR 2>/dev/null && docker compose ps --format 'table {{.Service}}\t{{.Status}}' || echo 'keine Runner auf $SSH_HOST'"
   echo
   gh api "repos/$REPO/actions/runners" --jq '.runners[] | "\(.name)\t\(.status)\t\(if .busy then "busy" else "idle" end)\t\([.labels[].name] | join(","))"'
+  echo
+  usage_script | remote bash -s 2>/dev/null | jq -r '.slice | "CI gesamt (\($ENV.SLICE)): \(.cpuPct // "?") % CPU von \(if .cpus then "\(.cpus * 100) %" else "unbegrenzt" end), RAM \(if .mem then "\(.mem / 1073741824 * 10 | floor / 10) GiB" else "?" end)"' || true
 }
 
 # Zustand je Runner als JSON-Liste: n, name, container (running, exited, … oder missing),
 # github (online, offline oder missing), busy
+# Zustand der Container als JSON-Objekt Dienst → State (running, exited, …)
+container_states() {
+  remote "cd $DIR 2>/dev/null && docker compose ps --all --format json || true" |
+    jq -s 'map({key: .Service, value: .State}) | from_entries'
+}
+
+# $1 = Ergebnis von container_states (optional, sonst neu gelesen)
 runner_state() {
-  containers=$(remote "cd $DIR 2>/dev/null && docker compose ps --all --format json || true" |
-    jq -s 'map({key: .Service, value: .State}) | from_entries')
+  containers=${1:-$(container_states)}
   github=$(gh api "repos/$REPO/actions/runners" --jq '[.runners[] | {key: .name, value: {status, busy}}] | from_entries')
-  jq -n --argjson c "$containers" --argjson g "$github" --argjson count "$COUNT" --arg label "$LABEL" '
-    [range(1; $count + 1) as $n | "\($label)-runner-\($n)" as $name | {
+  nums=$(runners | jq -s -c .)
+  jq -n --argjson c "$containers" --argjson g "$github" --argjson nums "$nums" --arg label "$LABEL" '
+    [$nums[] as $n | "\($label)-runner-\($n)" as $name | {
       n: $n, name: $name,
       container: ($c["runner-\($n)"] // "missing"),
       github: ($g[$name].status // "missing"),
@@ -250,18 +342,67 @@ active_jobs() {
     }
 }
 
-# {runners: [… mit job (laufender Job oder null)], queued: Anzahl wartender Jobs}
+# Auslastung auf dem Server als JSON: {containers: {runner-1: {cpu, mem}}, slice: {cpuPct, cpus, mem}}.
+# cpu in % eines Kerns. Die Slice wird über die Dauer von `docker stats` gemessen (zwei Lesungen
+# von usage_usec), cpus ist die Quota in Kernen (null ohne Slice).
+usage_script() {
+  printf 'cg=/sys/fs/cgroup/%s\ndir=%s\n' "$SLICE" "$DIR"
+  cat <<'EOF'
+u() { sed -n 's/^usage_usec //p' "$cg/cpu.stat" 2>/dev/null; }
+t0=$(date +%s%N) u0=$(u)
+stats=$(cd "$dir" 2>/dev/null && ids=$(docker compose ps -q 2>/dev/null) && [ -n "$ids" ] &&
+  docker stats --no-stream --format '{{.Name}}	{{.CPUPerc}}	{{.MemUsage}}' $ids 2>/dev/null || true)
+t1=$(date +%s%N) u1=$(u)
+quota=$(cut -d' ' -f1 "$cg/cpu.max" 2>/dev/null)
+mem=$(cat "$cg/memory.current" 2>/dev/null)
+printf '%s\n' "$stats" | awk -F'\t' -v u0="$u0" -v u1="$u1" -v t0="$t0" -v t1="$t1" -v q="$quota" -v m="$mem" '
+  function bytes(s,  n, u) {
+    n = s + 0; u = s; sub(/^[0-9.]+/, "", u)
+    return (n * (u == "KiB" ? 1024 : u == "MiB" ? 1048576 : u == "GiB" ? 1073741824 : u == "TiB" ? 1099511627776 : 1))
+  }
+  BEGIN { printf "{\"containers\":{"; sep = "" }
+  NF >= 3 {
+    if ($1 ~ /-mysql-[0-9]+$/) svc = "mysql"
+    else if (match($1, /runner-[0-9]+-[0-9]+$/)) { svc = substr($1, RSTART, RLENGTH); sub(/-[0-9]+$/, "", svc) }
+    else next
+    split($3, mm, " / "); cpu = $2; sub(/%/, "", cpu)
+    printf "%s\"%s\":{\"cpu\":%.1f,\"mem\":%.0f}", sep, svc, cpu + 0, bytes(mm[1]); sep = ","
+  }
+  END {
+    printf "},\"slice\":{"
+    if (u0 != "" && u1 != "" && t1 > t0) printf "\"cpuPct\":%.1f,", (u1 - u0) * 100000 / (t1 - t0); else printf "\"cpuPct\":null,"
+    if (q ~ /^[0-9]+$/) printf "\"cpus\":%.2f,", q / 100000; else printf "\"cpus\":null,"
+    if (m ~ /^[0-9]+$/) printf "\"mem\":%.0f", m; else printf "\"mem\":null"
+    print "}}"
+  }'
+EOF
+}
+
+# {runners: [… mit job (laufender Job oder null), cpu, mem], queued: Anzahl wartender Jobs, slice}
 cmd_status_json() {
-  state=$(runner_state)
+  # Messung (dauert so lange wie docker stats) parallel zu den GitHub-Abfragen
+  tmp=$(mktemp)
+  usage_script | remote bash -s >"$tmp" 2>/dev/null &
+  upid=$!
+  containers=$(container_states)
+  state=$(runner_state "$containers")
   jobs=$(active_jobs | jq -s .)
-  jq -n --argjson r "$state" --argjson j "$jobs" '{
+  wait "$upid" || true
+  usage=$(jq -c . "$tmp" 2>/dev/null || true)
+  rm -f "$tmp"
+  jq -n --argjson r "$state" --argjson j "$jobs" --argjson u "${usage:-"{}"}" --argjson c "$containers" \
+    --arg mysql "$MYSQL_VERSION" '{
     runners: [$r[] | .name as $name | . + {job: ([$j[] | select(.status == "in_progress" and .runner == $name)
-      | {name, branch, title, url, started}][0] // null)}],
-    queued: ([$j[] | select(.status != "in_progress")] | length)
+      | {name, branch, title, url, started}][0] // null),
+      cpu: ($u.containers["runner-\(.n)"].cpu // null), mem: ($u.containers["runner-\(.n)"].mem // null)}],
+    queued: ([$j[] | select(.status != "in_progress")] | length),
+    mysql: (if $mysql != "" or $c.mysql then {container: ($c.mysql // "missing"),
+      cpu: ($u.containers.mysql.cpu // null), mem: ($u.containers.mysql.mem // null)} else null end),
+    slice: ($u.slice // null)
   }'
 }
 
-# Runner-Nummern aus den Argumenten, eine je Zeile: Zahlen 1…COUNT oder all
+# Runner-Nummern aus den Argumenten, eine je Zeile: vorhandene Nummern oder all
 pick() {
   [ $# -ge 1 ] || usage
   if [ "$1" = all ] && [ $# -eq 1 ]; then
@@ -270,7 +411,7 @@ pick() {
   fi
   for n in "$@"; do
     case $n in '' | 0* | *[!0-9]*) usage ;; esac
-    [ "$n" -le "$COUNT" ] || usage
+    has_runner "$n" || { echo "Runner $n gibt es nicht (vorhanden: $NUMS)" >&2; exit 2; }
     echo "$n"
   done
 }
@@ -280,9 +421,18 @@ services() {
 }
 
 cmd_start() {
+  if [ "$*" = mysql ]; then
+    remote "cd $DIR && docker compose up -d --no-recreate mysql"
+    return
+  fi
   ns=$(pick "$@") || exit 2
   # shellcheck disable=SC2086
-  remote "cd $DIR && docker compose up -d --no-recreate$(services $ns)"
+  remote "cd $DIR && docker compose up -d --no-recreate$(services $ns)$(all_mysql "$@")"
+}
+
+# " mysql" bei `all`, wenn das Projekt eine CI-MySQL hat
+all_mysql() {
+  [ "$*" = all ] && [ -n "$MYSQL_VERSION" ] && printf ' mysql' || true
 }
 
 cmd_stop() {
@@ -293,11 +443,25 @@ cmd_stop() {
     shift
   done
   shift
+  if [ "$*" = mysql ]; then
+    [ -n "$force" ] || guard_mysql
+    remote "cd $DIR && docker compose stop mysql"
+    return
+  fi
   ns=$(pick "$@") || exit 2
   # shellcheck disable=SC2086
   [ -n "$force" ] || guard_stop $ns
   # shellcheck disable=SC2086
-  remote "cd $DIR && docker compose stop$(services $ns)"
+  remote "cd $DIR && docker compose stop$(services $ns)$(all_mysql "$@")"
+}
+
+# Bricht ab, wenn ein Runner einen Job hat (dessen DB-Tests brauchen die MySQL)
+guard_mysql() {
+  busy=$(runner_state | jq -r '[.[] | select(.busy) | .name] | join(", ")')
+  if [ -n "$busy" ]; then
+    echo "$busy arbeitet gerade an einem Job, dessen DB-Tests ohne MySQL abbrächen. Trotzdem: --force" >&2
+    exit 1
+  fi
 }
 
 # Bricht ab, wenn einer der Runner einen Job hat oder danach keiner mehr liefe
@@ -321,40 +485,47 @@ cmd_add() {
     echo "Schon $COUNT Runner, mehr als $MAX gehen nicht." >&2
     exit 1
   fi
-  COUNT=$((COUNT + 1))
+  n=$(free_number)
+  # shellcheck disable=SC2086
+  NUMS=$(printf '%s\n' $NUMS "$n" | sort -n | tr '\n' ' ')
+  set_count
   warn_cores
-  setup_script "$(token registration-token)" "--no-recreate runner-$COUNT" "$COUNT" | remote bash -s
-  echo "$LABEL-runner-$COUNT hinzugefügt."
+  setup_script "$(token registration-token)" "--no-recreate runner-$n" "$n" | remote bash -s
+  echo "$LABEL-runner-$n hinzugefügt."
 }
 
-# Warnung, wenn die Runner zusammen mehr Kerne beanspruchen, als der Server übrig hat (2 bleiben frei)
+# Hinweis, wenn die Runner zusammen mehr Kerne wollen, als die Slice hergibt
 warn_cores() {
-  cores=$(remote nproc 2>/dev/null || true)
-  case $cores in '' | *[!0-9]*) return 0 ;; esac
   # RUNNER_CPUS darf eine Kommazahl sein (1.5): auf ganze Kerne aufrunden
   need=$(awk -v n="$COUNT" -v c="$CPUS" 'BEGIN { x = n * c; printf "%d", (x == int(x)) ? x : int(x) + 1 }')
-  if [ "$need" -gt $((cores - 2)) ]; then
-    echo "Achtung: $COUNT Runner × $CPUS CPUs = $need, der Server hat $cores Kerne. Die Runner laufen mit" >&2
-    echo "niedrigem cpu_shares ($CPU_SHARES) nach den Diensten des Hosts, gleichzeitige Jobs werden aber langsamer." >&2
+  if [ "$need" -gt "$CI_CPUS" ]; then
+    echo "Hinweis: $COUNT Runner × $CPUS CPUs = $need, die CI darf zusammen $CI_CPUS Kerne nutzen" >&2
+    echo "(RUNNER_CI_CPUS). Gleichzeitige Jobs teilen sie sich und werden langsamer, der Host nicht." >&2
   fi
 }
 
-# Löscht den Runner mit der höchsten Nummer: Container stoppen und löschen, Volume löschen,
-# compose.yml ohne ihn, bei GitHub abmelden
+# Löscht Runner n (ohne n den mit der höchsten Nummer): Container stoppen und löschen, Volume
+# löschen, compose.yml ohne ihn, bei GitHub abmelden
 cmd_delete() {
-  case ${1-} in
-    '') force= ;;
-    --force) force=1 ;;
-    *) usage ;;
-  esac
-  n=$COUNT
-  if [ "$n" -le 1 ]; then
+  force=''
+  n=''
+  for a in "$@"; do
+    case $a in
+      --force) force=1 ;;
+      '' | 0* | *[!0-9]*) usage ;;
+      *) [ -z "$n" ] || usage; n=$a ;;
+    esac
+  done
+  [ -n "$n" ] || n=$(runners | tail -n 1)
+  has_runner "$n" || { echo "Runner $n gibt es nicht (vorhanden: $NUMS)" >&2; exit 2; }
+  if [ "$COUNT" -le 1 ]; then
     echo "Der letzte Runner bleibt. Alle entfernen: runner-server remove" >&2
     exit 1
   fi
   [ -n "$force" ] || guard_stop "$n"
   id=$(gh api "repos/$REPO/actions/runners" --jq ".runners[] | select(.name == \"$LABEL-runner-$n\") | .id")
-  COUNT=$((n - 1))
+  NUMS=$(runners | grep -v -x "$n" | tr '\n' ' ')
+  set_count
   remote bash -s <<EOF
 set -euo pipefail
 cd $DIR

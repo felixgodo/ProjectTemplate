@@ -100,9 +100,17 @@ projekteigenen Leitstands (`<git-dir>/<slug>-leitstand-*`) und entfernt dessen l
 **CI-Runner:** `scripts/beadskit/ci/runner-server setup|status|start|stop|add|delete|logs|remove`
 (Label = `BK_SLUG`, Repo aus `gh`, Ablage `/opt/<slug>-runner` auf dem Server). Der Workflow
 wählt sie mit `runs-on: [self-hosted, <slug>]`; dann zeigt der Leitstand den Abschnitt CI-Runner.
-Runner und MySQL laufen mit `cpu_shares` 128 (Docker-Standard 1024). So bekommen die Dienste auf
-dem Server Vorrang, wenn alle Runner gleichzeitig rechnen. Neue Grenzen übernimmt
-`setup --recreate`, wenn kein Job läuft.
+Runner und MySQL laufen mit `cpu_shares` 128 (Docker-Standard 1024) und zusammen in der
+systemd-Slice `beadskit-ci.slice`. Alle Projekte auf dem Server teilen sie. Sie hat einen
+Gesamtdeckel (`RUNNER_CI_CPUS` Kerne, `RUNNER_CI_MEM`) und ein niedriges CPU- und IO-Gewicht.
+Mehr Runner machen die CI dadurch paralleler, den Server aber nicht langsamer. `setup` schreibt
+die Slice und setzt ihre Werte sofort. Neue Grenzen je Container übernimmt `setup --recreate`,
+wenn kein Job läuft. Der erste `--recreate` nach 1.4.0 hängt die Container in die Slice ein.
+`delete <n>` löscht genau Runner n, Lücken in den Nummern sind erlaubt, `add` füllt die
+kleinste. Ohne `n` wird wie bisher der Runner mit der höchsten Nummer gelöscht. `status` und der
+Leitstand zeigen CPU und RAM je Runner und für die ganze Slice. Die CI-MySQL
+(`RUNNER_MYSQL`) hat dort eine eigene Zeile. `start|stop mysql` schaltet sie einzeln,
+`stop mysql` verweigert bei laufendem Job, `start|stop all` nimmt sie mit.
 
 ## beads.project.sh
 
@@ -123,6 +131,7 @@ dem Server Vorrang, wenn alle Runner gleichzeitig rechnen. Neue Grenzen übernim
 | `BK_REPOS` | weitere Repos `<schlüssel>:<pfad>`; Label `modul:<schlüssel>` → dort bearbeiten | leer |
 | `RUNNER_APT`, `RUNNER_MYSQL` | Zusatzpakete und MySQL-Version im CI-Runner | leer |
 | `RUNNER_CPUS`, `RUNNER_MEM`, `RUNNER_CPU_SHARES` | Grenzen je Runner; `cpu_shares` = Gewicht gegenüber dem Host | `2`, `6g`, `128` |
+| `RUNNER_CI_CPUS`, `RUNNER_CI_MEM` | Deckel für alle CI-Container auf dem Server zusammen (Slice `beadskit-ci.slice`, der letzte `setup` gilt) | `4`, `24G` |
 
 Rollen bestehen aus a-z und `-` (`club-add`). Ein Worker `<rolle>-<n>` gehört zum Workspace
 seiner Rolle; `start` startet genau einen Workspace und hebt nur dessen Drain auf.
