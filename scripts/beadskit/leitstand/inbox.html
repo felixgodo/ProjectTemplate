@@ -1034,23 +1034,50 @@ function renderPanels() {
 let runners = null;
 let runnersAt = 0;
 // offen: alle 10 s, sonst alle 30 s für Zeile im Worker-Tab und Zähler am Tab
+// loadPool.gen zählt Aktionen: eine Antwort, die vor einer Aktion angefragt wurde, ist veraltet.
+// Kommt force während eines Abrufs, wird danach noch einmal geladen (statt den Klick zu verschlucken).
+loadPool.gen = 0;
 async function loadPool(force = false) {
   if (!hasPool()) return;
-  if (loadPool.busy || (!force && Date.now() - runnersAt < (TAB === 'ci' ? 10_000 : 30_000))) return;
+  if (loadPool.busy) { if (force) loadPool.again = true; return; }
+  if (!force && Date.now() - runnersAt < (TAB === 'ci' ? 10_000 : 30_000)) return;
   loadPool.busy = true;
+  loadPool.again = false;
   runnersAt = Date.now();
   const slug = P;
+  const gen = loadPool.gen;
+  let fresh = false;
   try {
     const r = await fetch('/api/pool');
     if (r.status === 401) { location.href = '/login'; return; }
     const res = await r.json().catch(() => ({}));
     if (slug !== P) return;   // Antwort zu einem vorher gewählten Projekt
-    runners = r.ok ? res : { error: res.error || r.statusText };
+    if (gen === loadPool.gen) { runners = r.ok ? res : { error: res.error || r.statusText }; fresh = true; }
   } catch (e) {
-    runners = { error: e.message };
-  } finally { loadPool.busy = false; }
+    if (gen === loadPool.gen) { runners = { error: e.message }; fresh = true; }
+  } finally {
+    loadPool.busy = false;
+    if (loadPool.again || gen !== loadPool.gen) loadPool(true);
+  }
+  if (!fresh) return;
   renderRunners();
   if ($('pool-log').open) loadPoolLog();
+}
+// Übernimmt eine erfolgreiche Aktion sofort in den angezeigten Stand, bis der nächste Abruf ihn bestätigt
+function applyPoolAction(p, { action, n, label, repo, run, off }) {
+  if (!p || p.error) return;
+  if (action === 'size') p.slots = n;
+  else if (action === 'start' && n == null) p.service = 'active';
+  else if (action === 'stop' && n == null) p.service = 'inactive';
+  else if ((action === 'start' || action === 'stop') && p[n]) p[n].container = action === 'start' ? 'running' : 'exited';
+  else if (['limit', 'pause', 'resume'].includes(action) && p.limits) {
+    const l = { max: null, paused: false, ...p.limits[label] };
+    if (action === 'limit') l.max = n === 'off' ? null : n;
+    else l.paused = action === 'pause';
+    p.limits = { ...p.limits, [label]: l };
+  } else if (action === 'prio') {
+    for (const q of p.queue || []) if (q.repo === repo && q.run === run) q.prio = !off;
+  }
 }
 async function loadPoolLog() {
   try {
@@ -1590,18 +1617,24 @@ document.addEventListener('click', async (e) => {
     const ask = force ? 'Job abbrechen?' : action === 'stop' ? `${{ mysql: 'CI-MySQL', mariadb: 'CI-MariaDB' }[n] ?? 'Pool'} aus?`
       : action === 'pause' ? `${poolName(label)} pausieren?` : null;
     if (ask && !armed(ra, ask)) return;
-    ra.disabled = true;
+    // ganze Zeile sperren: ein zweiter Klick auf −/+ rechnete sonst mit dem alten Wert
+    const group = [...(ra.closest('.prow, #runners-ctl, .runner, .qrow') || ra.parentElement).querySelectorAll('button[data-ra]')];
+    for (const b of group) b.disabled = true;
+    loadPool.gen++;
     try {
-      const r = await post('/api/pool', { action, n, force, label, repo, run, off });
+      const body = { action, n, force, label, repo, run, off };
+      const r = await post('/api/pool', body);
       toast(r.output?.split('\n').pop() || 'ok');
-      await loadPool(true);
+      applyPoolAction(runners, body);
+      renderRunners();
+      loadPool(true);
     } catch (err) {
       toast(err.message, true);
       // CI-MySQL verweigert (Job läuft): beim nächsten Klick mit --force
       if (err.status === 409 && action === 'stop' && (n === 'mysql' || n === 'mariadb') && !force && ra.isConnected) {
         ra.dataset.force = '1'; ra.textContent = 'Trotzdem (--force)';
       }
-    } finally { ra.disabled = false; }
+    } finally { for (const b of group) if (b.isConnected) b.disabled = false; }
     return;
   }
 

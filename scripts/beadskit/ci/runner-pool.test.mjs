@@ -396,6 +396,43 @@ test('limit, pause, resume prüfen Label und Plätze', () => {
   assert.equal(poolCmd(['limit', 'a']).status, 2);
 });
 
+// status --json: Server-Skripte lokal, state.json des Dienstes im Testordner, docker/systemctl leer
+function poolStatus({ state, limits, prio } = {}) {
+  const dir = mkdtempSync(join(tmpdir(), 'runner-pool-s-'));
+  const etc = join(dir, 'etc');
+  const run = join(dir, 'run');
+  mkdirSync(etc);
+  mkdirSync(run);
+  writeFileSync(join(etc, 'pool.conf'), 'REPOS="o/a:a"\nSLOTS=3\n');
+  if (state !== undefined) writeFileSync(join(run, 'state.json'), JSON.stringify(state));
+  if (limits !== undefined) writeFileSync(join(etc, 'projects.json'), limits);
+  if (prio !== undefined) writeFileSync(join(etc, 'prio'), prio);
+  writeFileSync(join(dir, 'ssh'), `#!/bin/bash\nsed -e "s#/etc/beadskit-ci#$ETC#g" -e "s#/run/beadskit-runner-pool#$RUN#g" | bash -s\n`);
+  for (const f of ['docker', 'systemctl']) writeFileSync(join(dir, f), '#!/bin/sh\nexit 0\n');
+  for (const f of ['ssh', 'docker', 'systemctl']) chmodSync(join(dir, f), 0o755);
+  const r = spawnSync('sh', [POOL, 'status', '--json'], { encoding: 'utf8',
+    env: { ...process.env, PATH: `${dir}:${process.env.PATH}`, ETC: etc, RUN: run } });
+  rmSync(dir, { recursive: true, force: true });
+  assert.equal(r.status, 0, r.stderr);
+  return JSON.parse(r.stdout);
+}
+
+test('status --json: Grenzen und vorgezogene Läufe sofort aus den Dateien, nicht aus der letzten Runde', () => {
+  const state = { at: '2026-10-26T10:00:00Z', slots: 4, limits: { a: { max: 5, paused: false } },
+    queue: [{ repo: 'o/a', label: 'a', run: 11, prio: true }, { repo: 'o/a', label: 'a', run: 12, prio: false }] };
+  const s = poolStatus({ state, limits: '{"a":{"max":2,"paused":true},"B":{"max":1},"c":{"max":9}}', prio: 'o/a 12\nkaputt\n' });
+  assert.equal(s.slots, 3);
+  assert.deepEqual(s.limits, { a: { max: 2, paused: true }, c: { max: null, paused: false } });
+  assert.deepEqual(s.queue.map((q) => [q.run, q.prio]), [[11, false], [12, true]]);
+  // Datei fehlt oder ist kaputt: keine Grenzen, wie im Dienst
+  assert.deepEqual(poolStatus({ state }).limits, {});
+  assert.deepEqual(poolStatus({ state, limits: 'kaputt' }).limits, {});
+  assert.deepEqual(poolStatus({ state }).queue.map((q) => q.prio), [false, false]);
+  // Dienst ohne Grenzen (Setup fehlt) bleibt null, auch wenn die Datei schon da ist
+  assert.equal(poolStatus({ state: { slots: 4 }, limits: '{"a":{"max":2}}' }).limits, null);
+  assert.equal(poolStatus().limits, null);
+});
+
 test('prio: an den Anfang, verschieben, herausnehmen, leeren; Repo muss im Pool sein', () => {
   const read = (r) => r.prio;
   assert.equal(read(prioCmd(['prio', 'o/a', '5'], 'o/b 3\n')), 'o/a 5\no/b 3\n');
