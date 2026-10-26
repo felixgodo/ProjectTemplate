@@ -90,6 +90,7 @@ function round(fixtures, conf, limits, env = {}) {
   writeFileSync(join(dir, 'curl'), `#!/bin/bash
 url=\${@: -1}; path=\${url#*api.test/}; key=\${path//\\//_}; key=\${key%%\\?*}
 echo "curl $*" >>"$LOG"
+[ -z "$GH_FAIL" ] || [[ $path != "$GH_FAIL"* ]] || exit 22
 cat "$FX/$key" 2>/dev/null || echo '{}'
 `);
   writeFileSync(join(dir, 'docker'), '#!/bin/bash\necho "docker $*" >>"$LOG"\n');
@@ -320,7 +321,7 @@ test('plan: Run-Runner ohne wartenden Job seines Laufs endet nach grace, nicht e
 test('Runde: Run-Label an JIT und Container, Warteschlange je Lauf mit PR im Zustand, prio wird aufgeräumt', () => {
   const dir = mkdtempSync(join(tmpdir(), 'runner-pool-prio-'));
   const prioFile = join(dir, 'prio');
-  writeFileSync(prioFile, 'o/a 12\no/a 99\no/z 5\nkaputt\n');
+  writeFileSync(prioFile, 'o/a 12\no/a 99\no/z 5\no/weg 3\nkaputt\n');
   const r = round({
     'repos_o_a_actions_runs': { workflow_runs: [
       { id: 11, head_branch: 'fix/x', display_title: 'Fix X', pull_requests: [{ number: 31 }], html_url: 'https://github.com/o/a/actions/runs/11' },
@@ -335,7 +336,8 @@ test('Runde: Run-Label an JIT und Container, Warteschlange je Lauf mit PR im Zus
     ] },
     'repos_o_a_actions_runners': { runners: [] },
     'repos_o_a_actions_runners_generate-jitconfig': { encoded_jit_config: 'JITCFG' },
-  }, 'REPOS="o/a:a"\nSLOTS=1\n', undefined, { POOL_PRIO: prioFile });
+    'repos_o_z_actions_runners': { runners: [] },
+  }, 'REPOS="o/a:a o/z:z"\nSLOTS=1\n', undefined, { POOL_PRIO: prioFile, GH_FAIL: 'repos/o/z/actions/runs' });
   assert.equal(r.status, 0, r.stderr);
   // run 12 ist vorgezogen, obwohl jünger
   assert.match(r.log, /"labels":\["self-hosted","Linux","X64","a","run-12"\]/);
@@ -344,7 +346,7 @@ test('Runde: Run-Label an JIT und Container, Warteschlange je Lauf mit PR im Zus
     [[12, null, 1, true, true, 'fix/y'], [11, 31, 2, false, true, 'fix/x']]);
   assert.equal(r.state.queue[1].url, 'https://github.com/o/a/actions/runs/11');
   assert.equal(r.state.queue[1].created, '2026-10-25T10:00:00Z');
-  // 99 ist abgeschlossen, Ungültiges fällt weg; o/z wurde nicht gelesen und bleibt
+  // 99 ist abgeschlossen, Ungültiges und o/weg (nicht im Pool) fallen weg; o/z war nicht lesbar und bleibt
   assert.equal(readFileSync(prioFile, 'utf8'), 'o/a 12\no/z 5\n');
   rmSync(dir, { recursive: true, force: true });
 });

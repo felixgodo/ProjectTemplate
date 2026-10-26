@@ -171,8 +171,7 @@ containers() {
 
 start_runner() {
   local repo=$1 label=$2 slot=$3 run=${4-} name cfg
-  case $run in '' | run-[0-9]*) ;; *) log "Run-Label ungültig: $run"; return 0 ;; esac
-  case $run in *[!a-z0-9-]*) log "Run-Label ungültig: $run"; return 0 ;; esac
+  [ -z "$run" ] || [[ $run =~ ^run-[0-9]+$ ]] || { log "Run-Label ungültig: $run"; return 0; }
   name="pool-$label-$(date +%m%d%H%M%S)-$slot"
   cfg=$(api "repos/$repo/actions/runners/generate-jitconfig" -X POST \
     -d "$(jq -cn --arg n "$name" --arg l "$label" --arg r "$run" '{name: $n, runner_group_id: 1,
@@ -188,15 +187,17 @@ start_runner() {
   log "gestartet: $name für $repo (Platz $slot${run:+, $run})"
 }
 
-# Vorgezogene Läufe, die nicht mehr offen sind, und ungültige Zeilen aus PRIO_FILE entfernen; Repos, deren Läufe diese
-# Runde nicht lesbar waren, bleiben stehen. flock: runner-pool prio schreibt dieselbe Datei.
+# Vorgezogene Läufe, die nicht mehr offen sind, ungültige Zeilen und Repos außerhalb von REPOS aus
+# PRIO_FILE entfernen; Repos, deren Läufe diese Runde nicht lesbar waren, bleiben stehen.
+# flock: runner-pool prio schreibt dieselbe Datei.
 prune_prio() {
   [ -s "$PRIO_FILE" ] || return 0
   (
     # flock gibt es auf dem Server (util-linux), in den Tests auf macOS nicht
     if command -v flock >/dev/null; then flock -x 9; fi
-    jq -rR --argjson j "$1" 'split(" ") as $p
+    jq -rR --argjson j "$1" --arg repos "$REPOS" 'split(" ") as $p
       | select($p | length == 2 and (.[1] | test("^[0-9]{1,20}$")))
+      | select([$repos | splits(" ") | select(. != "") | split(":")[0]] | index($p[0]))
       | select(($j | map(select(.kind == "ok") | .repo) | index($p[0]) | not)
         or ($j | map(select(.kind == "run" and .repo == $p[0]) | .run | tostring) | index($p[1])))' "$PRIO_FILE" >"$PRIO_FILE.tmp"
     if cmp -s "$PRIO_FILE" "$PRIO_FILE.tmp"; then rm -f "$PRIO_FILE.tmp"; else chmod 644 "$PRIO_FILE.tmp"; mv "$PRIO_FILE.tmp" "$PRIO_FILE"; fi
