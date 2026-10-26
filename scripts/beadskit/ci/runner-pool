@@ -213,8 +213,18 @@ db=\$(state mysql)
 mdb=\$(state mariadb)
 slots=\$(sed -n 's/^SLOTS=//p' $CONF 2>/dev/null || true)
 tok=\$([ -s /etc/beadskit-ci/token ] && echo true || echo false)
+# Grenzen und vorgezogene Läufe aus den Dateien, nicht aus state.json: der Dienst schreibt den
+# Zustand nur je Runde, limit/pause/prio sollen sofort sichtbar sein. Filter wie limits()/prio() im Dienst.
+lim=\$(jq -c 'if type == "object" then with_entries(select(.key | test("^[a-z0-9-]+\$")) | select(.value | type == "object")
+  | .value = {max: (.value.max | if type == "number" and . >= 1 and . <= 8 and floor == . then . else null end),
+    paused: (.value.paused == true)}) else {} end' $LIMITS 2>/dev/null || echo '{}')
+pr='[]'
+[ ! -r $PRIO ] || pr=\$(jq -cnR '[inputs | select(test("^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+ [0-9]+\$"))]' $PRIO 2>/dev/null || echo '[]')
 jq -c --arg svc "\$svc" --arg db "\$db" --arg mdb "\$mdb" --arg slots "\$slots" --argjson tok "\$tok" \\
-  '. + {service: \$svc, mysqlState: \$db, mariadbState: \$mdb, slotsConf: (\$slots | tonumber? // null), token: \$tok}' <<<"\$st"
+  --argjson lim "\$lim" --argjson pr "\$pr" \\
+  '. + {service: \$svc, mysqlState: \$db, mariadbState: \$mdb, slotsConf: (\$slots | tonumber? // null), token: \$tok}
+  | if (.limits | type) == "object" then .limits = \$lim else . end
+  | if (.queue | type) == "array" then .queue |= map(.prio = ("\\(.repo) \\(.run)" as \$k | any(\$pr[]; . == \$k))) else . end' <<<"\$st"
 EOF
 }
 
