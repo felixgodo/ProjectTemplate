@@ -396,13 +396,20 @@ export function planWorkerAction({ action, role, name, force, off, counts, thres
 }
 
 const POOL_LABEL_RE = /^[a-z0-9][a-z0-9-]{0,63}$/;
+const POOL_REPO_RE = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
 
 /**
  * Argumente für scripts/beadskit/ci/runner-pool: Plätze (size 1–8), Dienst an/aus (start/stop ohne
  * n), CI-Datenbank an/aus (n = mysql oder mariadb, stop mit --force trotz laufendem Job) und je
- * Projekt (label) Grenze (limit, n 1–8 oder 'off') und Pause (pause/resume).
+ * Projekt (label) Grenze (limit, n 1–8 oder 'off') und Pause (pause/resume). prio zieht einen Lauf
+ * (repo, run) an den Anfang der Warteschlange, mit off nimmt es ihn wieder heraus.
  */
-export function planRunnerAction({ action, n, force, label }) {
+export function planRunnerAction({ action, n, force, label, repo, run, off }) {
+  if (action === 'prio') {
+    if (typeof repo !== 'string' || !POOL_REPO_RE.test(repo)) throw new Error('unbekanntes Repo');
+    if (!(Number.isSafeInteger(run) && run > 0)) throw new Error('ungültige Run-ID');
+    return off ? ['prio', '--off', repo, String(run)] : ['prio', repo, String(run)];
+  }
   if (action === 'size') {
     if (!(Number.isInteger(n) && n >= 1 && n <= 8)) throw new Error('Plätze: 1–8');
     return ['size', String(n)];
@@ -423,6 +430,7 @@ export function planRunnerAction({ action, n, force, label }) {
  * Normalisiert `runner-pool status --json`: Dienst, Plätze, Grenzen je Projekt, laufende Pool-Runner
  * (mit Projekt-Label, Job, CPU, RAM), wartende Jobs je Label, CI-MySQL und Slice. Ungültiges fällt
  * weg. limits ist null, solange der Dienst auf dem Server noch keine Grenzen kennt (setup fehlt).
+ * queue: wartende Läufe in der Reihenfolge des Dienstes (vorgezogene zuerst), je Lauf ein Eintrag.
  */
 export function parsePool(d) {
   const job = (j) => (j && typeof j === 'object' ? {
@@ -451,6 +459,21 @@ export function parsePool(d) {
           paused: v.paused === true,
         }]))
       : null,
+    queue: (Array.isArray(o.queue) ? o.queue : [])
+      .filter((q) => q && typeof q.repo === 'string' && POOL_REPO_RE.test(q.repo) && Number.isSafeInteger(q.run) && q.run > 0)
+      .map((q) => ({
+        repo: q.repo,
+        label: str(q.label),
+        run: q.run,
+        pr: Number.isSafeInteger(q.pr) && q.pr > 0 ? q.pr : null,
+        branch: str(q.branch),
+        title: str(q.title),
+        url: typeof q.url === 'string' && q.url.startsWith('https://github.com/') ? q.url : null,
+        jobs: Number.isInteger(q.jobs) && q.jobs > 0 ? q.jobs : 1,
+        created: str(q.created, null),
+        prio: q.prio === true,
+        runLabel: q.runLabel === true,
+      })),
     runners: (Array.isArray(o.runners) ? o.runners : [])
       .filter((r) => r && typeof r.name === 'string' && r.name.startsWith('pool-'))
       .map((r) => ({

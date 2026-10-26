@@ -103,8 +103,11 @@ projekteigenen Leitstands (`<git-dir>/<slug>-leitstand-*`) und entfernt dessen l
 Deshalb teilen sich alle Projekte einen Pool: Der Dienst `beadskit-runner-pool` auf dem Server
 startet für jeden wartenden Job einen Einmal-Runner (JIT) für genau dieses Repo und nimmt dabei die
 ältesten Jobs zuerst, über alle Repos. Höchstens `SLOTS` laufen gleichzeitig (Vorgabe 4). Nach dem
-Job wird der Container gelöscht, ein Runner ohne Job nach 10 min. Die Workflows bleiben bei
-`runs-on: [self-hosted, <slug>]`.
+Job wird der Container gelöscht, ein Runner ohne Job nach 10 min. Workflows:
+`runs-on: [self-hosted, <slug>, "run-${{ github.run_id }}"]`. Das Run-Label ist optional, ohne es
+geht alles wie bisher; erst damit nimmt ein Runner nur Jobs seines Laufs und ein einzelner PR lässt
+sich vorziehen. Erst `runner-pool setup` (Dienst ab 1.7.0), dann die Workflows umstellen: Ein
+älterer Dienst startet Runner ohne das Label, die Jobs blieben „Queued“.
 - Alle Container laufen in der systemd-Slice `beadskit-ci.slice` mit Gesamtdeckel
   (`RUNNER_CI_CPUS` Kerne, `RUNNER_CI_MEM`) und niedrigem CPU- und IO-Gewicht.
 - Je Platz gibt es Volumes für `_work/_tool` und `~/.cache`.
@@ -117,14 +120,19 @@ Job wird der Container gelöscht, ein Runner ohne Job nach 10 min. Die Workflows
   Projekts, `pause|resume <label>` lässt es keine neuen Runner bekommen (freie enden sofort, laufende
   Jobs laufen zu Ende). Steht in `/etc/beadskit-ci/projects.json` auf dem Server, `setup` lässt sie
   stehen und wirkt ab der nächsten Runde.
+- Vorziehen: `runner-pool prio <owner/repo> <run-id>` stellt einen Lauf an den Anfang der
+  Warteschlange (`--off <owner/repo> <run-id>` nimmt ihn heraus, `--clear` alle). Steht in
+  `/etc/beadskit-ci/prio`, abgeschlossene Läufe entfernt der Dienst selbst. Ein Runner mit Run-Label,
+  dessen Lauf nichts mehr wartet (abgebrochen), endet nach 60 s statt nach 10 min.
 - `setup` liest alle Projekte aus `~/.config/beadskit/projects.txt`, deren Workflows `self-hosted`
   nutzen, und vereint ihre `RUNNER_APT` in einem Image. Nach jeder Änderung daran `setup` erneut.
 - Token: Fine-grained PAT für diese Repos mit Administration (Read and write) und Actions (Read),
   einzugeben mit `runner-pool set-token`. Er liegt nur auf dem Server.
 - Der Leitstand zeigt im Tab „CI“ (für alle Projekte gleich, Taste 6) die Plätze, je Projekt Runner,
   wartende Jobs, Grenze −/+ und Pausieren/Fortsetzen, die Runner mit Projekt und Job, CPU/RAM, die
-  CI-Datenbanken und das Log des Dienstes, mit Plätze −/+ und Pool an/aus. Der Worker-Tab zeigt nur
-  noch eine Zeile dazu.
+  CI-Datenbanken und das Log des Dienstes, mit Plätze −/+ und Pool an/aus. Darunter die
+  Warteschlange aller Projekte je Lauf (PR, Jobs, seit wann) in der Reihenfolge des Dienstes, mit
+  „Vorziehen“ und „Zurück“. Der Worker-Tab zeigt nur noch eine Zeile dazu.
 
 ## beads.project.sh
 

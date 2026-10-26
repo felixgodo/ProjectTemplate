@@ -81,7 +81,7 @@ test('plan: ohne freie Plätze startet nichts', () => {
 });
 
 // Falsches curl (Antwort je URL aus FIXTURES/<pfad>.json) und docker (ps leer, run protokolliert)
-function round(fixtures, conf, limits) {
+function round(fixtures, conf, limits, env = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'runner-pool-'));
   const fx = join(dir, 'fx');
   mkdirSync(fx);
@@ -90,6 +90,7 @@ function round(fixtures, conf, limits) {
   writeFileSync(join(dir, 'curl'), `#!/bin/bash
 url=\${@: -1}; path=\${url#*api.test/}; key=\${path//\\//_}; key=\${key%%\\?*}
 echo "curl $*" >>"$LOG"
+[ -z "$GH_FAIL" ] || [[ $path != "$GH_FAIL"* ]] || exit 22
 cat "$FX/$key" 2>/dev/null || echo '{}'
 `);
   writeFileSync(join(dir, 'docker'), '#!/bin/bash\necho "docker $*" >>"$LOG"\n');
@@ -101,6 +102,7 @@ cat "$FX/$key" 2>/dev/null || echo '{}'
   const r = spawnSync('bash', [DAEMON, 'once'], { encoding: 'utf8', env: {
     ...process.env, PATH: `${dir}:${process.env.PATH}`, FX: fx, LOG: log, GH_API: 'https://api.test',
     POOL_CONF: join(dir, 'pool.conf'), POOL_TOKEN_FILE: join(dir, 'token'), POOL_STATE: join(dir, 'state.json'), POOL_LIMITS: join(dir, 'projects.json'),
+    POOL_PRIO: join(dir, 'prio'), ...env,
   } });
   const out = { ...r, log: readFileSync(log, 'utf8'), state: JSON.parse(readFileSync(join(dir, 'state.json'), 'utf8')) };
   rmSync(dir, { recursive: true, force: true });
@@ -281,6 +283,74 @@ test('Runde: Grenzen aus projects.json (Ungültiges fällt weg) wirken und stehe
   assert.deepEqual(broken.state.limits, {});
 });
 
+const rjob = (repo, label, created, run, runLabel = `run-${run}`) => ({ repo, label, created, run, runLabel });
+
+test('plan: vorgezogene Läufe zuerst, auch vor älteren Jobs anderer Repos, in Reihenfolge der Liste', () => {
+  const p = plan({ ...base, slots: 2, prio: [{ repo: 'o/b', run: 9 }, { repo: 'o/a', run: 5 }], queued: [
+    rjob('o/a', 'a', '1', 4), rjob('o/a', 'a', '3', 5), rjob('o/b', 'b', '4', 9),
+  ] });
+  assert.deepEqual(p.start, [{ repo: 'o/b', label: 'b', slot: 1, run: 'run-9' }, { repo: 'o/a', label: 'a', slot: 2, run: 'run-5' }]);
+  // ohne prio wie bisher nach Alter
+  assert.deepEqual(plan({ ...base, slots: 1, queued: [rjob('o/a', 'a', '3', 5), rjob('o/a', 'a', '1', 4)] }).start,
+    [{ repo: 'o/a', label: 'a', slot: 1, run: 'run-4' }]);
+});
+
+test('plan: ein Runner mit Run-Label nimmt nur Jobs seines Laufs, Jobs ohne Run-Label wie bisher', () => {
+  const cont = { name: 'pool-a-1', label: 'a', repo: 'o/a', slot: '1', started: 9_990, run: 'run-5' };
+  const p = plan({ ...base, queued: [rjob('o/a', 'a', '1', 4), rjob('o/a', 'a', '2', 5)], containers: [cont] });
+  assert.deepEqual(p.start, [{ repo: 'o/a', label: 'a', slot: 2, run: 'run-4' }]);
+  // ein Job ohne Run-Label nimmt keinen Run-Runner, ein Runner ohne Run-Label nimmt ihn
+  const old = plan({ ...base, queued: [job('o/a', 'a', '1')], containers: [cont] });
+  assert.deepEqual(old.start, [{ repo: 'o/a', label: 'a', slot: 2 }]);
+  const plain = plan({ ...base, queued: [job('o/a', 'a', '1')],
+    containers: [{ name: 'pool-a-2', label: 'a', repo: 'o/a', slot: '1', started: 9_990 }] });
+  assert.deepEqual(plain.start, []);
+});
+
+test('plan: Run-Runner ohne wartenden Job seines Laufs endet nach grace, nicht erst nach idleMax', () => {
+  const cont = (started) => ({ name: 'pool-a-1', label: 'a', repo: 'o/a', slot: '1', started, run: 'run-5' });
+  const gh = [{ repo: 'o/a', name: 'pool-a-1', status: 'online', busy: false, id: 3 }];
+  assert.deepEqual(plan({ ...base, grace: 60, containers: [cont(10_000 - 60)], runners: gh }).stop, [{ name: 'pool-a-1', repo: 'o/a', id: 3 }]);
+  assert.deepEqual(plan({ ...base, grace: 60, containers: [cont(10_000 - 30)], runners: gh }).stop, []);
+  // wartet noch ein Job des Laufs, bleibt er bis idleMax
+  assert.deepEqual(plan({ ...base, grace: 60, queued: [rjob('o/a', 'a', '1', 5)], containers: [cont(10_000 - 300)], runners: gh }).stop, []);
+  // beschäftigt: nie
+  assert.deepEqual(plan({ ...base, grace: 60, containers: [cont(1)], runners: [{ ...gh[0], busy: true }] }).stop, []);
+});
+
+test('Runde: Run-Label an JIT und Container, Warteschlange je Lauf mit PR im Zustand, prio wird aufgeräumt', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'runner-pool-prio-'));
+  const prioFile = join(dir, 'prio');
+  writeFileSync(prioFile, 'o/a 12\no/a 99\no/z 5\no/weg 3\nkaputt\n');
+  const r = round({
+    'repos_o_a_actions_runs': { workflow_runs: [
+      { id: 11, head_branch: 'fix/x', display_title: 'Fix X', pull_requests: [{ number: 31 }], html_url: 'https://github.com/o/a/actions/runs/11' },
+      { id: 12, head_branch: 'fix/y', display_title: 'Fix\tY', pull_requests: [], html_url: 'https://github.com/o/a/actions/runs/12' },
+    ] },
+    'repos_o_a_actions_runs_11_jobs': { jobs: [
+      { status: 'queued', name: 'Backend', labels: ['self-hosted', 'a', 'run-11'], created_at: '2026-10-25T10:00:00Z' },
+      { status: 'queued', name: 'Admin', labels: ['self-hosted', 'a', 'run-11'], created_at: '2026-10-25T10:00:01Z' },
+    ] },
+    'repos_o_a_actions_runs_12_jobs': { jobs: [
+      { status: 'queued', name: 'App', labels: ['self-hosted', 'a', 'run-12'], created_at: '2026-10-25T11:00:00Z' },
+    ] },
+    'repos_o_a_actions_runners': { runners: [] },
+    'repos_o_a_actions_runners_generate-jitconfig': { encoded_jit_config: 'JITCFG' },
+    'repos_o_z_actions_runners': { runners: [] },
+  }, 'REPOS="o/a:a o/z:z"\nSLOTS=1\n', undefined, { POOL_PRIO: prioFile, GH_FAIL: 'repos/o/z/actions/runs' });
+  assert.equal(r.status, 0, r.stderr);
+  // run 12 ist vorgezogen, obwohl jünger
+  assert.match(r.log, /"labels":\["self-hosted","Linux","X64","a","run-12"\]/);
+  assert.match(r.log, /docker run .*--label beadskit\.run=run-12 /);
+  assert.deepEqual(r.state.queue.map((q) => [q.run, q.pr, q.jobs, q.prio, q.runLabel, q.branch]),
+    [[12, null, 1, true, true, 'fix/y'], [11, 31, 2, false, true, 'fix/x']]);
+  assert.equal(r.state.queue[1].url, 'https://github.com/o/a/actions/runs/11');
+  assert.equal(r.state.queue[1].created, '2026-10-25T10:00:00Z');
+  // 99 ist abgeschlossen, Ungültiges und o/weg (nicht im Pool) fallen weg; o/z war nicht lesbar und bleibt
+  assert.equal(readFileSync(prioFile, 'utf8'), 'o/a 12\no/z 5\n');
+  rmSync(dir, { recursive: true, force: true });
+});
+
 // limit/pause/resume: falsches ssh führt das Server-Skript lokal aus, /etc/beadskit-ci → Testordner
 function poolCmd(args, { repos = 'o/a:a o/b:spot-x', limits } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'runner-pool-l-'));
@@ -325,3 +395,43 @@ test('limit, pause, resume prüfen Label und Plätze', () => {
   assert.equal(poolCmd(['pause']).status, 2);
   assert.equal(poolCmd(['limit', 'a']).status, 2);
 });
+
+test('prio: an den Anfang, verschieben, herausnehmen, leeren; Repo muss im Pool sein', () => {
+  const read = (r) => r.prio;
+  assert.equal(read(prioCmd(['prio', 'o/a', '5'], 'o/b 3\n')), 'o/a 5\no/b 3\n');
+  assert.equal(read(prioCmd(['prio', 'o/b', '3'], 'o/a 5\no/b 3\n')), 'o/b 3\no/a 5\n');
+  assert.equal(read(prioCmd(['prio', '--off', 'o/a', '5'], 'o/b 3\no/a 5\n')), 'o/b 3\n');
+  assert.equal(read(prioCmd(['prio', '--clear'], 'o/b 3\n')), '');
+  assert.equal(read(prioCmd(['prio', 'o/a', '5'])), 'o/a 5\n');
+  const unknown = prioCmd(['prio', 'o/zz', '1']);
+  assert.equal(unknown.status, 1);
+  assert.match(unknown.stderr, /nicht im Pool/);
+  // Präfix eines anderen Repos zählt nicht
+  assert.equal(prioCmd(['prio', 'o/b-x', '1'], undefined, 'o/a:a o/b:b').status, 1);
+});
+
+test('prio prüft Repo und Run-ID, bevor es den Server anspricht', () => {
+  for (const args of [['prio', 'o/a;rm', '1'], ['prio', 'spot', '1'], ['prio', 'o/a', 'x'], ['prio', 'o/a', '1;2'],
+    ['prio', '--off', 'o/a', ''], ['prio'], ['prio', 'o/a'], ['prio', '--clear', 'x'], ['prio', '-x', 'o/a', '1']]) {
+    const r = prioCmd(args);
+    assert.equal(r.status, 2, args.join(' '));
+    assert.equal(r.ssh, '', args.join(' '));
+  }
+});
+
+// prio: wie poolCmd, aber mit prio-Datei; ssh protokolliert jeden Aufruf
+function prioCmd(args, prio, repos = 'o/a:a o/b:b') {
+  const dir = mkdtempSync(join(tmpdir(), 'runner-pool-q-'));
+  const etc = join(dir, 'etc');
+  mkdirSync(etc);
+  writeFileSync(join(etc, 'pool.conf'), `REPOS="${repos}"\nSLOTS=4\n`);
+  if (prio !== undefined) writeFileSync(join(etc, 'prio'), prio);
+  writeFileSync(join(dir, 'ssh'), `#!/bin/bash\necho "ssh $*" >>"$ETC/ssh.log"\nsed "s#/etc/beadskit-ci#$ETC#g" | bash -s\n`);
+  chmodSync(join(dir, 'ssh'), 0o755);
+  const r = spawnSync('sh', [POOL, ...args], { encoding: 'utf8',
+    env: { ...process.env, PATH: `${dir}:${process.env.PATH}`, ETC: etc } });
+  const rd = (f) => { try { return readFileSync(join(etc, f), 'utf8'); } catch { return null; } };
+  const out = { ...r, prio: rd('prio'), ssh: rd('ssh.log') ?? '' };
+  rmSync(dir, { recursive: true, force: true });
+  return out;
+}

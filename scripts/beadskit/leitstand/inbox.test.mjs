@@ -497,6 +497,34 @@ test('parsePool: Grenzen je Projekt, null solange der Server sie nicht kennt', (
   assert.equal(parsePool({}).limits, null);
 });
 
+test('parsePool: Warteschlange in Reihenfolge des Dienstes, verwirft Ungültiges', () => {
+  const p = parsePool({ queue: [
+    { repo: 'o/spot', label: 'spot', run: 42, pr: 1013, branch: 'fix/x', title: 'Fix', url: 'https://github.com/o/spot/actions/runs/42',
+      jobs: 3, created: '2026-10-26T10:00:00Z', prio: true, runLabel: true },
+    { repo: 'o/BrightHub', label: 'regiehub', run: 7, pr: '', branch: 'main', url: 'javascript:x', jobs: 0, prio: 'ja' },
+    { repo: 'o/spot;rm', run: 1 }, { repo: 'o/spot', run: '42' }, { repo: 'o/spot', run: -1 }, null,
+  ] });
+  assert.deepEqual(p.queue, [
+    { repo: 'o/spot', label: 'spot', run: 42, pr: 1013, branch: 'fix/x', title: 'Fix', url: 'https://github.com/o/spot/actions/runs/42',
+      jobs: 3, created: '2026-10-26T10:00:00Z', prio: true, runLabel: true },
+    { repo: 'o/BrightHub', label: 'regiehub', run: 7, pr: null, branch: 'main', title: '', url: null,
+      jobs: 1, created: null, prio: false, runLabel: false },
+  ]);
+  assert.deepEqual(parsePool({}).queue, []);
+  assert.deepEqual(parsePool({ queue: {} }).queue, []);
+});
+
+test('planRunnerAction: prio zieht einen Lauf vor oder nimmt ihn heraus, prüft Repo und Run-ID', () => {
+  assert.deepEqual(planRunnerAction({ action: 'prio', repo: 'o/spot-mm', run: 123 }), ['prio', 'o/spot-mm', '123']);
+  assert.deepEqual(planRunnerAction({ action: 'prio', repo: 'o/spot', run: 9, off: true }), ['prio', '--off', 'o/spot', '9']);
+  for (const repo of ['spot', 'o/spot;rm', '--clear', 'o/a/b', undefined]) {
+    assert.throws(() => planRunnerAction({ action: 'prio', repo, run: 1 }), /Repo/);
+  }
+  for (const run of [0, -3, 1.5, '12', undefined, 2 ** 60]) {
+    assert.throws(() => planRunnerAction({ action: 'prio', repo: 'o/spot', run }), /Run-ID/);
+  }
+});
+
 test('parseMysql: Zustand, CPU und RAM der CI-MySQL, null ohne', () => {
   assert.deepEqual(parseMysql({ container: 'running', cpu: 6.2, mem: 8e8, x: 1 }), { container: 'running', cpu: 6.2, mem: 8e8 });
   assert.deepEqual(parseMysql({ cpu: 'x' }), { container: 'missing', cpu: null, mem: null });
