@@ -2,7 +2,8 @@
 # Gemeinsamer CI-Runner-Pool für alle beadskit-Projekte auf dem Server: Statt fester Runner je
 # Repo startet der Dienst beadskit-runner-pool für jeden wartenden Job einen Einmal-Runner für
 # genau dieses Repo (ci/runner-pool-daemon), höchstens SLOTS gleichzeitig, alle in
-# beadskit-ci.slice. Die Workflows bleiben unverändert (`runs-on: [self-hosted, <slug>]`).
+# beadskit-ci.slice. Workflows: `runs-on: [self-hosted, <slug>, "run-${{ github.run_id }}"]`; das
+# Run-Label ist optional, erst damit lässt sich ein einzelner Lauf (PR) mit `prio` vorziehen.
 # Teil des beadskit aus dem ProjectTemplate – nicht im Projekt ändern.
 #
 #   runner-pool setup [--dry-run]     Image, Netz, CI-MySQL, Dienst einrichten bzw. aktualisieren
@@ -11,6 +12,8 @@
 #   runner-pool size <n>              Plätze (1–8), gilt ab der nächsten Runde
 #   runner-pool limit <label> <n|off> Projekt höchstens n Plätze (1–8), off: keine Grenze
 #   runner-pool pause|resume <label>  Projekt bekommt keine neuen Runner (laufende Jobs laufen zu Ende)
+#   runner-pool prio <owner/repo> <run-id> | --off <owner/repo> <run-id> | --clear
+#                                     Lauf an den Anfang der Warteschlange, herausnehmen, alle zurück
 #   runner-pool start|stop            Dienst an/aus (stop: laufende Jobs laufen zu Ende)
 #   runner-pool start|stop mysql|mariadb [--force]  CI-Datenbank an/aus (stop verweigert bei laufendem Job)
 #   runner-pool logs                  letzte Zeilen des Dienstes
@@ -47,6 +50,7 @@ DIR=
 OPT=/opt/beadskit-runner-pool
 CONF=/etc/beadskit-ci/pool.conf
 LIMITS=/etc/beadskit-ci/projects.json
+PRIO=/etc/beadskit-ci/prio
 UNIT=beadskit-runner-pool.service
 MAX=8
 case $SLOTS_DEFAULT in [1-8]) ;; *) echo "RUNNER_POOL_SLOTS ungültig: '$SLOTS_DEFAULT' (1–8)" >&2; exit 1 ;; esac
@@ -57,7 +61,7 @@ printf '%s' "$MEM" | grep -Eq '^[1-9][0-9]*[kmg]?$' || { echo "RUNNER_MEM ungül
 case $IDLE in '' | *[!0-9]*) echo "RUNNER_POOL_IDLE ungültig: '$IDLE'" >&2; exit 1 ;; esac
 
 usage() {
-  sed -n '8,17s/^# \{0,1\}//p' "$0" >&2
+  sed -n '9,20s/^# \{0,1\}//p' "$0" >&2
   exit 2
 }
 
@@ -214,7 +218,7 @@ jq -c --arg svc "\$svc" --arg db "\$db" --arg mdb "\$mdb" --arg slots "\$slots" 
 EOF
 }
 
-# {service, token, slots, repos, queued {label: n}, runners [{name, label, repo, slot, busy, github, job, cpu, mem}],
+# {service, token, slots, repos, queued {label: n}, queue [{repo, label, run, pr, branch, title, url, jobs, created, prio, runLabel}], runners [{name, label, repo, slot, busy, github, job, cpu, mem}],
 #  mysql und mariadb {container, cpu, mem} | null, slice, at}
 cmd_status_json() {
   tmp=$(mktemp)
@@ -226,7 +230,7 @@ cmd_status_json() {
   rm -f "$tmp"
   jq -n --argjson s "$st" --argjson u "${usage:-"{}"}" '{
     service: $s.service, token: $s.token, slots: ($s.slotsConf // $s.slots // null), at: ($s.at // null),
-    repos: ($s.repos // []), queued: ($s.queued // {}), limits: ($s.limits // null),
+    repos: ($s.repos // []), queued: ($s.queued // {}), limits: ($s.limits // null), queue: ($s.queue // []),
     runners: [($s.runners // [])[] | . + {cpu: ($u.containers[.name].cpu // null), mem: ($u.containers[.name].mem // null)}],
     mysql: (if ($s.mysqlState // "missing") == "missing" then null
       else {container: $s.mysqlState, cpu: ($u.containers.mysql.cpu // null), mem: ($u.containers.mysql.mem // null)} end),
@@ -242,6 +246,7 @@ cmd_status() {
     (.runners[] | "  \(.name)\t\(.repo)\t\(if .job then "\(.job.name) · \(.job.branch)" elif .busy then "Job" else "wartet auf Job" end)"),
     ((.limits // {}) | to_entries[] | "  \(.key): \(if .value.paused then "pausiert" elif .value.max then "höchstens \(.value.max) Plätze" else "ohne Grenze" end)"),
     (if (.queued | length) > 0 then "Wartend: \(.queued | to_entries | map("\(.key) \(.value)") | join(", "))" else "Wartend: keine" end),
+    (.queue[:10] | to_entries[] | .value as $q | "  \(.key + 1). \($q.label) \(if $q.pr then "#\($q.pr)" else $q.branch end) · \($q.jobs) Job(s)\(if $q.prio then " · vorgezogen" else "" end)\(if $q.runLabel then "" else " · ohne Run-Label" end)\t\($q.repo) \($q.run)"),
     (if .mysql then "CI-MySQL: \(.mysql.container)" else empty end),
     (if .mariadb then "CI-MariaDB: \(.mariadb.container)" else empty end),
     (.slice | if . and .cpuPct then "CI gesamt (beadskit-ci.slice): \(.cpuPct) % CPU von \(if .cpus then "\(.cpus * 100) %" else "unbegrenzt" end)" else empty end)'
@@ -285,6 +290,38 @@ cmd_pause() {
     set_limit "$1" 'del(.paused)'
     echo "Pool: $1 läuft wieder."
   fi
+}
+
+# Vorgezogene Läufe in $PRIO ändern: $1 top|off|clear, $2 Repo, $3 Run-ID. Das Repo muss in REPOS
+# stehen. Wirkt ab der nächsten Runde; der Dienst entfernt abgeschlossene Läufe selbst.
+set_prio() {
+  how=$1 repo=${2-} id=${3-}
+  if [ "$how" != clear ]; then
+    printf '%s' "$repo" | grep -Eq '^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$' || { echo "Repo ungültig: '$repo'" >&2; exit 2; }
+    printf '%s' "$id" | grep -Eq '^[0-9]{1,20}$' || { echo "Run-ID ungültig: '$id'" >&2; exit 2; }
+  fi
+  remote bash -s <<EOF
+set -eu
+if [ $how != clear ]; then
+  repos=\$(sed -n 's/^REPOS="\(.*\)"\$/\1/p' $CONF 2>/dev/null || true)
+  case " \$repos " in *" $repo:"*) ;; *) echo "Repo '$repo' ist nicht im Pool (runner-pool setup?)" >&2; exit 1 ;; esac
+fi
+(
+  if command -v flock >/dev/null; then flock -x 9; fi
+  { [ $how != top ] || echo '$repo $id'; grep -Fxv '$repo $id' $PRIO 2>/dev/null || true; } >$PRIO.tmp
+  [ $how != clear ] || : >$PRIO.tmp
+  chmod 644 $PRIO.tmp && mv $PRIO.tmp $PRIO
+) 9>$PRIO.lock
+EOF
+}
+
+cmd_prio() {
+  case ${1-} in
+    --clear) [ $# -eq 1 ] || usage; set_prio clear; echo "Pool: kein Lauf mehr vorgezogen." ;;
+    --off) [ $# -eq 3 ] || usage; set_prio off "$2" "$3"; echo "Pool: $2 Lauf $3 nicht mehr vorgezogen." ;;
+    -*) usage ;;
+    *) [ $# -eq 2 ] || usage; set_prio top "$1" "$2"; echo "Pool: $1 Lauf $2 vorgezogen." ;;
+  esac
 }
 
 # Bricht ab, wenn ein Pool-Runner gerade einen Job hat (dessen DB-Tests brauchen die Datenbank)
@@ -350,6 +387,7 @@ case $cmd in
   size) cmd_size "$@" ;;
   limit) cmd_limit "$@" ;;
   pause | resume) cmd_pause "$@" ;;
+  prio) cmd_prio "$@" ;;
   start) cmd_start "$@" ;;
   stop) cmd_stop "$@" ;;
   logs) cmd_logs ;;

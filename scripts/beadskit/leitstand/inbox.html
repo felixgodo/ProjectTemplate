@@ -94,6 +94,14 @@
   .poollog pre { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 11.5px; background: var(--panel);
     border: 1px solid var(--line); border-radius: 10px; padding: 8px 10px; max-height: 420px; overflow: auto; }
   #ci-line { margin: 14px 0 0; font-size: 13px; }
+  .pqueue { display: grid; grid-template-columns: auto minmax(0, 1fr) auto auto; align-items: center; gap: 6px 12px;
+    margin-bottom: 14px; padding: 8px 12px; font-size: 13px; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; }
+  .pqueue .qrow { display: contents; }
+  .pqueue .qpos { color: var(--muted); font-variant-numeric: tabular-nums; }
+  .pqueue .qmain { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .pqueue .qmain.own b { color: var(--accent); }
+  .pqueue .qmeta { white-space: nowrap; }
+  .pqueue .qprio { color: var(--accent); font-weight: 600; }
   .pooltbl .prow { display: contents; }
   @media (max-width: 640px) {
     .pooltbl { display: block; padding: 2px 12px; }
@@ -102,6 +110,11 @@
     .pooltbl .prow + .prow { border-top: 1px solid var(--line); }
     .pooltbl .pname { grid-area: 1 / 1; } .pooltbl .ppause { grid-area: 1 / 2; justify-self: end; }
     .pooltbl .cnt { grid-area: 2 / 1; font-size: 12px; } .pooltbl .pctl { grid-area: 2 / 2; justify-self: end; }
+    .pqueue { display: block; padding: 2px 12px; }
+    .pqueue .qrow { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 2px 8px; padding: 8px 0; }
+    .pqueue .qrow + .qrow { border-top: 1px solid var(--line); }
+    .pqueue .qpos { grid-area: 1 / 1; } .pqueue .qmain { grid-area: 1 / 2; } .pqueue .qbtn { grid-area: 1 / 3 / 3 / 4; }
+    .pqueue .qmeta { grid-area: 2 / 2; font-size: 12px; }
   }
 
   /* Kennzahlen */
@@ -463,6 +476,8 @@
       <span id="runners-ctl"></span></h2>
     <p class="muted" style="margin:-4px 0 10px;font-size:13px" id="pool-hint">Ein Pool für alle Projekte: Plätze und an/aus gelten für alle, Grenze und Pause je Projekt. Laufende Jobs laufen immer zu Ende.</p>
     <div class="pooltbl" id="pool-projects"><span class="muted">lädt …</span></div>
+    <h3 class="poolsub">Warteschlange <span class="sub muted" id="pool-queue-n"></span></h3>
+    <div class="pqueue" id="pool-queue"><span class="muted">lädt …</span></div>
     <h3 class="poolsub">Runner und CI-Datenbanken</h3>
     <div class="runners" id="runners"><span class="muted" style="font-size:13px">lädt …</span></div>
     <details class="poollog" id="pool-log"><summary>Log des Dienstes</summary><pre id="pool-log-text">lädt …</pre></details>
@@ -1116,6 +1131,33 @@ function poolProjects(p) {
   return rows.length ? `<div class="th">Projekt</div><div class="th">Repo</div><div class="th">Runner / wartend</div><div class="th">Plätze</div><div class="th"></div>${rows.join('')}`
     : '<span class="muted">keine Projekte im Pool (runner-pool setup)</span>';
 }
+// Wartende Läufe aller Projekte in der Reihenfolge des Pools: vorgezogene zuerst, dann die ältesten.
+// Ohne Run-Label im Workflow zieht „Vorziehen“ nur das Projekt vor; welcher Lauf dann den Runner
+// bekommt, entscheidet GitHub.
+function poolQueue(p) {
+  const q = p.queue || [];
+  if (!q.length) {
+    // alter Dienst ohne queue im Zustand: Zähler da, Liste fehlt
+    return Object.keys(p.queued || {}).length
+      ? '<span class="muted" title="scripts/beadskit/ci/runner-pool setup">Jobs warten, die Liste braucht ein Server-Setup</span>'
+      : '<span class="muted">kein Job wartet</span>';
+  }
+  return q.map((x, i) => {
+    const link = x.pr ? `https://github.com/${x.repo}/pull/${x.pr}` : x.url;
+    const what = x.pr ? `#${x.pr}` : x.branch || `Lauf ${x.run}`;
+    const name = link ? `<a href="${esc(link)}" target="_blank" rel="noopener">${esc(what)}</a>` : esc(what);
+    const btn = x.prio
+      ? `<button class="small" data-ra="prio" data-repo="${esc(x.repo)}" data-run="${esc(x.run)}" data-off="1" title="Wieder nach Alter einreihen">Zurück</button>`
+      : `<button class="small" data-ra="prio" data-repo="${esc(x.repo)}" data-run="${esc(x.run)}" title="${x.runLabel
+        ? 'An den Anfang der Warteschlange (ab der nächsten Runde, ≤ 15 s)'
+        : 'Workflow ohne Run-Label: zieht nur das Projekt vor, welcher Lauf drankommt, entscheidet GitHub'}">Vorziehen</button>`;
+    return `<div class="qrow"><div class="qpos">${i + 1}.</div>
+      <div class="qmain${x.label === P ? ' own' : ''}" title="${esc(`${x.title}\n${x.branch} · ${x.repo} · Lauf ${x.run}`)}"><b>${esc(poolName(x.label))}</b> ${name}
+        <span class="muted">${esc(x.title)}</span></div>
+      <div class="qmeta muted">${x.prio ? '<span class="qprio">vorgezogen</span> · ' : ''}${x.jobs} Job${x.jobs > 1 ? 's' : ''}${x.created ? ` · seit ${esc(dur(ms(x.created)))}` : ''}${x.runLabel ? '' : ' · nur Projekt'}</div>
+      <div class="qbtn">${btn}</div></div>`;
+  }).join('');
+}
 function renderRunners() {
   const p = runners || {};
   const wait = Object.values(p.queued || {}).reduce((a, b) => a + b, 0);
@@ -1129,9 +1171,14 @@ function renderRunners() {
     $('runners-n').textContent = '';
     $('runners-ctl').innerHTML = '';
     $('pool-projects').innerHTML = '';
+    $('pool-queue').innerHTML = '';
+    $('pool-queue-n').textContent = '';
     return;
   }
   $('pool-projects').innerHTML = runners ? poolProjects(p) : '<span class="muted">lädt …</span>';
+  $('pool-queue').innerHTML = runners ? poolQueue(p) : '<span class="muted">lädt …</span>';
+  const nq = p.queue?.length || 0;
+  $('pool-queue-n').textContent = nq ? `${nq} ${nq === 1 ? 'Lauf' : 'Läufe'}` : '';
   const list = p.runners || [];
   const on = p.service === 'active';
   const busy = list.filter((r) => r.busy).length;
@@ -1537,12 +1584,15 @@ document.addEventListener('click', async (e) => {
     const label = ra.dataset.label || undefined;
     const n = ['mysql', 'mariadb', 'off'].includes(ra.dataset.n) ? ra.dataset.n : ra.dataset.n ? Number(ra.dataset.n) : undefined;
     const force = !!ra.dataset.force;
+    const repo = ra.dataset.repo || undefined;
+    const run = ra.dataset.run ? Number(ra.dataset.run) : undefined;
+    const off = !!ra.dataset.off;
     const ask = force ? 'Job abbrechen?' : action === 'stop' ? `${{ mysql: 'CI-MySQL', mariadb: 'CI-MariaDB' }[n] ?? 'Pool'} aus?`
       : action === 'pause' ? `${poolName(label)} pausieren?` : null;
     if (ask && !armed(ra, ask)) return;
     ra.disabled = true;
     try {
-      const r = await post('/api/pool', { action, n, force, label });
+      const r = await post('/api/pool', { action, n, force, label, repo, run, off });
       toast(r.output?.split('\n').pop() || 'ok');
       await loadPool(true);
     } catch (err) {

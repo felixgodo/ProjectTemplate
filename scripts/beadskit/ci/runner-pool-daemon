@@ -20,6 +20,13 @@
 # Zustand für `runner-pool status`: /run/beadskit-runner-pool/state.json (POOL_STATE).
 # Grenzen je Projekt: /etc/beadskit-ci/projects.json (POOL_LIMITS), {label: {max: 1–8, paused: true}},
 # geschrieben von `runner-pool limit|pause|resume`. Fehlt sie oder ist sie ungültig, gilt keine Grenze.
+# Vorgezogene Läufe: /etc/beadskit-ci/prio (POOL_PRIO), je Zeile `owner/repo run_id`, die oberste
+# zuerst, geschrieben von `runner-pool prio`. Abgeschlossene Läufe entfernt jede Runde.
+#
+# Run-Label: Hat ein Job zusätzlich das Label run-<run_id> (runs-on: [self-hosted, <slug>,
+# "run-${{ github.run_id }}"]), bekommt sein Runner genau dieses Label und nimmt nur Jobs dieses
+# Laufs. Erst damit lässt sich ein einzelner PR vorziehen; ohne das Label entscheidet GitHub, welcher
+# Job des Repos den Runner bekommt.
 #
 # Je Platz (1 … SLOTS) gibt es die Volumes beadskit-pool-tool-<k> (_work/_tool: setup-java,
 # Node, Flutter …) und beadskit-pool-cache-<k> (~/.cache). Ein Platz läuft nie doppelt, also
@@ -32,9 +39,10 @@ CONF=${POOL_CONF:-/etc/beadskit-ci/pool.conf}
 TOKEN_FILE=${POOL_TOKEN_FILE:-/etc/beadskit-ci/token}
 STATE=${POOL_STATE:-/run/beadskit-runner-pool/state.json}
 LIMITS_FILE=${POOL_LIMITS:-/etc/beadskit-ci/projects.json}
+PRIO_FILE=${POOL_PRIO:-/etc/beadskit-ci/prio}
 API=${GH_API:-https://api.github.com}
 
-REPOS="" SLOTS=4 CPUS=2 MEM=6g POLL=15 IDLE_MAX=600
+REPOS="" SLOTS=4 CPUS=2 MEM=6g POLL=15 IDLE_MAX=600 GRACE=60
 IMAGE=beadskit-runner:latest NETWORK=beadskit-ci SLICE=beadskit-ci.slice
 
 log() { printf '%s\n' "$*"; }
@@ -44,6 +52,7 @@ load_conf() {
   [ ! -f "$CONF" ] || . "$CONF"
   case $SLOTS in '' | *[!0-9]*) log "SLOTS ungültig: $SLOTS"; exit 1 ;; esac
   case $IDLE_MAX in '' | *[!0-9]*) log "IDLE_MAX ungültig: $IDLE_MAX"; exit 1 ;; esac
+  case $GRACE in '' | *[!0-9]*) log "GRACE ungültig: $GRACE"; exit 1 ;; esac
   for r in $REPOS; do
     printf '%s' "$r" | grep -Eq '^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+:[a-z0-9-]+$' || { log "REPOS-Eintrag ungültig: $r"; exit 1; }
   done
@@ -56,34 +65,54 @@ limits() {
       paused: (.value.paused == true)}) else {} end' "$LIMITS_FILE" 2>/dev/null || echo '{}'
 }
 
+# Vorgezogene Läufe aus PRIO_FILE in Reihenfolge, Ungültiges fällt weg: [{repo, run}]
+prio() {
+  # jq gibt bei fehlender Datei schon [] aus, bevor es scheitert: also erst prüfen
+  [ -r "$PRIO_FILE" ] || { echo '[]'; return; }
+  jq -nR '[inputs | split(" ") | select(length == 2 and (.[0] | test("^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$"))
+    and (.[1] | test("^[0-9]{1,20}$"))) | {repo: .[0], run: (.[1] | tonumber)}]' "$PRIO_FILE" 2>/dev/null || echo '[]'
+}
+
+# Rang eines wartenden Jobs: Position seines Laufs in prio, sonst hinter allen vorgezogenen
+# shellcheck disable=SC2016
+RANK='def rank($prio): "\(.repo) \(.run)" as $k | ($prio | map("\(.repo) \(.run)") | index($k)) // 1000000;'
+
 # Entscheidet aus dem Zustand, was zu tun ist (reines jq, getestet über `plan`).
-# Eingabe: {slots, now (Unix-Sekunden), idleMax, queued: [{repo, label, created}],
-#           containers: [{name, label, repo, slot, started (Unix)}], runners: [{repo, name, status, busy, id}],
-#           limits: {label: {max, paused}} (optional)}
-# Ausgabe: {start: [{repo, label, slot}], stop: [{name, repo, id}], forget: [{repo, id, name}]}
-# - start: je wartendem Job (älteste zuerst) einen Runner, außer ein freier Runner desselben
-#   Labels kann ihn nehmen; höchstens bis alle Plätze belegt sind, kleinste freie Platznummer.
+# Eingabe: {slots, now (Unix-Sekunden), idleMax, grace, queued: [{repo, label, created, run, runLabel}],
+#           containers: [{name, label, repo, slot, started (Unix), run}], runners: [{repo, name, status, busy, id}],
+#           limits: {label: {max, paused}} (optional), prio: [{repo, run}] (optional)}
+# Ausgabe: {start: [{repo, label, slot, run?}], stop: [{name, repo, id}], forget: [{repo, id, name}]}
+# - start: je wartendem Job (vorgezogene Läufe zuerst, sonst älteste zuerst) einen Runner, außer ein
+#   freier Runner mit passendem Schlüssel kann ihn nehmen (Run-Label, sonst Projekt-Label); höchstens
+#   bis alle Plätze belegt sind, kleinste freie Platznummer. run ist das Run-Label des Jobs.
 #   Ein pausiertes Label bekommt keinen Runner, eines mit max höchstens max Container gleichzeitig.
 # - stop: Container, deren Runner seit idleMax keinen Job hat (ein anderer nahm ihn), bei einem
-#   pausierten Label sofort; laufende Jobs laufen zu Ende.
+#   pausierten Label sofort, mit Run-Label schon nach grace, wenn kein Job seines Laufs mehr wartet
+#   (Lauf abgebrochen); laufende Jobs laufen zu Ende.
 # - forget: Pool-Runner bei GitHub ohne Container (abgestürzt, nie gestartet).
 # shellcheck disable=SC2016
-PLAN='
+PLAN=$RANK'
+  def key: if (.run // "") != "" then .run else .label end;
   . as $s
   | ($s.limits // {}) as $lim
+  | ($s.prio // []) as $prio
   | ($s.runners | map({key: .name, value: .}) | from_entries) as $gh
+  | ([$s.queued[] | .runLabel // empty]) as $runsWaiting
   | [$s.containers[] | . + {busy: ($gh[.name].busy // false)}] as $cs
-  | ([$cs[] | select(.busy | not) | select((($s.now - .started) >= $s.idleMax) or ($lim[.label].paused == true))]) as $old
+  | ([$cs[] | select(.busy | not) | select((($s.now - .started) >= $s.idleMax) or ($lim[.label].paused == true)
+      or ((.run // "") != "" and ($s.now - .started) >= ($s.grace // 60) and (.run as $r | $runsWaiting | index($r) | not)))]) as $old
   | ([$cs[] | select(.name as $n | $old | map(.name) | index($n) | not)]) as $keep
-  | (reduce ($keep[] | select(.busy | not)) as $c ({}; .[$c.label] += 1)) as $idle
+  | (reduce ($keep[] | select(.busy | not)) as $c ({}; .[$c | key] += 1)) as $idle
   | ([$keep[].slot] | map(tonumber)) as $used
   | ([range(1; $s.slots + 1)] - $used) as $free
   | (reduce $keep[] as $c ({}; .[$c.label] += 1)) as $per
-  | (reduce ($s.queued | sort_by(.created))[] as $j ({idle: $idle, free: $free, per: $per, start: []};
-      if (.idle[$j.label] // 0) > 0 then .idle[$j.label] -= 1
+  | (reduce ($s.queued | sort_by([rank($prio), .created]))[] as $j ({idle: $idle, free: $free, per: $per, start: []};
+      ($j | {label: .label, run: .runLabel} | key) as $k
+      | if (.idle[$k] // 0) > 0 then .idle[$k] -= 1
       elif $lim[$j.label].paused == true then .
       elif (.per[$j.label] // 0) >= ($lim[$j.label].max // $s.slots) then .
-      elif (.free | length) > 0 then .start += [{repo: $j.repo, label: $j.label, slot: .free[0]}] | .free = .free[1:]
+      elif (.free | length) > 0 then .start += [{repo: $j.repo, label: $j.label, slot: .free[0]}
+          + (if $j.runLabel then {run: $j.runLabel} else {} end)] | .free = .free[1:]
         | .per[$j.label] += 1
       else . end)) as $r
   | {
@@ -102,21 +131,32 @@ api() {
 }
 
 # Wartende Jobs (status queued, Labels self-hosted + label) und laufende Jobs auf Pool-Runnern
-# eines Repos, je ein JSON-Objekt pro Zeile: {kind: queued|running, …}. Ein Lauf, der zwischen den
+# eines Repos, je ein JSON-Objekt pro Zeile: {kind: queued|running|run|ok, …}. run: ein offener Lauf,
+# ok: die Läufe des Repos waren lesbar (nur dann räumt prune_prio auf). Ein Lauf, der zwischen den
 # beiden Abfragen von queued nach in_progress wechselt, zählt nur einmal (sort -u).
 repo_jobs() {
-  local repo=$1 label=$2 id
-  for status in queued in_progress; do
-    api "repos/$repo/actions/runs?status=$status&per_page=30" | jq -r '.workflow_runs[] | "\(.id)\t\(.head_branch)\t\(.display_title)"'
-  done | sort -u | while IFS=$'\t' read -r id branch title; do
+  local repo=$1 label=$2 id runs
+  runs=$(for status in queued in_progress; do
+    api "repos/$repo/actions/runs?status=$status&per_page=30" |
+      jq -r '.workflow_runs[] | [.id, (.pull_requests[0].number // ""), (.html_url // ""), .head_branch, .display_title]
+        | map(tostring | gsub("[\u001f\n]"; " ")) | join("\u001f")' || exit 1
+  done) || return 1
+  runs=$(sort -u <<<"$runs")
+  jq -cn --arg repo "$repo" '{kind: "ok", repo: $repo}'
+  [ -n "$runs" ] || return 0
+  # Trenner \x1f statt Tab: Tab zählt für read als Leerraum, ein leeres Feld (kein PR) verschöbe die Spalten
+  while IFS=$'\x1f' read -r id pr url branch title; do
+    jq -cn --arg repo "$repo" --argjson run "$id" '{kind: "run", repo: $repo, run: $run}'
     api "repos/$repo/actions/runs/$id/jobs?per_page=100" | jq -c --arg repo "$repo" --arg lbl "$label" \
-      --arg branch "$branch" --arg title "$title" '.jobs[]
+      --arg branch "$branch" --arg title "$title" --argjson run "$id" --arg pr "$pr" --arg url "$url" '.jobs[]
         | if .status == "queued" and (.labels | index("self-hosted")) and (.labels | index($lbl))
-          then {kind: "queued", repo: $repo, label: $lbl, created: .created_at}
+          then {kind: "queued", repo: $repo, label: $lbl, created: .created_at, run: $run,
+            runLabel: ([.labels[] | select(test("^run-[0-9]+$"))][0] // null),
+            pr: ($pr | tonumber? // null), url: $url, branch: $branch, title: $title, job: .name}
           elif .status == "in_progress" and ((.runner_name // "") | startswith("pool-"))
           then {kind: "running", runner: .runner_name, name, url: .html_url, started: .started_at, branch: $branch, title: $title}
           else empty end'
-  done
+  done <<<"$runs"
 }
 
 containers() {
@@ -125,23 +165,42 @@ containers() {
   [ -n "$ids" ] || { echo '[]'; return; }
   # shellcheck disable=SC2086
   docker inspect $ids | jq '[.[] | {name: .Config.Labels["beadskit.runner"], label: .Config.Labels["beadskit.pool"],
-    repo: .Config.Labels["beadskit.repo"], slot: .Config.Labels["beadskit.slot"],
+    repo: .Config.Labels["beadskit.repo"], slot: .Config.Labels["beadskit.slot"], run: (.Config.Labels["beadskit.run"] // null),
     started: (.State.StartedAt | sub("\\.[0-9]+"; "") | fromdateiso8601? // 0)}]'
 }
 
 start_runner() {
-  local repo=$1 label=$2 slot=$3 name cfg
+  local repo=$1 label=$2 slot=$3 run=${4-} name cfg
+  case $run in '' | run-[0-9]*) ;; *) log "Run-Label ungültig: $run"; return 0 ;; esac
+  case $run in *[!a-z0-9-]*) log "Run-Label ungültig: $run"; return 0 ;; esac
   name="pool-$label-$(date +%m%d%H%M%S)-$slot"
   cfg=$(api "repos/$repo/actions/runners/generate-jitconfig" -X POST \
-    -d "$(jq -cn --arg n "$name" --arg l "$label" '{name: $n, runner_group_id: 1, labels: ["self-hosted", "Linux", "X64", $l], work_folder: "_work"}')" |
+    -d "$(jq -cn --arg n "$name" --arg l "$label" --arg r "$run" '{name: $n, runner_group_id: 1,
+      labels: (["self-hosted", "Linux", "X64", $l] + (if $r != "" then [$r] else [] end)), work_folder: "_work"}')" |
     jq -r '.encoded_jit_config // empty') || cfg=""
   [ -n "$cfg" ] || { log "JIT-Registrierung für $repo fehlgeschlagen"; return 0; }
   docker run -d --rm --name "$name" --cgroup-parent "$SLICE" --cpus "$CPUS" --memory "$MEM" --pids-limit 4096 \
     --security-opt no-new-privileges:true --network "$NETWORK" \
     --label beadskit.pool="$label" --label beadskit.repo="$repo" --label beadskit.runner="$name" --label beadskit.slot="$slot" \
+    ${run:+--label beadskit.run="$run"} \
     -v "beadskit-pool-tool-$slot:/home/runner/_work/_tool" -v "beadskit-pool-cache-$slot:/home/runner/.cache" \
     -e JIT="$cfg" "$IMAGE" bash -c 'exec ./run.sh --jitconfig "$JIT"' >/dev/null
-  log "gestartet: $name für $repo (Platz $slot)"
+  log "gestartet: $name für $repo (Platz $slot${run:+, $run})"
+}
+
+# Vorgezogene Läufe, die nicht mehr offen sind, und ungültige Zeilen aus PRIO_FILE entfernen; Repos, deren Läufe diese
+# Runde nicht lesbar waren, bleiben stehen. flock: runner-pool prio schreibt dieselbe Datei.
+prune_prio() {
+  [ -s "$PRIO_FILE" ] || return 0
+  (
+    # flock gibt es auf dem Server (util-linux), in den Tests auf macOS nicht
+    if command -v flock >/dev/null; then flock -x 9; fi
+    jq -rR --argjson j "$1" 'split(" ") as $p
+      | select($p | length == 2 and (.[1] | test("^[0-9]{1,20}$")))
+      | select(($j | map(select(.kind == "ok") | .repo) | index($p[0]) | not)
+        or ($j | map(select(.kind == "run" and .repo == $p[0]) | .run | tostring) | index($p[1])))' "$PRIO_FILE" >"$PRIO_FILE.tmp"
+    if cmp -s "$PRIO_FILE" "$PRIO_FILE.tmp"; then rm -f "$PRIO_FILE.tmp"; else chmod 644 "$PRIO_FILE.tmp"; mv "$PRIO_FILE.tmp" "$PRIO_FILE"; fi
+  ) 9>"$PRIO_FILE.lock"
 }
 
 forget_runner() {
@@ -154,8 +213,9 @@ forget_runner() {
 round() {
   load_conf
   TOKEN=$(cat "$TOKEN_FILE")
-  local jobs runners cs label repo input plan lim
+  local jobs runners cs label repo input plan lim pr
   lim=$(limits)
+  pr=$(prio)
   jobs=$(for r in $REPOS; do repo_jobs "${r%%:*}" "${r##*:}" || log "Jobs von ${r%%:*} nicht lesbar" >&2; done | jq -s .)
   runners=$(for r in $REPOS; do
     repo=${r%%:*}
@@ -164,8 +224,9 @@ round() {
   done | jq -s .)
   cs=$(containers)
   input=$(jq -n --argjson j "$jobs" --argjson r "$runners" --argjson c "$cs" --argjson slots "$SLOTS" \
-    --argjson idle "$IDLE_MAX" --argjson lim "$lim" '{slots: $slots, now: now | floor, idleMax: $idle,
-      queued: [$j[] | select(.kind == "queued")], containers: $c, runners: $r, limits: $lim}')
+    --argjson idle "$IDLE_MAX" --argjson grace "$GRACE" --argjson lim "$lim" --argjson pr "$pr" '{slots: $slots,
+      now: now | floor, idleMax: $idle, grace: $grace,
+      queued: [$j[] | select(.kind == "queued")], containers: $c, runners: $r, limits: $lim, prio: $pr}')
   plan=$(jq "$PLAN" <<<"$input")
   jq -r '.stop[] | "\(.name)\t\(.repo)\t\(.id)"' <<<"$plan" | while IFS=$'\t' read -r name repo id; do
     docker stop -t 5 "$name" >/dev/null 2>&1 || true
@@ -175,19 +236,26 @@ round() {
   jq -r '.forget[] | "\(.repo)\t\(.id)\t\(.name)"' <<<"$plan" | while IFS=$'\t' read -r repo id name; do
     forget_runner "$repo" "$id" "$name"
   done
-  jq -r '.start[] | "\(.repo)\t\(.label)\t\(.slot)"' <<<"$plan" | while IFS=$'\t' read -r repo label slot; do
-    start_runner "$repo" "$label" "$slot"
+  jq -r '.start[] | "\(.repo)\t\(.label)\t\(.slot)\t\(.run // "")"' <<<"$plan" | while IFS=$'\t' read -r repo label slot run; do
+    start_runner "$repo" "$label" "$slot" "$run"
   done
-  write_state "$jobs" "$runners" "$lim"
+  prune_prio "$jobs" || log "Vorziehen nicht aufgeräumt"
+  write_state "$jobs" "$runners" "$lim" "$(prio)"
 }
 
-# Zustand für runner-pool status: Plätze, Grenzen, wartende Jobs je Label, Runner mit Job
+# Zustand für runner-pool status: Plätze, Grenzen, wartende Jobs je Label, Warteschlange je Lauf
+# (Reihenfolge wie im Plan), Runner mit Job
 write_state() {
   mkdir -p "$(dirname "$STATE")"
   jq -n --argjson j "$1" --argjson r "$2" --argjson c "$(containers)" --argjson slots "$SLOTS" --arg repos "$REPOS" \
-    --argjson lim "$3" '
+    --argjson lim "$3" --argjson prio "$4" "$RANK"'
     ($r | map({key: .name, value: .}) | from_entries) as $gh
     | {at: (now | todate), slots: $slots, limits: $lim,
+       queue: ([$j[] | select(.kind == "queued")] | group_by([.repo, .run])
+         | map((map(rank($prio)) | min) as $rk | {repo: .[0].repo, label: .[0].label, run: .[0].run, pr: .[0].pr,
+             branch: .[0].branch, title: .[0].title, url: .[0].url, jobs: length, created: (map(.created) | min),
+             prio: ($rk < 1000000), runLabel: (.[0].runLabel != null), rank: $rk})
+         | sort_by([.rank, .created]) | map(del(.rank))),
        repos: [$repos | splits(" ") | select(. != "") | {repo: split(":")[0], label: split(":")[1]}],
        queued: (reduce ($j[] | select(.kind == "queued")) as $q ({}; .[$q.label] += 1)),
        runners: [$c[] | .name as $n | {name, label: .label, repo, slot, busy: ($gh[$n].busy // false),
