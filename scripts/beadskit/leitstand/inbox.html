@@ -194,6 +194,15 @@
     border-radius: 8px; max-height: 260px; overflow: auto; overflow-wrap: anywhere; }
   .card textarea { margin-top: 10px; }
   .actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 8px; align-items: center; }
+  /* Mehrfachauswahl in „Wartet auf dich“: Haken je Karte, Leiste mit Sammelaktion */
+  .bulk { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin: 0 0 10px; padding: 8px 10px;
+    background: var(--panel); border: 1px solid var(--line); border-radius: 10px; position: sticky; top: 52px; z-index: 4; }
+  .bulk[hidden] { display: none; }
+  .bulk label { display: inline-flex; gap: 6px; align-items: center; font-size: 13px; }
+  .bulk #bulk-text { flex: 1 1 220px; min-width: 0; }
+  .bulk .actions { margin-top: 0; }
+  .card-head .pick { align-self: center; margin: 0; cursor: pointer; }
+  .card.decide.picked { outline: 2px solid var(--accent); outline-offset: -1px; }
 
   /* Board */
   .filters { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-bottom: 10px; }
@@ -374,6 +383,7 @@
     .head2::-webkit-scrollbar { display: none; }
     .head2 .projects, .head2 .wsswitch { flex-wrap: nowrap; flex: none; }
     .new-lbl { display: none; }
+    .bulk { top: 0; }
     .tabs { position: fixed; left: 0; right: 0; bottom: 0; top: auto; margin: 0; border-radius: 0; z-index: 9;
       padding: 4px max(6px, env(safe-area-inset-right)) calc(4px + env(safe-area-inset-bottom)) max(6px, env(safe-area-inset-left));
       background: color-mix(in srgb, var(--panel) 92%, transparent); border-top: 1px solid var(--line);
@@ -459,6 +469,13 @@
     <div class="asks" id="asks"></div>
     <h2>Wartet auf dich <span id="human-n"></span></h2>
     <p class="muted" style="margin:-4px 0 10px;font-size:13px" id="human-hint"></p>
+    <div class="bulk" id="bulk" hidden>
+      <label title="Alle Karten auswählen bzw. Auswahl aufheben"><input type="checkbox" id="bulk-all"> alle</label>
+      <select id="bulk-group" title="Nur die Karten dieser Gruppe auswählen" hidden></select>
+      <span class="muted" id="bulk-n" style="font-size:13px"></span>
+      <input id="bulk-text" placeholder="Notiz oder Grund für alle ausgewählten">
+      <span class="actions" id="bulk-acts"></span>
+    </div>
     <div class="inbox" id="inbox" data-drop="human" style="--c:var(--human)"></div>
   </section>
 
@@ -553,6 +570,10 @@ function applyMeta() {
 
 let st = null;                 // letzter Stand vom Server
 const drafts = new Map();      // Entwürfe je Issue, überleben das Neuladen
+const picked = new Set();      // Mehrfachauswahl in „Wartet auf dich“ (Issue-IDs)
+const bulkErrs = new Map();    // Fehler der letzten Sammelaktion je Issue
+let bulk = null;               // laufende Sammelaktion { title, total, done, failed, stop }
+let inboxItems = [];           // zuletzt gezeigte Karten in „Wartet auf dich“
 const keys = {};               // letzte Render-Schlüssel je Bereich
 let dragging = null;
 let drawer = null;             // { kind: 'issue'|'worker'|'create', id }
@@ -844,9 +865,16 @@ function renderAsks() {
 function renderInbox(items) {
   const asks = (st.workers || []).filter((w) => w.ask).length;
   $('human-n').textContent = items.length || asks ? `(${items.length}${asks ? ` + ${asks} ${asks === 1 ? 'Rückfrage' : 'Rückfragen'} oben` : ''})` : '';
-  // Nicht neu zeichnen, während getippt wird oder sich nichts geändert hat
+  // Während einer Sammelaktion bleiben die Karten stehen, danach wird neu geladen
+  if (bulk) return;
+  const ids = new Set(items.map((i) => i.id));
+  for (const id of picked) if (!ids.has(id)) picked.delete(id);
+  inboxItems = items;
+  renderBulk();
+  // Nicht neu zeichnen, während getippt wird oder sich nichts geändert hat (ein Haken zählt nicht als Tippen)
   const key = P + st.workspace + items.map((i) => i.id + i.updated_at + JSON.stringify([i.x || '', i.waits || ''])).join('|');
-  if (document.activeElement?.closest?.('#inbox') || key === keys.inbox) return;
+  const focus = document.activeElement;
+  if ((focus?.closest?.('#inbox') && !focus.matches('input[data-pick]')) || key === keys.inbox) return;
   keys.inbox = key;
   if (!items.length) {
     $('inbox').innerHTML = '<div class="empty">Nichts zu entscheiden. Die Worker haben alles, was sie brauchen.</div>';
@@ -860,8 +888,9 @@ function renderInbox(items) {
     // eine Aktion mit primary ersetzt „Freigeben“ (z. B. „Aktivieren“)
     const primary = acts.find((a) => a.primary);
     return `
-    <article class="card decide ${primary ? 'xact' : ''}" data-id="${esc(it.id)}">
+    <article class="card decide ${primary ? 'xact' : ''} ${picked.has(it.id) ? 'picked' : ''}" data-id="${esc(it.id)}">
       <div class="card-head">
+        <input type="checkbox" class="pick" data-pick ${picked.has(it.id) ? 'checked' : ''} title="Für die Sammelaktion auswählen" aria-label="${esc(it.id)} auswählen">
         <a href="#" class="id" data-issue="${esc(it.id)}">${esc(it.id)}</a>${prio(it.priority)}
         <span class="title">${esc(it.title)}</span>
         ${modOf(it) ? `<span class="tag">${esc(modOf(it))}</span>` : ''}
@@ -885,10 +914,111 @@ function renderInbox(items) {
         <button data-action="note" title="Nur Notiz anhängen, bleibt bei dir">Notiz</button>
         <button data-action="defer" title="Auf Eis legen (deferred)">Zurückstellen</button>
         <button class="danger" data-action="close" title="Erledigt oder nicht nötig – Text wird der Schließgrund">Schließen</button>
-        <span class="msg"></span>
+        <span class="msg ${bulkErrs.has(it.id) ? 'bad' : ''}">${esc(bulkErrs.get(it.id) || '')}</span>
       </div>
     </article>`;
   }).join('');
+}
+
+// Leiste der Mehrfachauswahl: „alle“, Auswahl nach Split (z. B. „zum Aktivieren“) oder Gruppe (z. B. Stadt),
+// Knöpfe für die Auswahl; eine Aktion aus beads.leitstand.mjs gilt nur für die Karten, an denen sie frei ist
+const bulkUsable = (it, key) => xActions(it).some((a) => a.key === key && !a.disabled);
+function renderBulk() {
+  const items = inboxItems;
+  const sel = items.filter((i) => picked.has(i.id));
+  $('bulk').hidden = !bulk && items.length < 2;
+  const all = $('bulk-all');
+  all.checked = sel.length > 0 && sel.length === items.length;
+  all.indeterminate = sel.length > 0 && sel.length < items.length;
+  all.disabled = !!bulk;
+  const groups = [...new Set(items.map(groupOf).filter(Boolean))].sort((a, b) => a.localeCompare(b, 'de'));
+  const splits = meta().split.map((sp) => ({ ...sp, n: items.filter((i) => (i.labels || []).includes(sp.label)).length })).filter((sp) => sp.n);
+  const opts = [
+    ...splits.map((sp) => `<option value="split:${esc(sp.label)}">${esc(sp.title)} (${sp.n})</option>`),
+    ...(groups.length > 1 ? groups.map((g) => `<option value="group:${esc(g)}">${esc(g)} (${items.filter((i) => groupOf(i) === g).length})</option>`) : []),
+  ];
+  const gkey = opts.join('');
+  if (gkey !== keys.bulkGroups) {
+    keys.bulkGroups = gkey;
+    $('bulk-group').innerHTML = `<option value="">nur …</option>${gkey}`;
+  }
+  $('bulk-group').hidden = !opts.length;
+  $('bulk-group').disabled = !!bulk;
+  if (bulk) {
+    $('bulk-n').textContent = `${bulk.title}: ${bulk.done + bulk.failed}/${bulk.total}${bulk.failed ? ` · ${bulk.failed} Fehler` : ''}${bulk.stop ? ' · bricht ab …' : ''}`;
+    setBulkActs(bulk.stop ? '' : '<button data-bulk-stop title="Keine weiteren Issues starten, laufende werden fertig">Abbrechen</button>');
+    return;
+  }
+  $('bulk-n').textContent = sel.length ? `${sel.length} ausgewählt` : 'keine ausgewählt';
+  const xs = [];
+  for (const it of sel) for (const a of xActions(it)) if (!a.disabled && !xs.some((x) => x.key === a.key)) xs.push(a);
+  // wie an der Karte: eine Aktion mit primary ersetzt „Freigeben“
+  const primary = sel.some((it) => xActions(it).some((a) => a.primary));
+  const n = sel.length ? ` (${sel.length})` : '';
+  const dis = sel.length ? '' : 'disabled';
+  setBulkActs([
+    ...xs.map((a) => {
+      const k = sel.filter((it) => bulkUsable(it, a.key)).length;
+      return `<button class="go" data-bulk="x" data-key="${esc(a.key)}" data-title="${esc(a.title)}"
+        title="${esc(a.hint || a.title)}${k < sel.length ? ` – nur an ${k} der ${sel.length} ausgewählten möglich, die übrigen bleiben` : ''}">${esc(a.title)} (${k < sel.length ? `${k} von ${sel.length}` : k})</button>`;
+    }),
+    primary ? '' : `<button class="primary" data-bulk="decide" data-key="release" data-title="${esc(meta().release)}" ${dis}
+      title="Text aus dem Feld als Notiz an alle, Label human entfernen">${esc(meta().release)}${n}</button>`,
+    `<button data-bulk="decide" data-key="defer" data-title="Zurückstellen" ${dis} title="Alle auf Eis legen (deferred)">Zurückstellen${n}</button>`,
+    `<button class="danger" data-bulk="decide" data-key="close" data-title="Schließen" ${dis} title="Alle schließen – Text im Feld wird der Grund">Schließen${n}</button>`,
+  ].join(''));
+}
+// nur bei Änderung neu setzen, sonst verliert ein scharfgeschalteter Knopf beim Polling seine Bestätigung
+function setBulkActs(html) {
+  if (html === keys.bulkActs) return;
+  keys.bulkActs = html;
+  $('bulk-acts').innerHTML = html;
+}
+
+// Sammelaktion: dieselben Endpunkte wie an der Karte (Server prüft jedes Issue einzeln), höchstens
+// zwei gleichzeitig; Fehler bleiben an der Karte stehen, die Karte bleibt ausgewählt
+const BULK_PARALLEL = 2;
+async function runBulk(kind, key, title) {
+  const ids = inboxItems.filter((i) => picked.has(i.id) && (kind !== 'x' || bulkUsable(i, key))).map((i) => i.id);
+  if (!ids.length || bulk) return;
+  let text = $('bulk-text').value.trim();
+  if (key === 'close' && !text) text = quick('close')[0] || 'Erledigt';
+  if (key === 'release' && !text) { toast(`Zum ${meta().release} bitte die Entscheidung ins Feld eintragen`, true); $('bulk-text').focus(); return; }
+  bulkErrs.clear();
+  bulk = { title, total: ids.length, done: 0, failed: 0, stop: false };
+  renderBulk();
+  const card = (id) => [...document.querySelectorAll('#inbox .card.decide')].find((c) => c.dataset.id === id);
+  const queue = [...ids];
+  const worker = async () => {
+    while (queue.length && !bulk.stop) {
+      const id = queue.shift();
+      const c = card(id);
+      const msg = c?.querySelector('.msg');
+      c?.querySelectorAll('button').forEach((b) => (b.disabled = true));
+      if (msg) { msg.className = 'msg'; msg.textContent = 'läuft …'; }
+      try {
+        await post(kind === 'x' ? '/api/action' : '/api/decide', { id, action: key, text });
+        bulk.done++;
+        picked.delete(id); drafts.delete(id);
+        c?.remove();
+      } catch (err) {
+        bulk.failed++;
+        bulkErrs.set(id, err.message);
+        if (msg) { msg.className = 'msg bad'; msg.textContent = err.message; }
+        c?.querySelectorAll('button').forEach((b) => (b.disabled = false));
+      }
+      renderBulk();
+    }
+  };
+  try {
+    await Promise.all(Array.from({ length: Math.min(BULK_PARALLEL, ids.length) }, worker));
+  } finally {
+    const r = bulk;
+    bulk = null;
+    if (!r.failed) $('bulk-text').value = '';
+    toast(`${title}: ${r.done} von ${r.total} erledigt${r.failed ? `, ${r.failed} Fehler (an der Karte)` : ''}${r.stop ? ', abgebrochen' : ''}`, r.failed > 0);
+    await reload();
+  }
 }
 
 // ---- Board ----
@@ -1879,6 +2009,45 @@ $('inbox').addEventListener('click', async (e) => {
     card.querySelectorAll('button').forEach((b) => (b.disabled = false));
   }
 }, true);
+
+// Mehrfachauswahl
+$('inbox').addEventListener('change', (e) => {
+  const box = e.target.closest('input[data-pick]');
+  if (!box) return;
+  const card = box.closest('.card');
+  if (box.checked) picked.add(card.dataset.id); else picked.delete(card.dataset.id);
+  card.classList.toggle('picked', box.checked);
+  renderBulk();
+});
+function setPicked(ids) {
+  picked.clear();
+  ids.forEach((id) => picked.add(id));
+  document.querySelectorAll('#inbox .card.decide').forEach((c) => {
+    const on = picked.has(c.dataset.id);
+    c.classList.toggle('picked', on);
+    const box = c.querySelector('input[data-pick]');
+    if (box) box.checked = on;
+  });
+  renderBulk();
+}
+$('bulk-all').addEventListener('change', (e) => setPicked(e.target.checked ? inboxItems.map((i) => i.id) : []));
+$('bulk-group').addEventListener('change', (e) => {
+  const [kind, v] = e.target.value.split(/:(.*)/);
+  e.target.value = '';
+  if (kind === 'split') setPicked(inboxItems.filter((i) => (i.labels || []).includes(v)).map((i) => i.id));
+  if (kind === 'group') setPicked(inboxItems.filter((i) => groupOf(i) === v).map((i) => i.id));
+});
+$('bulk-acts').addEventListener('click', (e) => {
+  if (e.target.closest('button[data-bulk-stop]')) {
+    if (bulk) { bulk.stop = true; renderBulk(); }
+    return;
+  }
+  const btn = e.target.closest('button[data-bulk]');
+  if (!btn || btn.disabled) return;
+  const n = inboxItems.filter((i) => picked.has(i.id) && (btn.dataset.bulk !== 'x' || bulkUsable(i, btn.dataset.key))).length;
+  if (!armed(btn, `${btn.dataset.title}: wirklich ${n} ${n === 1 ? 'Issue' : 'Issues'}?`)) return;
+  runBulk(btn.dataset.bulk, btn.dataset.key, btn.dataset.title);
+});
 
 // Drag & Drop
 document.addEventListener('dragstart', (e) => {
