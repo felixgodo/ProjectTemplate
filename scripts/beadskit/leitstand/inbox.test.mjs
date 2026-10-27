@@ -351,7 +351,7 @@ test('isPagePath: Seite auch mit ?p= und ?ws=', () => {
   assert.equal(isPagePath(undefined), false);
 });
 
-test('groupIssues: human vor Phase (auch ohne Phase), Bereit/In Arbeit nach Status, Erledigt 24 h', () => {
+test('groupIssues: human vor Phase (auch ohne Phase), Bereit/In Arbeit nach Status, Bereit freigegebene zuerst, Erledigt 24 h', () => {
   const cols = groupIssues([
     { id: 'a-1', status: 'open', labels: ['phase:fix', 'human'], priority: 2 },
     { id: 'a-2', status: 'open', labels: ['phase:fix'], priority: 3 },
@@ -368,9 +368,10 @@ test('groupIssues: human vor Phase (auch ohne Phase), Bereit/In Arbeit nach Stat
     { id: 'a-13', status: 'open', labels: ['gt:slot'], priority: 0 },
     { id: 'a-14', status: 'pinned', labels: [], priority: 0 },
     { id: 'a-9', issue_type: 'epic', status: 'open', labels: ['phase:fix'], priority: 2 },
+    { id: 'a-15', status: 'open', labels: ['modul:x'], priority: 0 },
   ], CODE, WS, NOW);
   assert.deepEqual(Object.fromEntries(Object.entries(cols).map(([k, v]) => [k, v.map((i) => i.id)])), {
-    human: ['a-11', 'a-1'], ready: ['a-6', 'a-2'], fix: ['a-3', 'a-12'], verify: ['a-4'], merge: ['a-5'],
+    human: ['a-11', 'a-1'], ready: ['a-6', 'a-2', 'a-15'], fix: ['a-3', 'a-12'], verify: ['a-4'], merge: ['a-5'],
     done: ['a-7'], deferred: ['a-8'],
   });
   assert.equal(cols.fix[0].stale, true);

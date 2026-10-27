@@ -224,11 +224,13 @@
   .item[draggable=true] { cursor: grab; }
   .item.dragging { opacity: .4; }
   .item.stale { border-color: var(--bad); }
+  .item.parked { opacity: .6; }
   .item .t { display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; overflow-wrap: anywhere; margin-top: 2px; }
   .item .meta { display: flex; gap: 5px; flex-wrap: wrap; margin-top: 5px; font-size: 11.5px; color: var(--muted); align-items: center; }
   .tag { padding: 0 5px; border-radius: 4px; background: var(--chip); }
   .tag.w { color: #fff; background: var(--wc); font-weight: 600; }
   .tag.tests { background: color-mix(in srgb, var(--tests) 25%, var(--panel)); color: var(--ink); }
+  .tag.go { background: color-mix(in srgb, var(--c) 30%, var(--panel)); color: var(--ink); font-weight: 600; }
   .conflict { color: var(--bad); font-weight: 600; }
   .deferred { margin-top: 12px; }
 
@@ -1044,7 +1046,10 @@ function itemHtml(it, col) {
   // die erste Phase (in Arbeit) claimen nur Worker
   const movable = col !== meta().readyPhase && col !== 'done';
   const drag = movable && !TOUCH ? 'true' : 'false';
-  return `<div class="item ${it.stale ? 'stale' : ''}" draggable="${drag}" data-issue="${esc(it.id)}" ${TOUCH ? '' : `title="${esc(it.title)}"`}>
+  // Bereit: nur Issues mit phase:<erste Phase> claimen Worker, der Rest liegt ohne Freigabe
+  const go = col === 'ready' && (it.labels || []).includes(`phase:${meta().readyPhase}`);
+  const parked = col === 'ready' && !go;
+  return `<div class="item ${it.stale ? 'stale' : ''} ${parked ? 'parked' : ''}" draggable="${drag}" data-issue="${esc(it.id)}" ${TOUCH ? '' : `title="${esc(it.title)}"`}>
     <div style="display:flex;gap:6px;align-items:center"><span class="id">${esc(it.id)}</span>${prio(it.priority)}
       ${TOUCH && movable ? `<button class="small" style="margin-left:auto" data-move-issue="${esc(it.id)}" title="Verschieben" aria-label="Verschieben">⇄</button>` : ''}
       ${it.external_ref ? `<span class="muted" style="font-size:11px">${esc(it.external_ref)}</span>` : ''}
@@ -1054,6 +1059,8 @@ function itemHtml(it, col) {
     ${xInfo(it)}
     <div class="meta">
       ${groupOf(it) ? `<span class="tag">${esc(groupOf(it))}</span>` : ''}
+      ${go ? `<span class="tag go" title="freigegeben – ein Worker claimt es als Nächstes">▶ ${esc(meta().readyPhase)}</span>` : ''}
+      ${parked ? `<span class="tag" title="ohne phase:${esc(meta().readyPhase)} – kein Worker nimmt es">nicht freigegeben</span>` : ''}
       ${(it.labels || []).includes('tests') ? '<span class="tag tests">tests</span>' : ''}
       ${wip && it.assignee ? `<span class="tag w" style="--wc:${roleVar(it.assignee)}">${esc(it.assignee)}</span>` : ''}
       ${prNum ? `${ciDot(pr)}${pr ? `<a href="${esc(pr.url)}" target="_blank" rel="noopener">#${esc(prNum)}</a>` : `#${esc(prNum)}`}` : ''}
@@ -1075,7 +1082,7 @@ function renderBoard() {
     const total = st.columns[k].length;
     return `<section class="col" data-col="${esc(k)}" data-drop="${DROP_OK.has(k) ? k : ''}" style="--c:${c}">
       <h3><span>${esc(label)}</span><span class="n">${items.length}${items.length !== total ? `/${total}` : ''}</span></h3>
-      <div class="hint">${esc(hint)}</div>
+      <div class="hint">${k === 'ready' ? `${items.filter((i) => (i.labels || []).includes(`phase:${meta().readyPhase}`)).length} auf phase:${esc(meta().readyPhase)} · ` : ''}${esc(hint)}</div>
       <div class="col-body">${items.map((it) => itemHtml(it, k)).join('') || '<div class="muted" style="padding:6px 8px;font-size:13px">leer</div>'}</div>
     </section>`;
   }).join('');

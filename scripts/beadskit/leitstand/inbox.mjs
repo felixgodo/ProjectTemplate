@@ -543,9 +543,12 @@ export function groupIssues(issues, ws, workspaces, now = Date.now()) {
       else cols.ready.push(it);
     }
   }
+  // in Bereit zuerst die freigegebenen (phase:<erste Phase>): nur die claimen Worker
+  const parked = (i) => !i.labels.includes(`phase:${ws.readyPhase}`);
   for (const [k, list] of Object.entries(cols)) {
     if (k === 'done') list.sort((a, b) => String(b.closed_at).localeCompare(String(a.closed_at)));
-    else list.sort((a, b) => (a.priority ?? 9) - (b.priority ?? 9) || a.id.localeCompare(b.id, 'de', { numeric: true }));
+    else list.sort((a, b) => (k === 'ready' ? parked(a) - parked(b) : 0)
+      || (a.priority ?? 9) - (b.priority ?? 9) || a.id.localeCompare(b.id, 'de', { numeric: true }));
   }
   return cols;
 }
