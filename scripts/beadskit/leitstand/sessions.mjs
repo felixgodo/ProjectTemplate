@@ -77,9 +77,13 @@ export function summarizeTranscript(lines, { cwd = '', toolLimit = 12, textLimit
     if (e.type === 'pr-link' && e.prNumber) {
       if (!out.prs.some((p) => p.number === e.prNumber)) out.prs.push({ number: e.prNumber, url: e.prUrl || null });
     }
-    if (e.type === 'queue-operation' && typeof e.content === 'string') {
-      if (e.operation === 'enqueue') pending.set(e.content, e.timestamp);
-      else pending.delete(e.content);
+    // dequeue trägt keinen Inhalt (Claude Code 2.1): nimmt die älteste wartende Nachricht; popAll leert alles
+    if (e.type === 'queue-operation') {
+      if (e.operation === 'popAll') pending.clear();
+      else if (typeof e.content === 'string') {
+        if (e.operation === 'enqueue') pending.set(e.content, e.timestamp);
+        else pending.delete(e.content);
+      } else if (e.operation === 'dequeue') pending.delete(pending.keys().next().value);
     }
     const m = e.message;
     if (e.type !== 'assistant' || !m || typeof m !== 'object') continue;

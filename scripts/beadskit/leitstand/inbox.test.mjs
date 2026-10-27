@@ -162,6 +162,16 @@ test('summarizeTranscript: Branch, Tools, Text, PR, Kontext und Warteschlange', 
   assert.equal(toolSummary('Bash', { command: 'x'.repeat(300) }).length, 140);
 });
 
+test('summarizeTranscript: dequeue ohne Inhalt (/loop-Wakeup) nimmt die älteste Nachricht, popAll leert', () => {
+  const q = (operation, content, at) => JSON.stringify({ type: 'queue-operation', operation, content, timestamp: at });
+  const loop = [q('enqueue', '/spot-fix', '2026-10-27T22:10:11Z'), q('dequeue', undefined, '2026-10-27T22:10:12Z')];
+  assert.deepEqual(summarizeTranscript(loop).pending, []);
+  const two = [q('enqueue', 'a', '2026-10-27T22:00:00Z'), q('enqueue', 'b', '2026-10-27T22:00:01Z'), q('dequeue', undefined, '2026-10-27T22:00:02Z')];
+  assert.deepEqual(summarizeTranscript(two).pending.map((p) => p.text), ['b']);
+  assert.deepEqual(summarizeTranscript([...two, q('popAll', 'b', '2026-10-27T22:00:03Z')]).pending, []);
+  assert.deepEqual(summarizeTranscript([q('dequeue', undefined, '2026-10-27T22:00:00Z')]).pending, []);
+});
+
 test('Schreiben nur mit eigenem Origin und Header, Host muss passen', () => {
   const ok = { origin: 'http://127.0.0.1:3738', 'x-beads-inbox': '1' };
   assert.equal(isSameOrigin(ok, 3738), true);
