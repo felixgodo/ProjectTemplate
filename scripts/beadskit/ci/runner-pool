@@ -46,6 +46,7 @@ CI_CPUS=${RUNNER_CI_CPUS:-4}
 CI_MEM=${RUNNER_CI_MEM:-24G}
 SLICE=beadskit-ci.slice
 VERSION=$RUNNER_VERSION
+# shellcheck disable=SC2034  # in lib.sh verwendet
 DIR=
 OPT=/opt/beadskit-runner-pool
 CONF=/etc/beadskit-ci/pool.conf

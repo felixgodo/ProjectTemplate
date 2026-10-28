@@ -61,6 +61,7 @@ PROJECT_FILE=${BK_PROJECT_FILE:-$ROOT/beads.project.sh}
 SSH_HOST=${RUNNER_SSH_HOST:-server}
 REPO=${RUNNER_REPO:-$(cd "$ROOT" && gh repo view --json nameWithOwner --jq .nameWithOwner 2>/dev/null || true)}
 LABEL=${RUNNER_LABEL:-$BK_SLUG}
+# shellcheck disable=SC2034  # in lib.sh verwendet
 EXTRA_APT=${RUNNER_APT:-}
 MYSQL_VERSION=${RUNNER_MYSQL:-}
 [ -n "$REPO" ] || { echo "GitHub-Repo unbekannt: RUNNER_REPO=owner/name setzen" >&2; exit 1; }
