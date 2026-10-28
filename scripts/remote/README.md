@@ -19,7 +19,7 @@ Mac                                      PC (Leitrechner, Tailnet-Name pc)
 | `setup-mac.sh` | Mac | ssh in beide Richtungen, `hosts.conf` auf beiden, Datenbank-Zugang, rsync, `pc` |
 | `migrate-beads.sh` | Mac | beads-Datenbanken Mac → PC (`--back`: zurück) |
 | `pc` | Mac | Befehle im selben Projekt auf dem PC |
-| `versions.conf`, `repos.txt` | – | Versionen (bd/dolt gleich auf beiden!), Projekte mit GitHub-Repo |
+| `versions.conf`, `repos.txt` | – | Versionen (bd/dolt gleich auf beiden!), Projekte mit GitHub-Repo (`repos.txt` nur lokal, Vorlage `repos.txt.example`) |
 | `beads-backup.sh` | PC | tägliche Sicherung der Issues als JSONL (Timer) |
 
 ## Einrichten
@@ -43,6 +43,8 @@ brew install --cask tailscale        # starten, mit demselben Konto anmelden
 # Systemeinstellungen → Allgemein → Teilen → Entfernte Anmeldung: an (der PC fragt den Mac nach seinen Workern)
 scripts/remote/setup-mac.sh
 ```
+`devkit-projects.txt` und `repos.txt` sind nicht versioniert (die Projektnamen bleiben privat):
+`setup-mac.sh` schreibt `repos.txt`, kopiert beide auf den PC und klont dort die Projekte.
 
 **4. Datenbanken umziehen** (einmal; vorher Worker auf dem Mac auslaufen lassen und den
 Leitstand dort anhalten):

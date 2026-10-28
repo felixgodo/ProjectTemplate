@@ -24,6 +24,7 @@ warn() { printf '  %s!%s %s\n' "$c_warn" "$c_off" "$*"; }
 die() { printf '  %s✗ %s%s\n' "$c_warn" "$*" "$c_off" >&2; exit 1; }
 
 write_repos() {
+  [ -f "$TEMPLATE/devkit-projects.txt" ] || die "devkit-projects.txt fehlt (Vorlage: devkit-projects.txt.example)"
   {
     echo "# Projekte für setup-linux.sh: <ordner> <github-repo> (owner/name), - ohne GitHub (setup-mac.sh kopiert per rsync)."
     echo "# Erzeugt aus devkit-projects.txt mit: scripts/remote/setup-mac.sh --repos"
@@ -35,7 +36,7 @@ write_repos() {
       echo "$(basename "$p") $repo"
     done
   } >"$HERE/repos.txt"
-  ok "scripts/remote/repos.txt (committen, damit setup-linux.sh es bekommt)"
+  ok "scripts/remote/repos.txt (lokal, setup-mac.sh kopiert es auf den PC)"
 }
 
 mac_name=""
@@ -121,6 +122,15 @@ for v in "bd version" "dolt version"; do
   there=$(ssh "$PC_NAME" ". ~/.config/beadskit/env; $v" 2>/dev/null | head -n 1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -n 1 || true)
   [ "$here" = "$there" ] && ok "${v% *} $here auf beiden" || warn "${v% *}: Mac $here, $PC_NAME ${there:-fehlt} (versions.conf, setup-linux.sh beads)"
 done
+
+head1 "Projektlisten und Klone auf $PC_NAME"
+# Beide Listen sind nicht versioniert (Projektnamen bleiben privat): von hier kopieren, dann klonen.
+write_repos
+scp -q "$TEMPLATE/devkit-projects.txt" "$PC_NAME:$pc_root/ProjectTemplate/devkit-projects.txt"
+scp -q "$HERE/repos.txt" "$PC_NAME:$pc_root/ProjectTemplate/scripts/remote/repos.txt"
+ok "devkit-projects.txt, repos.txt → $PC_NAME"
+ssh "$PC_NAME" "$pc_root/ProjectTemplate/scripts/remote/setup-linux.sh clone" ||
+  warn "Klonen auf $PC_NAME fehlgeschlagen (dort: scripts/remote/setup-linux.sh clone)"
 
 head1 "Projekte ohne GitHub (rsync)"
 grep -v '^#' "$HERE/repos.txt" | while read -r dir repo; do

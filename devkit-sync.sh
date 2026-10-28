@@ -30,7 +30,7 @@ for a in "$@"; do
     *)         ONLY="$ONLY$a " ;;
   esac
 done
-[ -f "$LIST" ] || die "devkit-projects.txt fehlt."
+[ -f "$LIST" ] || die "devkit-projects.txt fehlt (lokal, nicht versioniert): cp devkit-projects.txt.example devkit-projects.txt"
 
 same() { diff -rq "$ROOT/scripts/devkit" "$1/scripts/devkit" >/dev/null 2>&1 && cmp -s "$ROOT/dev.sh" "$1/dev.sh"; }
 
