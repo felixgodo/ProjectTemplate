@@ -381,6 +381,8 @@ test('groupIssues: human vor Phase (auch ohne Phase), Bereit/In Arbeit nach Stat
   assert.equal(m.done24h, 1);
   assert.equal(m.mergedToday, 1);
   assert.equal(m.working, 2);
+  assert.equal(m.open, 3);
+  assert.equal(m.released, 2);
   assert.deepEqual(groupIssues(null, CODE, WS, NOW).ready, []);
 });
 
@@ -617,6 +619,7 @@ test('buildWorkspaces: Spalten, Ziele, Kennzahlen und Texte aus Config und Proje
   assert.equal(CODE.prs, true);
   assert.equal(CODE.group.prefix, 'modul:');
   assert.ok(CODE.kpis.some(([k]) => k === 'mergedToday'));
+  assert.deepEqual(CODE.kpis.slice(1, 3), [['open', 'bereit'], ['released', 'bereit: Fix']]);
   assert.deepEqual(CLUBS.cols.map(([k, t]) => [k, t]), [['ready', 'Bereit'], ['place', 'Anlegen'], ['settings', 'Settings'], ['test', 'Test'], ['done', 'Erledigt']]);
   assert.deepEqual(CLUBS.cols[2].slice(2), ['#1ea0aa', 'SiteSetting einrichten']);
   assert.deepEqual(CLUBS.moveTargets, ['ready', 'settings', 'test', 'human', 'deferred', 'done']);
@@ -627,6 +630,7 @@ test('buildWorkspaces: Spalten, Ziele, Kennzahlen und Texte aus Config und Proje
   assert.equal(CLUBS.prs, false);
   assert.deepEqual(CLUBS.split, [{ key: 'activate', label: 'aktivieren', title: 'zum Aktivieren' }]);
   assert.deepEqual(CLUBS.kpis.slice(0, 3).map(([k]) => k), ['human', 'activate', 'open']);
+  assert.deepEqual(CLUBS.kpis[3], ['released', 'bereit: Anlegen']);
   assert.deepEqual(CLUBS.defaults, { 'club-search': 1, 'club-add': 1, 'club-settings': 2, 'club-test': 1 });
   // CSS aus der Projektdatei nur, wenn es eine Farbe ist
   const evil = buildWorkspaces(CFG, normalizeExt({ workspaces: { code: { colors: { fix: 'red;}</style><script>' }, cols: { ready: { color: 'url(x)' } } } } }));
@@ -661,6 +665,7 @@ test('groupIssues: code ohne ws:clubs-Issues, clubs mit eigenen Spalten und spli
   assert.equal(m.human, 1);
   assert.equal(m.activate, 1);
   assert.equal(m.place, 1);
+  assert.equal(m.released, 1);
   assert.equal(m.working, 1);
   assert.equal(m.stale, 1);
   assert.equal(wsOfIssue({ labels: ['ws:unbekannt'] }, WS), 'code');
