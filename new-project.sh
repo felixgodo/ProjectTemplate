@@ -69,7 +69,7 @@ info "groupId $GROUP · Paket $GROUP.$SLUG · Präfix ${PREFIX}_ · Ports $BACKE
 mkdir -p "$DIR"
 DIR="$(cd "$DIR" && pwd -P)"
 rsync -a \
-  --exclude '.git/' --exclude '.idea/' --exclude '*.iml' --exclude '.DS_Store' \
+  --exclude '.git/' --exclude '.idea/' --exclude '/.github/' --exclude '*.iml' --exclude '.DS_Store' \
   --exclude 'node_modules/' --exclude 'target/' --exclude 'dist/' --exclude '*.tsbuildinfo' \
   --exclude '.dev/' --exclude '/releases/' --exclude '/deploy/deploy.conf' \
   --exclude '/new-project.sh' --exclude '/devkit-sync.sh' --exclude '/beadskit-sync.sh' --exclude '/leitstand.sh' --exclude '/devkit-projects.txt*' \

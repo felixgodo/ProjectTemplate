@@ -1,0 +1,58 @@
+# Prüft jeden Push auf main und jeden Pull Request: Shell-Skripte, beadskit-Tests, Build der Template-App.
+# Läuft auf GitHub-Runnern, nicht auf dem eigenen runner-pool: fremder Code aus PRs kommt so nie auf den PC.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  shellcheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: shellcheck
+        # Alle versionierten *.sh und Skripte ohne Endung mit sh/bash-Shebang (workers, pc, …)
+        run: |
+          files=()
+          while read -r f; do
+            case $f in
+              *.sh) files+=("$f") ;;
+              *.*) ;;
+              *) head -c 40 "$f" | grep -qE '^#!.*(ba)?sh' && files+=("$f") ;;
+            esac
+          done < <(git ls-files)
+          shellcheck --version | sed -n 2p
+          shellcheck -S warning "${files[@]}"
+
+  beadskit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: node --test
+        run: node --test $(git ls-files '*.test.mjs')
+
+  app:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+          cache: maven
+      - name: Versionen gleich
+        run: ./dev.sh version
+      - name: Build und Tests (Backend, Frontend mit Typecheck)
+        run: mvn -B verify

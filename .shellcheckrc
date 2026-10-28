@@ -1,0 +1,2 @@
+# SC2088: "~/…" steht in Meldungen nur als Anzeigetext, soll dort nicht expandieren.
+disable=SC2088

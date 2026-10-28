@@ -2,6 +2,7 @@
 
 [English](README.md) · **Deutsch**
 
+![CI](https://github.com/felixgodo/ProjectTemplate/actions/workflows/ci.yml/badge.svg)
 ![Java 17](https://img.shields.io/badge/Java-17-orange)
 ![Spring Boot 3.5](https://img.shields.io/badge/Spring%20Boot-3.5-6db33f)
 ![React 19](https://img.shields.io/badge/React-19-61dafb)
