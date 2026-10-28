@@ -1,0 +1,4 @@
+# Projekte für setup-linux.sh: <ordner> <github-repo> (owner/name), - ohne GitHub (setup-mac.sh kopiert per rsync).
+# Erzeugt aus devkit-projects.txt mit: scripts/remote/setup-mac.sh --repos (lokal, nicht versioniert)
+MeinProjekt owner/MeinProjekt
+LokalesProjekt -

@@ -2,7 +2,8 @@
 # Richtet einen Ubuntu-Rechner (Server 24.04) als Leitrechner für devkit und beadskit ein:
 # Werkzeuge (Docker, Node, Java, Maven, gh, claude, bd, dolt, tmux), Tailscale, kein Ruhezustand,
 # Dienste ohne Anmeldung, ssh nur mit Schlüssel, Firewall, die gemeinsame beads-Datenbank
-# (dolt sql-server als systemd-User-Dienst beads-dolt) und alle Projekte aus devkit-projects.txt.
+# (dolt sql-server als systemd-User-Dienst beads-dolt) und alle Projekte aus repos.txt (nicht
+# versioniert, kopiert setup-mac.sh her und ruft danach den Schritt clone auf).
 #
 #   git clone https://github.com/felixgodo/ProjectTemplate ~/IdeaProjects/ProjectTemplate
 #   ~/IdeaProjects/ProjectTemplate/scripts/remote/setup-linux.sh [schritt…]
@@ -275,6 +276,10 @@ EOF
 step_clone() {
   head1 "Projekte nach $PROJECTS"
   local dir repo
+  if [ ! -f "$HERE/repos.txt" ]; then
+    warn "repos.txt fehlt noch: setup-mac.sh kopiert es her und klont dann (Schritt clone)"
+    return 0
+  fi
   while read -r dir repo; do
     case $dir in ''|'#'*) continue ;; esac
     if [ -d "$PROJECTS/$dir/.git" ]; then ok "$dir (schon da)"; continue; fi

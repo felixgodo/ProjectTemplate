@@ -20,3 +20,7 @@ deploy/deploy.conf
 .DS_Store
 .idea/
 *.iml
+
+# Lokale Projektlisten (Vorlagen: *.example)
+/devkit-projects.txt
+/scripts/remote/repos.txt

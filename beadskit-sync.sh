@@ -38,7 +38,7 @@ while [ $# -gt 0 ]; do
   esac
   shift
 done
-[ -f "$LIST" ] || die "devkit-projects.txt fehlt."
+[ -f "$LIST" ] || die "devkit-projects.txt fehlt (lokal, nicht versioniert): cp devkit-projects.txt.example devkit-projects.txt"
 need rsync
 
 same() { diff -rq "$KIT" "$1/scripts/beadskit" >/dev/null 2>&1; }
