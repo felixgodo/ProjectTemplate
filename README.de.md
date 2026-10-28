@@ -25,6 +25,10 @@ parallel Fehler finden, beheben und prüfen.
 
 ![Leitstand-Board mit Demo-Daten: Issues wandern von Bereit über In Arbeit, Verify und Merge nach Erledigt](docs/images/leitstand.png)
 
+Der Leitstand funktioniert auch auf dem Handy:
+
+![Leitstand auf dem iPhone: Entscheidungen, die auf dich warten, das Board, Worker-Kennzahlen](docs/images/leitstand-mobile.png)
+
 ## Voraussetzungen
 
 JDK 17, Maven, Node, Docker. Für beadskit zusätzlich [`bd`](https://github.com/gastownhall/beads)
