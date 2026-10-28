@@ -35,9 +35,11 @@ Bei Nacharbeit (der Branch kann von einem Worker auf dem anderen Rechner stammen
 Stand ist dann alt oder fehlt):
 ```bash
 git fetch origin
-git switch fix/<id> 2>/dev/null || git switch -c fix/<id> origin/fix/<id>
-git reset --hard origin/fix/<id> && git rebase origin/{{BASE}}
+git switch -C fix/<id> origin/fix/<id>
+git rebase origin/{{BASE}}
 ```
+Drei Einzelbefehle, die Sandbox lehnt `git … && git …` ab (`worker-regeln.md`, „Session-Start“).
+`switch -C` setzt den lokalen Branch auf den Stand von `origin`.
 
 ## 3. Beheben
 Nach CLAUDE.md, ohne Abkürzung:
@@ -59,10 +61,10 @@ Branch dann nicht pushen; nächstes Issue.
 git push -u origin fix/<id>
 gh pr create --base {{BASE}} --title "<Modul>: <was>" --body "<Was, warum, Tests. beads: <id>>"
 ```
-Dann übergeben:
+Dann übergeben (`<actor>` = Name des eigenen Worktree-Ordners, z. B. `fix-2`):
 ```bash
 bdw update <id> --remove-label phase:fix --add-label phase:verify \
-  --set-metadata branch=fix/<id> --set-metadata pr=<nummer> --set-metadata fixer=$(basename "$(git rev-parse --show-toplevel)") \
+  --set-metadata branch=fix/<id> --set-metadata pr=<nummer> --set-metadata fixer=<actor> \
   --append-notes "<actor>: PR #<nummer>, <ein Satz zum Fix>"
 bdw unclaim <id>
 ```
