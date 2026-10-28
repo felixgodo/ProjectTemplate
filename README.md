@@ -25,6 +25,10 @@ issues in parallel.
 
 ![Leitstand board with demo data: issues move from ready through in progress, verify and merge to done](docs/images/leitstand.png)
 
+The Leitstand also works on the phone:
+
+![Leitstand on an iPhone: decisions waiting for you, the board, worker metrics](docs/images/leitstand-mobile.png)
+
 ## Prerequisites
 
 JDK 17, Maven, Node, Docker. For beadskit additionally [`bd`](https://github.com/gastownhall/beads)
