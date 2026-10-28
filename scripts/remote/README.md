@@ -1,110 +1,112 @@
-# Zwei Rechner: Mac + Linux-PC
+# Two machines: Mac + Linux box
 
-Der PC (Ubuntu Server, läuft immer) **leitet**: Er hält die gemeinsame beads-Datenbank aller
-Projekte und den Leitstand. Der Mac klinkt sich als zweiter Worker-Rechner ein, wenn er frei ist.
-Worker beider Rechner claimen aus derselben Warteschlange; Code geht wie immer über GitHub (Branch
-`fix/<id>`, PR). Bedient wird alles vom Mac aus: Leitstand im Browser, `pc …` im Terminal.
+**English** · [Deutsch](README.de.md)
+
+The PC (Ubuntu Server, always on) **leads**: it holds the shared beads database of all projects
+and the Leitstand (control room). The Mac joins as a second worker machine whenever it is free.
+Workers on both machines claim from the same queue; code goes through GitHub as usual (branch
+`fix/<id>`, PR). Everything is operated from the Mac: the Leitstand in the browser, `pc …` in the terminal.
 
 ```
-Mac                                      PC (Leitrechner, Tailnet-Name pc)
+Mac                                      PC (leader, tailnet name pc)
   Worker fix-1, search-1 (iTerm)  ──┐      Worker fix-101, verify-101 … (tmux bk-<slug>)
-  bd → pc:3307  ────────────────────┼───→  beads-dolt (dolt sql-server, alle Projekte)
+  bd → pc:3307  ────────────────────┼───→  beads-dolt (dolt sql-server, all projects)
   http://127.0.0.1:3738 ── ssh -L ──┼───→  Leitstand :3738 ── ssh -R ──→ server (nginx, HTTPS)
-  pc workers|attach|dev|forward ────┘      ↑ fragt den Mac per ssh nach dessen Workern
+  pc workers|attach|dev|forward ────┘      ↑ asks the Mac via ssh for its workers
 ```
 
-| Datei | Wo | |
+| File | Where | |
 |---|---|---|
-| `setup-linux.sh` | PC | Werkzeuge, Tailscale, kein Ruhezustand, ssh, Firewall, beads-dolt, Projekte klonen |
-| `setup-mac.sh` | Mac | ssh in beide Richtungen, `hosts.conf` auf beiden, Datenbank-Zugang, rsync, `pc` |
-| `migrate-beads.sh` | Mac | beads-Datenbanken Mac → PC (`--back`: zurück) |
-| `pc` | Mac | Befehle im selben Projekt auf dem PC |
-| `versions.conf`, `repos.txt` | – | Versionen (bd/dolt gleich auf beiden!), Projekte mit GitHub-Repo (`repos.txt` nur lokal, Vorlage `repos.txt.example`) |
-| `beads-backup.sh` | PC | tägliche Sicherung der Issues als JSONL (Timer) |
+| `setup-linux.sh` | PC | Tools, Tailscale, no sleep, ssh, firewall, beads-dolt, clone projects |
+| `setup-mac.sh` | Mac | ssh in both directions, `hosts.conf` on both, database access, rsync, `pc` |
+| `migrate-beads.sh` | Mac | beads databases Mac → PC (`--back`: back again) |
+| `pc` | Mac | Run commands in the same project on the PC |
+| `versions.conf`, `repos.txt` | – | Versions (bd/dolt must match on both!), projects with a GitHub repo (`repos.txt` local only, template `repos.txt.example`) |
+| `beads-backup.sh` | PC | Daily backup of the issues as JSONL (timer) |
 
-## Einrichten
+## Setup
 
-**1. Ubuntu installieren.** Ubuntu Server 24.04 LTS, Servername `pc`, Häkchen bei *Install OpenSSH
-server* und *Import SSH key from GitHub* (`felixgodo`), keine Snaps. Bei der Speicheraufteilung
-`ubuntu-lv` auf die volle Größe stellen.
+**1. Install Ubuntu.** Ubuntu Server 24.04 LTS, server name `pc`, tick *Install OpenSSH
+server* and *Import SSH key from GitHub* (`felixgodo`), no snaps. In the storage layout, grow
+`ubuntu-lv` to the full size.
 
-**2. Auf dem PC** (per `ssh <benutzer>@<ip>` vom Mac):
+**2. On the PC** (via `ssh <user>@<ip>` from the Mac):
 ```bash
 git clone https://github.com/felixgodo/ProjectTemplate ~/IdeaProjects/ProjectTemplate
 ~/IdeaProjects/ProjectTemplate/scripts/remote/setup-linux.sh
 ```
-Unterwegs fragt es zweimal nach einer Anmeldung (Link bzw. Code im Mac-Browser bestätigen):
-`tailscale up`, `gh auth login` (die Projekte sind privat). Danach einmal `claude` starten und anmelden.
-Fehlte der ssh-Schlüssel: vom Mac `ssh-copy-id <benutzer>@<ip>`, dann `setup-linux.sh ssh`.
+Along the way it asks you to log in twice (confirm the link or code in the Mac browser):
+`tailscale up`, `gh auth login` (the projects are private). Afterwards start `claude` once and log in.
+If the ssh key was missing: from the Mac run `ssh-copy-id <user>@<ip>`, then `setup-linux.sh ssh`.
 
-**3. Auf dem Mac:**
+**3. On the Mac:**
 ```bash
-brew install --cask tailscale        # starten, mit demselben Konto anmelden
-# Systemeinstellungen → Allgemein → Teilen → Entfernte Anmeldung: an (der PC fragt den Mac nach seinen Workern)
+brew install --cask tailscale        # start it, log in with the same account
+# System Settings → General → Sharing → Remote Login: on (the PC asks the Mac about its workers)
 scripts/remote/setup-mac.sh
 ```
-`devkit-projects.txt` und `repos.txt` sind nicht versioniert (die Projektnamen bleiben privat):
-`setup-mac.sh` schreibt `repos.txt`, kopiert beide auf den PC und klont dort die Projekte.
+`devkit-projects.txt` and `repos.txt` are not versioned (the project names stay private):
+`setup-mac.sh` writes `repos.txt`, copies both to the PC and clones the projects there.
 
-**4. Datenbanken umziehen** (einmal; vorher Worker auf dem Mac auslaufen lassen und den
-Leitstand dort anhalten):
+**4. Move the databases** (once; first let the workers on the Mac drain and stop the
+Leitstand there):
 ```bash
-scripts/beadskit/workers drain          # je Projekt, warten bis workers ls alle idle zeigt
+scripts/beadskit/workers drain          # per project, wait until workers ls shows all idle
 scripts/beadskit/leitstand/leitstand-remote uninstall
 scripts/remote/migrate-beads.sh --dry-run
 scripts/remote/migrate-beads.sh
 ```
 
-**5. Leitstand auf den PC, hier nur der Link:**
+**5. Leitstand on the PC, only the link here:**
 ```bash
-pc leitstand install                    # PC: Leitstand + Rückkanal zum Server, Mac: ssh -L 3738
+pc leitstand install                    # PC: Leitstand + back channel to the server, Mac: ssh -L 3738
 pc doctor
 ```
 
-## Bedienen
+## Usage
 
 ```bash
-pc workers start                       # auf dem PC: fix-101, fix-102, search-101, verify-101
-scripts/beadskit/workers start         # auf dem Mac: fix-1, fix-2, search-1 (HOST_mac_ROLES)
-pc attach                              # tmux-Session der PC-Worker (Ctrl+B D zurück, Ctrl+B n nächstes Fenster)
+pc workers start                       # on the PC: fix-101, fix-102, search-101, verify-101
+scripts/beadskit/workers start         # on the Mac: fix-1, fix-2, search-1 (HOST_mac_ROLES)
+pc attach                              # tmux session of the PC workers (Ctrl+B D to detach, Ctrl+B n next window)
 pc attach fix-101
-pc dev start                           # ./dev.sh start auf dem PC …
-pc forward 5200 8100                   # … und im Mac-Browser http://localhost:5200
-pc drain-host mac                      # vor dem Zuklappen: nur die Mac-Worker auslaufen lassen
+pc dev start                           # ./dev.sh start on the PC …
+pc forward 5200 8100                   # … and in the Mac browser http://localhost:5200
+pc drain-host mac                      # before closing the lid: drain only the Mac workers
 pc drain-host mac --off
-pc leitstand                           # http://127.0.0.1:3738: Worker beider Rechner, Rechner-Badge je Karte
-beads-top                              # dasselbe als Live-Übersicht im Terminal (Mac und PC, q beendet)
+pc leitstand                           # http://127.0.0.1:3738: workers of both machines, machine badge per card
+beads-top                              # the same as a live overview in the terminal (Mac and PC, q quits)
 ```
 
-Im Leitstand: oben je Rechner ein Chip (★ = Leitrechner, rot = nicht erreichbar) mit eigenem
-„auslaufen“, daneben „Neue auf“ für Starten und +1. Senden, Neu starten und Stoppen laufen auf dem
-Rechner des Workers.
+In the Leitstand: at the top, one chip per machine (★ = leader, red = unreachable) with its own
+"drain", next to it "New on" for start and +1. Send, restart and stop run on the worker's
+machine.
 
-## Regeln
+## Rules
 
-- **verify und regress auf dem PC.** Ein schlafender Mac mit dem Merge-Slot hält jedes Mergen
-  an. `workers start` startet auf dem Mac ohne Angabe nur `HOST_mac_ROLES` (fix, search) und warnt bei
-  anderen Rollen.
-- **Vor dem Zuklappen `pc drain-host mac`.** Sonst laufen Leases ab, `bd reclaim` gibt das Issue
-  frei, und wacht der Mac wieder auf, entsteht womöglich ein doppelter PR.
-- **PC aus = Mac-Worker claimen nicht.** Gewollt: Es gibt nur eine Datenbank, nie zwei
-  auseinanderlaufende. Für eine längere Zeit nur mit dem Mac: `scripts/remote/migrate-beads.sh --back`,
-  später wieder ohne `--back`.
-- **bd und dolt gleiche Version** auf beiden Rechnern (`versions.conf`, `pc doctor`).
-- Docker-Daten (MariaDB der Projekte) sind je Rechner getrennt.
-- Docker veröffentlicht Ports an ufw vorbei: in `docker-compose.yml` als `127.0.0.1:<port>:<port>` binden.
+- **verify and regress on the PC.** A sleeping Mac holding the merge slot stalls every merge.
+  Without arguments, `workers start` on the Mac starts only `HOST_mac_ROLES` (fix, search) and warns
+  about other roles.
+- **Run `pc drain-host mac` before closing the lid.** Otherwise leases expire, `bd reclaim` releases
+  the issue, and when the Mac wakes up again you may end up with a duplicate PR.
+- **PC off = Mac workers don't claim.** By design: there is only one database, never two
+  diverging ones. For a longer period with just the Mac: `scripts/remote/migrate-beads.sh --back`,
+  later run it again without `--back`.
+- **Same bd and dolt version** on both machines (`versions.conf`, `pc doctor`).
+- Docker data (the projects' MariaDB) is separate per machine.
+- Docker publishes ports bypassing ufw: bind them in `docker-compose.yml` as `127.0.0.1:<port>:<port>`.
 
-## Wie es funktioniert
+## How it works
 
-- `~/.config/beadskit/hosts.conf` auf beiden Rechnern (schreibt `setup-mac.sh`): `LEADER`, `SELF`,
-  `BK_HOST_BASE` (Worker-Nummern: Mac 1…, PC 101…), je Rechner `HOST_<h>_SSH`, `HOST_<h>_ROOT`,
-  `HOST_<h>_ROLES`. Ohne die Datei verhält sich alles wie mit einem Rechner.
-- `.beads/metadata.json` zeigt auf `dolt_server_host: pc`, Port in `.beads/dolt-server.port`,
-  Passwort in `~/.config/beads/credentials` (`[pc:3307]`). Weil der Host nicht localhost ist, startet
-  bd nie selbst einen Server: Ist der PC weg, scheitert bd, statt still eine leere Datenbank anzulegen.
-- Drain und Auto-Neustart stehen dann in `bd kv` (`beadskit.drain`, `.drain-<rolle>`,
-  `.drain@<rechner>`, `.autorestart`) statt in Dateien im Git-Verzeichnis, damit beide Rechner sie sehen.
-- Der Leitstand ruft den anderen Rechner per ssh auf (`scripts/beadskit/on-host` +
-  `leitstand/host-agent.mjs` im selben Projekt dort); die Transkripte bleiben, wo der Worker läuft.
-- Unter Linux laufen Worker als Fenster der tmux-Session `bk-<slug>`, gestartet in eigenen
-  systemd-Scopes: Ein Neustart des Leitstand-Dienstes beendet sie nicht.
+- `~/.config/beadskit/hosts.conf` on both machines (written by `setup-mac.sh`): `LEADER`, `SELF`,
+  `BK_HOST_BASE` (worker numbers: Mac 1…, PC 101…), and per machine `HOST_<h>_SSH`, `HOST_<h>_ROOT`,
+  `HOST_<h>_ROLES`. Without the file everything behaves as with a single machine.
+- `.beads/metadata.json` points to `dolt_server_host: pc`, port in `.beads/dolt-server.port`,
+  password in `~/.config/beads/credentials` (`[pc:3307]`). Because the host is not localhost, bd
+  never starts a server itself: if the PC is gone, bd fails instead of silently creating an empty database.
+- Drain and auto-restart then live in `bd kv` (`beadskit.drain`, `.drain-<role>`,
+  `.drain@<machine>`, `.autorestart`) instead of files in the Git directory, so both machines see them.
+- The Leitstand calls the other machine via ssh (`scripts/beadskit/on-host` +
+  `leitstand/host-agent.mjs` in the same project there); transcripts stay where the worker runs.
+- On Linux, workers run as windows of the tmux session `bk-<slug>`, started in their own
+  systemd scopes: restarting the Leitstand service does not kill them.

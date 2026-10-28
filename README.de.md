@@ -23,6 +23,8 @@ parallel Fehler finden, beheben und prüfen.
 - **beadskit** (optional) – parallele Claude-Code-Worker über eine gemeinsame
   [beads](https://github.com/gastownhall/beads)-Warteschlange, dazu ein Leitstand im Browser für alle Projekte.
 
+![Leitstand-Board mit Demo-Daten: Issues wandern von Bereit über In Arbeit, Verify und Merge nach Erledigt](docs/images/leitstand.png)
+
 ## Voraussetzungen
 
 JDK 17, Maven, Node, Docker. Für beadskit zusätzlich [`bd`](https://github.com/gastownhall/beads)
@@ -37,6 +39,8 @@ cd ProjectTemplate
 ```
 
 Dann http://localhost:5200 öffnen (Backend 8100, MariaDB 3310). `./dev.sh help` zeigt alle Befehle.
+
+![Die Template-App: ein kleines Notiz-Beispiel über React, Spring Boot und MariaDB](docs/images/app.png)
 
 ## Neues Projekt
 
@@ -88,7 +92,7 @@ Ein bestehendes Projekt mit eigenem `dev.sh` erstmals umstellen:
 
 `--apply` fasst nur Projekte an, die schon eine `dev.project.sh` haben, und überschreibt nie ein
 `dev.sh`, das nicht aus dem devkit stammt. Schnittstelle (Variablen, Hooks, Versions-Regeln):
-[scripts/devkit/README.md](scripts/devkit/README.md).
+[scripts/devkit/README.de.md](scripts/devkit/README.de.md).
 
 ## Parallele Worker (beadskit)
 
@@ -110,13 +114,13 @@ scripts/beadskit/workers start fix=1 search=1 verify=1
 ./beadskit-sync.sh --apply                           # Kit-Änderungen verteilen (VERSION hochzählen)
 ```
 
-Details: [scripts/beadskit/README.md](scripts/beadskit/README.md)
+Details: [scripts/beadskit/README.de.md](scripts/beadskit/README.de.md)
 
 ## Zwei Rechner (optional)
 
 Ein Linux-PC (Ubuntu Server) kann Worker, Builds und Docker übernehmen und hält die gemeinsame
 beads-Datenbank und den Leitstand; ein Mac arbeitet mit, wenn er frei ist. Einrichtung:
-[scripts/remote/README.md](scripts/remote/README.md).
+[scripts/remote/README.de.md](scripts/remote/README.de.md).
 
 ## Aufbau
 

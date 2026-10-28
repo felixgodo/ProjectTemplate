@@ -23,7 +23,7 @@ issues in parallel.
 - **beadskit** (optional) – parallel Claude Code workers sharing a [beads](https://github.com/gastownhall/beads)
   issue queue, plus a browser dashboard (*Leitstand*) across all projects.
 
-> The detailed docs in `scripts/*/README.md` are in German.
+![Leitstand board with demo data: issues move from ready through in progress, verify and merge to done](docs/images/leitstand.png)
 
 ## Prerequisites
 
@@ -39,6 +39,8 @@ cd ProjectTemplate
 ```
 
 Open http://localhost:5200 (backend on 8100, MariaDB on 3310). `./dev.sh help` lists all commands.
+
+![The template app: a small notes example wired through React, Spring Boot and MariaDB](docs/images/app.png)
 
 ## Create a new project
 
