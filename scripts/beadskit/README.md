@@ -61,6 +61,17 @@ scripts/beadskit/workers press fix-2 2                     # Rückfrage mit Tast
 scripts/beadskit/workers send fix-2 -- /compact            # Zeile ins Terminal tippen (iTerm-Tab, tmux-Fenster)
 ```
 
+- `drain` lässt die Worker den laufenden Schritt fertig machen, sie claimen nichts Neues.
+  `drain fix` lässt nur eine Rolle auslaufen, `drain fix --off` hebt das auf, `drain --off`
+  (und `start`) hebt alles auf. `add` verweigert bei aktivem Drain.
+- `stop` ohne Drain verweigert bei arbeitenden Workern, `--force` übergeht das.
+- `add` nimmt die nächste freie Nummer und öffnet die Tabs im vordersten iTerm-Fenster; so arbeiten
+  auch „+1“ und „Pipeline starten“ im Leitstand.
+- `restart` nur zwischen zwei Runden: idle, ohne Claim, ohne Merge-Slot, nicht bei Drain
+  (`--force` übergeht). iTerm-Worker bekommen SIGTERM, der Startbefehl wird per AppleScript in
+  denselben Tab getippt. Ein Worker unter `/loop` sammelt sonst alle Runden in einer Session.
+- Hintergrund-Worker (`--bg`) erreicht man nur über `workers attach <name>`, nicht über `send`.
+
 Worker laufen im Terminal, Farbe je Rolle: auf dem Mac als iTerm-Tabs, unter Linux als Fenster
 der tmux-Session `bk-<slug>` (`workers attach <name>`). `--term iterm|tmux|bg` bzw. `BK_TERM`
 wählt selbst, `--bg` startet Hintergrund-Sessions; ohne steuerbares Terminal automatisch im
@@ -73,8 +84,8 @@ Hintergrund.
 `start` dort ohne Angabe startet. Der Leitstand auf dem Leitrechner zeigt die Worker beider Rechner
 (per ssh: `on-host` + `leitstand/host-agent.mjs`) und führt Aktionen auf dem Rechner des Workers aus.
 
-**Leitstand:** `node scripts/beadskit/leitstand/inbox.mjs` (aus einem beliebigen eingerichteten
-Projekt) → http://127.0.0.1:3738. Ein Prozess für alle Projekte; Umschalter oben (`#<slug>` in
+**Leitstand:** `./leitstand.sh` im ProjectTemplate (oder `node scripts/beadskit/leitstand/inbox.mjs`
+aus einem beliebigen eingerichteten Projekt) → http://127.0.0.1:3738, beenden mit Ctrl+C. Ein Prozess für alle Projekte; Umschalter oben (`#<slug>` in
 der Adresse), daneben der Umschalter der Workspaces. Die Liste steht in
 `~/.config/beadskit/projects.txt` – `workers` trägt sein Projekt bei jedem Aufruf ein. Der
 Leitstand zeigt Kennzahlen, Worker-Karten mit Detail (Chat aus dem Transkript, Senden in den
@@ -96,7 +107,9 @@ Antworten zum Antippen (Entscheidung, Schließgrund, Chat, Titel-Vorlagen, Filte
 ersetzt der Knopf ⇄ an der Karte das Ziehen. Als Web-App auf den Home-Bildschirm legbar.
 
 Fernzugang: `scripts/beadskit/leitstand/leitstand-remote` (Login mit Token oder Benutzer/Passwort
-`leitstand-remote password`, Sperre je IP; SSH-Rückkanal, nginx mit HTTPS, Basic-Auth nur mit
+`leitstand-remote password [benutzer]`, zurück auf das Token mit `password --off`; Sperre je IP
+nach 5 Fehlversuchen für 15 min; ist eine Token-Datei angelegt, verlangt auch der lokale Leitstand
+den Login; SSH-Rückkanal, nginx mit HTTPS, Basic-Auth nur mit
 `server-setup --basic-auth`; Hilfe im Kopf des Skripts). Token, Passwort und Basic-Auth liegen in
 `~/.config/beadskit/`, Domain, SSH-Host usw. optional in `~/.config/beadskit/remote.conf`
 (`LEITSTAND_PUBLIC_URL=…`). `install` übernimmt Token und Passwort eines früheren,
@@ -131,6 +144,7 @@ sich vorziehen. Erst `runner-pool setup` (Dienst ab 1.7.0), dann die Workflows u
   nutzen, und vereint ihre `RUNNER_APT` in einem Image. Nach jeder Änderung daran `setup` erneut.
 - Token: Fine-grained PAT für diese Repos mit Administration (Read and write) und Actions (Read),
   einzugeben mit `runner-pool set-token`. Er liegt nur auf dem Server.
+- Hängen Jobs in „Queued“, zuerst `runner-pool status` und `runner-pool logs` prüfen.
 - Der Leitstand zeigt im Tab „CI“ (für alle Projekte gleich, Taste 6) die Plätze, je Projekt Runner,
   wartende Jobs, Grenze −/+ und Pausieren/Fortsetzen, die Runner mit Projekt und Job, CPU/RAM, die
   CI-Datenbanken und das Log des Dienstes, mit Plätze −/+ und Pool an/aus. Darunter die

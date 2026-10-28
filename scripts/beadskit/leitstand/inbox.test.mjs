@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import {
   buildWorkspaces, cardExtras, clientIp, groupIssues, isOwnHost, isPagePath, isSameOrigin, labelSlug, loginGuard, metrics,
-  normalizeConfig, normalizeExt, parseCookies, parseProjectList, parseMysql, parsePool, parseSlice, parseWorkers, planCreate, planDecision,
+  normalizeConfig, normalizeExt, parseCookies, parseProjectList, projectPaths, parseMysql, parsePool, parseSlice, parseWorkers, planCreate, planDecision,
   planIssueAction, planRestarts, planRunnerAction, planWorkerAction, prSummary, publicConfig, readBody, repoOfIssue,
   RESTART_COOLDOWN_MS, safeEqual, signSession, today, verifySession, hashPassword, parsePasswordLine, verifyPassword,
   workerRe, wsOfIssue, parseHostsConf, mapRoot, shQuote, remoteCommand, mergeHostWorkers, parseMarkers, routeWorkerAction,
@@ -573,6 +573,13 @@ test('parseWorkers nimmt nur Sessions in den Worktrees, mit Rolle und Workspace,
 test('parseProjectList: Pfade ohne Kommentare, Leerzeilen und Dubletten', () => {
   assert.deepEqual(parseProjectList('/a\n\n# alt\n /b \n/a\n'), ['/a', '/b']);
   assert.deepEqual(parseProjectList(''), []);
+});
+
+test('projectPaths: eigenes Root nur als eingerichtetes Projekt, ohne Dublette', () => {
+  assert.deepEqual(projectPaths(['/a'], '/self', true), ['/self', '/a']);
+  assert.deepEqual(projectPaths(['/a'], '/self', false), ['/a']);
+  assert.deepEqual(projectPaths(['/self', '/a'], '/self', true), ['/self', '/a']);
+  assert.deepEqual(projectPaths(['/a'], null, true), ['/a']);
 });
 
 test('normalizeConfig: Vorgaben, ungültige Werte fallen weg, publicConfig ohne Pfade', () => {

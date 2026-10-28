@@ -66,7 +66,7 @@ Ein Leitstand im Browser zeigt alle eingerichteten Projekte. Details: [scripts/b
 ./beadskit-sync.sh --adopt MeinProjekt --base main --modules "backend frontend"
 cd ../MeinProjekt && bd init --prefix meinprojekt     # einmalig, .beads/ bleibt lokal
 scripts/beadskit/workers start fix=1 search=1 verify=1
-node scripts/beadskit/leitstand/inbox.mjs            # http://127.0.0.1:3738, alle Projekte
+./leitstand.sh                                       # Leitstand: http://127.0.0.1:3738, alle Projekte
 ./beadskit-sync.sh --apply                           # Kit-Änderungen verteilen (VERSION hochzählen)
 ```
 
@@ -96,7 +96,7 @@ docker-compose.yml                            MariaDB für die Entwicklung
 scripts/remote/                               zweiter Rechner (Linux-PC): Einrichtung, pc-Befehl
 deploy/                                       setup.sh und Vorlagen fürs Release-Paket
 scripts/beadskit/                             parallele Claude-Worker + Leitstand (optional je Projekt)
-new-project.sh · devkit-sync.sh · beadskit-sync.sh   nur im Template
+new-project.sh · devkit-sync.sh · beadskit-sync.sh · leitstand.sh   nur im Template
 ```
 
 Die Template-App selbst läuft mit `./dev.sh start` auf http://localhost:5200 (Backend 8100, MariaDB 3310).
