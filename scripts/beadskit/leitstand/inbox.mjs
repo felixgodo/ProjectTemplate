@@ -431,7 +431,8 @@ export function planRunnerAction({ action, n, force, label, repo, run, off }) {
  * Normalisiert `runner-pool status --json`: Dienst, Plätze, Grenzen je Projekt, laufende Pool-Runner
  * (mit Projekt-Label, Job, CPU, RAM), wartende Jobs je Label, CI-MySQL und Slice. Ungültiges fällt
  * weg. limits ist null, solange der Dienst auf dem Server noch keine Grenzen kennt (setup fehlt).
- * queue: wartende Läufe in der Reihenfolge des Dienstes (vorgezogene zuerst), je Lauf ein Eintrag.
+ * queue: wartende Läufe in der Reihenfolge des Dienstes (vorgezogene zuerst), je Lauf ein Eintrag;
+ * stale: wartet seit STALE (Dienst, 30 min) oder länger, runStatus: Status des Laufs bei GitHub.
  */
 export function parsePool(d) {
   const job = (j) => (j && typeof j === 'object' ? {
@@ -474,6 +475,8 @@ export function parsePool(d) {
         created: str(q.created, null),
         prio: q.prio === true,
         runLabel: q.runLabel === true,
+        runStatus: str(q.runStatus),
+        stale: q.stale === true,
       })),
     runners: (Array.isArray(o.runners) ? o.runners : [])
       .filter((r) => r && typeof r.name === 'string' && r.name.startsWith('pool-'))

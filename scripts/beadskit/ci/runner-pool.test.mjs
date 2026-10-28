@@ -134,6 +134,31 @@ test('Runde: wartender Job → JIT-Runner im Pool-Container mit Slice, Grenzen u
   assert.equal(r.state.slots, 2);
 });
 
+test('Runde: Lauf auf pending mit wartenden Jobs bekommt einen Runner und gilt nach STALE als hängend', () => {
+  const recent = new Date(Date.now() - 60_000).toISOString().replace(/\.\d+Z$/, 'Z');
+  const r = round({
+    'repos_o_a_actions_runs': { workflow_runs: [
+      { id: 40, status: 'pending', head_branch: 'main', display_title: 'Merge', pull_requests: [] },
+      { id: 41, status: 'queued', head_branch: 'fix/y', display_title: 'Fix Y', pull_requests: [] },
+    ] },
+    'repos_o_a_actions_runs_40_jobs': { jobs: [
+      { status: 'queued', name: 'Module', labels: ['self-hosted', 'a', 'run-40'], created_at: '2026-10-28T11:48:36Z' },
+    ] },
+    'repos_o_a_actions_runs_41_jobs': { jobs: [
+      { status: 'queued', name: 'App', labels: ['self-hosted', 'a', 'run-41'], created_at: recent },
+    ] },
+    'repos_o_a_actions_runners': { runners: [] },
+    'repos_o_a_actions_runners_generate-jitconfig': { encoded_jit_config: 'JITCFG' },
+  }, 'REPOS="o/a:a"\nSLOTS=2\n');
+  assert.equal(r.status, 0, r.stderr);
+  for (const st of ['queued', 'in_progress', 'pending']) assert.match(r.log, new RegExp(`actions/runs\\?status=${st}&`));
+  // jede Abfrage liefert hier beide Läufe: trotzdem je Lauf nur ein Runner
+  assert.match(r.log, /docker run .*--label beadskit\.run=run-40 /);
+  assert.equal(r.log.split('\n').filter((l) => l.startsWith('docker run')).length, 2);
+  assert.deepEqual(r.state.queue.map((q) => [q.run, q.jobs, q.runStatus, q.stale]),
+    [[40, 1, 'pending', true], [41, 1, 'queued', false]]);
+});
+
 test('Runde: ungültiger REPOS-Eintrag bricht ab', () => {
   const dir = mkdtempSync(join(tmpdir(), 'runner-pool-'));
   writeFileSync(join(dir, 'pool.conf'), 'REPOS="o/a:A;rm"\n');
@@ -142,6 +167,16 @@ test('Runde: ungültiger REPOS-Eintrag bricht ab', () => {
   rmSync(dir, { recursive: true, force: true });
   assert.equal(r.status, 1);
   assert.match(r.stdout, /REPOS-Eintrag ungültig/);
+});
+
+test('Runde: ungültiges STALE bricht ab', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'runner-pool-'));
+  writeFileSync(join(dir, 'pool.conf'), 'REPOS="o/a:a"\nSTALE=10m\n');
+  const r = spawnSync('bash', [DAEMON, 'once'], { encoding: 'utf8',
+    env: { ...process.env, POOL_CONF: join(dir, 'pool.conf'), POOL_TOKEN_FILE: '/dev/null' } });
+  rmSync(dir, { recursive: true, force: true });
+  assert.equal(r.status, 1);
+  assert.match(r.stdout, /STALE ungültig/);
 });
 
 // Projekte für setup --dry-run: je ein Verzeichnis mit beads.project.sh und Workflow

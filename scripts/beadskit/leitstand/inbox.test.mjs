@@ -513,15 +513,15 @@ test('parsePool: Grenzen je Projekt, null solange der Server sie nicht kennt', (
 test('parsePool: Warteschlange in Reihenfolge des Dienstes, verwirft Ungültiges', () => {
   const p = parsePool({ queue: [
     { repo: 'o/spot', label: 'spot', run: 42, pr: 1013, branch: 'fix/x', title: 'Fix', url: 'https://github.com/o/spot/actions/runs/42',
-      jobs: 3, created: '2026-10-26T10:00:00Z', prio: true, runLabel: true },
-    { repo: 'o/BrightHub', label: 'regiehub', run: 7, pr: '', branch: 'main', url: 'javascript:x', jobs: 0, prio: 'ja' },
+      jobs: 3, created: '2026-10-26T10:00:00Z', prio: true, runLabel: true, runStatus: 'pending', stale: true },
+    { repo: 'o/BrightHub', label: 'regiehub', run: 7, pr: '', branch: 'main', url: 'javascript:x', jobs: 0, prio: 'ja', runStatus: 3, stale: 'ja' },
     { repo: 'o/spot;rm', run: 1 }, { repo: 'o/spot', run: '42' }, { repo: 'o/spot', run: -1 }, null,
   ] });
   assert.deepEqual(p.queue, [
     { repo: 'o/spot', label: 'spot', run: 42, pr: 1013, branch: 'fix/x', title: 'Fix', url: 'https://github.com/o/spot/actions/runs/42',
-      jobs: 3, created: '2026-10-26T10:00:00Z', prio: true, runLabel: true },
+      jobs: 3, created: '2026-10-26T10:00:00Z', prio: true, runLabel: true, runStatus: 'pending', stale: true },
     { repo: 'o/BrightHub', label: 'regiehub', run: 7, pr: null, branch: 'main', title: '', url: null,
-      jobs: 1, created: null, prio: false, runLabel: false },
+      jobs: 1, created: null, prio: false, runLabel: false, runStatus: '', stale: false },
   ]);
   assert.deepEqual(parsePool({}).queue, []);
   assert.deepEqual(parsePool({ queue: {} }).queue, []);
