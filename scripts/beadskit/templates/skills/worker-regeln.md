@@ -15,6 +15,10 @@ Protokoll sind die Review-Dateien unter `reviews/` (siehe CLAUDE.md), der Weg na
   Mit zwei Rechnern liegt sie auf dem Leitrechner; `.beads/` zeigt nur dorthin, und Worker
   beider Rechner teilen sich dieselben Issues, Claims und denselben Merge-Slot. Antwortet bd
   nicht (Leitrechner aus, Netz weg), nichts claimen und die Runde beenden.
+- Die Worktree-Sandbox lehnt Bash-Befehle ab, die `git` in Pipes, `&&`/`||`-Ketten, Schleifen,
+  Subshells, `$(…)` oder Heredocs enthalten. git-Befehle einzeln aufrufen und die Ausgabe lesen,
+  bevor der nächste Schritt davon abhängt; längere Texte für beads mit dem Write-Tool in eine
+  Datei schreiben (`bdw create … --body-file <datei>`, `bdw note <id> --file <datei>`).
 - Abhängigkeiten im Worktree nachinstallieren, bevor Prüfkommandos laufen (siehe CLAUDE.md).
 
 ## Status-Modell in beads
@@ -71,7 +75,8 @@ Rolle kommt aus dem Worktree-Namen (`fix-2` → `fix`):
 scripts/beadskit/workers drain-check
 ```
 Ein einzelner Befehl, damit die Sandbox ihn ohne Rückfrage erlaubt. Die Ausgabe beginnt mit
-`DRAIN` oder lautet `kein Drain`, der Exit-Code ist immer 0.
+`DRAIN` oder lautet `kein Drain`, der Exit-Code ist immer 0: nie per `&&` vor
+`merge-slot acquire` oder einen Claim hängen, erst die Ausgabe lesen.
 - `DRAIN` → nichts Neues claimen, kurzen Bericht ausgeben, aufhören. Keine weitere Frage an
   den User. Unter `/loop` die Schleife beenden, wenn das geht; sonst endet jede weitere Runde
   sofort an dieser Prüfung.
@@ -99,7 +104,9 @@ Jeder Branch legt nur **seine eigene** Datei an, gemeinsame Dateien fasst keiner
   phase:fix,modul:…`) und im Review unter „Offene Punkte“ mit der beads-ID nennen.
 
 ## Prüfkommandos
-Wie in CLAUDE.md, passend zum Modul. Vor jedem Push und nach jedem Rebase erneut.
+Wie in CLAUDE.md, passend zum Modul. Vor jedem Push und nach jedem Rebase erneut. Ausnahme:
+der Verify-Worker nach einem konfliktfreien Rebase im Merge-Slot, dort prüft die CI den neuen
+Stand.
 
 ## Projektspezifisch
 <!-- Hier die Grenzen und Eigenheiten des Projekts eintragen (Server, Testgeräte, Commit-Stil, …). -->

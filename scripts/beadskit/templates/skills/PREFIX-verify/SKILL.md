@@ -6,7 +6,11 @@ description: Verify-/Test-Worker der parallelen Pipeline – prüft offene Fix-P
 # Verify- und Test-Worker
 
 Zuerst `.claude/skills/worker-regeln.md` lesen und befolgen. `bdw` = `scripts/beadskit/bdw`.
-Eigener Actor: `basename "$(git rev-parse --show-toplevel)"`. Ziel-Branch: `{{BASE}}`.
+Eigener Actor: der Name des Worktree-Ordners (z. B. `verify-2`). Ziel-Branch: `{{BASE}}`.
+
+Befehle in diesem Skill einzeln aufrufen, wie sie dastehen: Die Sandbox lehnt `git` in Pipes,
+`&&`/`||`-Ketten und `$(…)` ab (`worker-regeln.md`, „Session-Start“). Wo ein Schritt vom
+Ergebnis des vorigen abhängt, erst dessen Ausgabe lesen.
 
 Prüfen und Mergen sind getrennt: Prüfen läuft parallel ohne Slot, nur das Mergen ist
 serialisiert. Auf den Merge-Slot wird **nie gewartet** – wer ihn nicht sofort bekommt, prüft
@@ -19,9 +23,11 @@ aufhören. Hält der eigene Actor noch den Merge-Slot, vorher freigeben.
 
 In dieser Reihenfolge:
 1. **Mergen**, wenn `bdw ready -l phase:merge --json` etwas liefert und
-   `bdw merge-slot acquire` (ohne `--wait`) sofort gelingt: `bdw ready --claim -l phase:merge
-   --json` → Abschnitt 3. Liefert der Claim nichts, Slot freigeben und weiter mit 2.
-   Schlägt `acquire` fehl, ist jemand anders am Mergen → weiter mit 2.
+   `bdw merge-slot acquire` (ohne `--wait`) sofort gelingt. `acquire` als eigenen Aufruf, nie
+   im selben Schritt wie den Claim: Erst wenn die Ausgabe „Acquired merge slot“ zeigt,
+   `bdw ready --claim -l phase:merge --json` → Abschnitt 3. Liefert der Claim nichts, Slot
+   freigeben und weiter mit 2. Schlägt `acquire` fehl (nur „Hint: Use --wait …“), ist jemand
+   anders am Mergen → weiter mit 2.
 2. **Prüfen**: `bdw ready --claim -l phase:verify --json`. Gefunden → Abschnitt 2.
    Ist `metadata.fixer` der eigene Actor: `bdw unclaim <id>` und ein anderes nehmen – niemand
    prüft seinen eigenen Fix.
@@ -33,7 +39,8 @@ Hat das Issue `metadata.repo` (weiteres Repo aus `BK_REPOS`), PR, CI und Merge d
 ## 2. Unabhängig prüfen
 ```bash
 gh pr view <pr> --json title,body,headRefName,baseRefName,mergeable,statusCheckRollup
-git fetch origin && git switch --detach origin/fix/<id>
+git fetch origin
+git switch --detach origin/<headRefName>
 git diff origin/{{BASE}}...HEAD
 ```
 - Basis des PRs muss `{{BASE}}` sein, sonst zurück an Fix.
@@ -64,18 +71,28 @@ das Nötigste – jede Minute hier blockiert alle anderen Merges.
 **Schneller Weg (ohne Rebase, ohne neue CI)** – nur wenn `scripts/ci/modules.sh` existiert:
 ```bash
 git fetch origin
-git show origin/{{BASE}}:scripts/ci/modules.sh | sh -s -- disjoint origin/{{BASE}} origin/fix/<id>
+# Branch aus dem PR, nicht aus metadata.branch – beide können abweichen
+gh pr view <pr> --json headRefName --jq .headRefName
+# Skript immer aus {{BASE}} nehmen; als Datei, keine Pipe
+git show origin/{{BASE}}:scripts/ci/modules.sh > <scratchpad>/modules.sh
+bash <scratchpad>/modules.sh disjoint origin/{{BASE}} origin/<headRefName>
 gh pr view <pr> --json mergeable,statusCheckRollup \
   --jq '{mergeable, checks: [.statusCheckRollup[] | .conclusion // .state] | unique}'
 ```
 `disjoint` endet mit exit 0, `mergeable` ist `MERGEABLE` und `checks` enthält nur
-`SUCCESS`/`SKIPPED` → direkt `gh pr merge <pr> --merge --delete-branch`, dann wie unten „Grün“.
+`SUCCESS`/`SKIPPED` → direkt mergen wie unten „Grün“. Ein leerer String `""` in `checks`
+heißt „Job läuft noch“, ebenso `PENDING`, `QUEUED`, `IN_PROGRESS`: dann nicht mergen, sondern
+den Lauf mit `gh run watch <run-id> --exit-status` abwarten.
 
 **Langsamer Weg (Rebase + CI):**
 ```bash
-git switch fix/<id> 2>/dev/null || git switch -c fix/<id> origin/fix/<id>
-git reset --hard origin/fix/<id> && git rebase origin/{{BASE}}
+git fetch origin
+git switch --detach origin/<headRefName>
+git rebase origin/{{BASE}}
 ```
+Detached, nicht `git switch fix/<id>`: Der Branch ist oft im Worktree des Fix-Workers
+ausgecheckt, dann scheitert `switch`, und ein folgendes `reset --hard`/`rebase` träfe den
+gerade ausgecheckten Branch.
 - **Konflikt** → nicht im Slot lösen. `git rebase --abort`, Slot freigeben, zurück an den
   Fix-Worker:
   ```bash
@@ -83,11 +100,28 @@ git reset --hard origin/fix/<id> && git rebase origin/{{BASE}}
   bdw update <id> --remove-label phase:merge --add-label phase:fix --append-notes "<actor>: Rebase-Konflikt mit {{BASE}} – <Dateien>"
   bdw unclaim <id>
   ```
-- Ohne Konflikt: `git push --force-with-lease`, die CI prüft den gerebasten Stand.
-- `gh pr checks <pr> --watch`. Rot → Ursache klären; Fix-Problem → Slot freigeben, dann wie
-  „Nicht in Ordnung“ (Label `phase:merge` statt `phase:verify` entfernen).
-- Grün: `gh pr merge <pr> --merge --delete-branch`, dann
+- Ohne Konflikt keine lokalen Prüfkommandos (die liefen in Abschnitt 2), die CI prüft den
+  gerebasten Stand.
+- Pushen erst, wenn die Rebase-Ausgabe „Successfully rebased“ zeigt, nie im selben Schritt
+  wie den Rebase: Ein paralleler Push nach gescheitertem Rebase schiebt den Stand von
+  `{{BASE}}` auf den PR-Branch, GitHub schließt den PR dann (kein Diff mehr). Lease ohne
+  getippte SHA, gegen den frisch geholten Tracking-Ref:
   ```bash
+  git push --force-with-lease=<headRefName> origin HEAD:refs/heads/<headRefName>
+  ```
+- CI des neuen Stands abwarten: `git rev-parse HEAD`, dann
+  `gh run list --branch <headRefName> --limit 2 --json databaseId,headSha,status` und den Lauf
+  mit genau dieser `headSha` per `gh run watch <run-id> --exit-status`. Nicht
+  `gh pr checks --watch`, das zeigt kurz noch den alten Lauf. Rot → Ursache klären;
+  Fix-Problem → Slot freigeben, dann wie „Nicht in Ordnung“ (Label `phase:merge` statt
+  `phase:verify` entfernen).
+- Grün: mergen ohne `--delete-branch` (gh würde danach lokal auf `{{BASE}}` wechseln, das im
+  Haupt-Checkout ausgecheckt ist), den Remote-Branch danach einzeln löschen. Die Review-Datei
+  für `close` aus `gh pr view <pr> --json files` nehmen, nicht aus dem Kopf. Vier Befehle,
+  je einer:
+  ```bash
+  gh pr merge <pr> --merge
+  git push origin --delete <headRefName>
   bdw close <id> --reason "PR #<pr> gemerged, reviews/<datei>"
   bdw merge-slot release
   ```

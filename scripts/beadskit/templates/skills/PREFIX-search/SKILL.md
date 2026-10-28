@@ -13,7 +13,8 @@ Zuerst `.claude/skills/worker-regeln.md` lesen und befolgen. `bdw` = `scripts/be
 - Zuerst `drain`-Check (siehe `worker-regeln.md`, „Auslaufen“): Markierung da → Bericht, aufhören.
 - Argument gegeben → dieses Modul. Sonst das Modul mit den wenigsten offenen Issues
   (`bdw count --by-label`).
-- Arbeitsstand: `git fetch origin && git switch --detach origin/{{BASE}}`.
+- Arbeitsstand: `git fetch origin`, dann `git switch --detach origin/{{BASE}}` (zwei Befehle,
+  siehe `worker-regeln.md`, „Session-Start“).
 
 ## 2. Suchen
 - **Code-Analyse:** Einstiegspunkte (Endpoints, Services, Repositories, Komponenten, Hooks) lesen,
