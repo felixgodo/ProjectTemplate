@@ -88,7 +88,7 @@ Hintergrund.
 aus einem beliebigen eingerichteten Projekt) → http://127.0.0.1:3738, beenden mit Ctrl+C. Ein Prozess für alle Projekte; Umschalter oben (`#<slug>` in
 der Adresse), daneben der Umschalter der Workspaces. Die Liste steht in
 `~/.config/beadskit/projects.txt` – `workers` trägt sein Projekt bei jedem Aufruf ein. Der
-Leitstand zeigt Kennzahlen, Worker-Karten mit Detail (Chat aus dem Transkript, Senden in den
+Leitstand zeigt Kennzahlen (neben „bereit“ die Kachel „bereit: <erste Phase>“ = davon freigegeben, nur die claimen Worker), Worker-Karten mit Detail (Chat aus dem Transkript, Senden in den
 iTerm-Tab, Neu starten), „Wartet auf dich“ (Label `human`; hängt ein Issue per `blocks` an einem anderen, zeigt die Kachel
 „wartet auf <id>“ mit Link und Stand bzw. „Abhängigkeit erledigt“, das Board ein Badge ⏳; Mehrfachauswahl per Haken,
 „alle“ oder „nur …“ (Split wie „zum Aktivieren“, Gruppe wie Stadt), dann Knopf-Aktion, Freigeben, Zurückstellen oder Schließen

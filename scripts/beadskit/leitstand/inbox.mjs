@@ -157,6 +157,7 @@ export function buildWorkspaces(cfg, ext = {}) {
       group,
       kpis: Array.isArray(ui.kpis) ? ui.kpis : [
         ['human', 'wartet auf dich'], ...split.map((s) => [s.key, s.title]), ['open', 'bereit'],
+        ['released', `bereit: ${w.phases[0].title || cap(phases[0])}`],
         ...phases.map((p, i) => [p, i === 0 ? 'in Arbeit' : titleOf[p]]),
         ...(code ? [['mergedToday', 'heute gemergt']] : []),
         ['done24h', 'erledigt (24 h)'], ['leadMs', 'Ø Durchlauf (24 h)'], ['stale', 'Claims abgelaufen']],
@@ -580,6 +581,8 @@ export function metrics(cols, ws, merged = [], now = Date.now()) {
   return {
     ...Object.fromEntries(Object.keys(cols).map((k) => [k, n(k)])),
     open: n('ready'),
+    // davon freigegeben (phase:<erste Phase>): nur die claimen Worker
+    released: (cols.ready || []).filter((i) => (i.labels || []).includes(`phase:${ws.readyPhase}`)).length,
     working: n(ws.readyPhase),
     done24h: n('done'),
     mergedToday: merged.filter((p) => p.mergedAt && today(new Date(p.mergedAt)) === day).length,
