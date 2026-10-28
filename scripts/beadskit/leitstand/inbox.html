@@ -1318,7 +1318,8 @@ function poolQueue(p) {
     return `<div class="qrow"><div class="qpos">${i + 1}.</div>
       <div class="qmain${x.label === P ? ' own' : ''}" title="${esc(`${x.title}\n${x.branch} · ${x.repo} · Lauf ${x.run}`)}"><b>${esc(poolName(x.label))}</b> ${name}
         <span class="muted">${esc(x.title)}</span></div>
-      <div class="qmeta muted">${x.prio ? '<span class="qprio">vorgezogen</span> · ' : ''}${x.jobs} Job${x.jobs > 1 ? 's' : ''}${x.created ? ` · seit ${esc(dur(ms(x.created)))}` : ''}${x.runLabel ? '' : ' · nur Projekt'}</div>
+      <div class="qmeta muted">${x.prio ? '<span class="qprio">vorgezogen</span> · ' : ''}${x.jobs} Job${x.jobs > 1 ? 's' : ''}${x.created ? ` · seit ${esc(dur(ms(x.created)))}` : ''}${x.runLabel ? '' : ' · nur Projekt'}${x.stale
+        ? ` · <span class="warn-t" title="${esc(`Wartet ungewöhnlich lange${x.runStatus === 'pending' ? ', Lauf bei GitHub auf pending' : ''}: runner-pool status/logs prüfen, notfalls gh run cancel ${x.run}`)}">lange wartend</span>` : ''}</div>
       <div class="qbtn">${btn}</div></div>`;
   }).join('');
 }

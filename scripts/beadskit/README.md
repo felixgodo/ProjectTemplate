@@ -157,7 +157,11 @@ switch the workflows: an older service starts runners without the label, and the
   `self-hosted`, and merges their `RUNNER_APT` into one image. Run `setup` again after every change.
 - Token: fine-grained PAT for these repos with Administration (Read and write) and Actions (Read),
   entered with `runner-pool set-token`. It is stored only on the server.
-- If jobs hang in „Queued“, check `runner-pool status` and `runner-pool logs` first.
+- If jobs hang in „Queued“, check `runner-pool status` and `runner-pool logs` first. The service also
+  serves runs that GitHub leaves on „pending“ although their jobs are queued; a run waiting longer than
+  `STALE` (pool.conf, default 1800 s) is flagged in `status` („wartet seit …“, plus „Lauf pending“) and
+  in the dashboard („lange wartend“), also when the pool is simply full. It is never cancelled
+  automatically: if it still does not start, cancel it with `gh run cancel <run-id>`.
 - The Leitstand's „CI“ tab (the same for all projects, key 6) shows the slots; per project the
   runners, waiting jobs, limit −/+ and pause/resume; the runners with project and job, CPU/RAM, the
   CI databases and the service log, with slots −/+ and pool on/off. Below that, the queue of all

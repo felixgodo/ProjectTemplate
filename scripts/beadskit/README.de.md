@@ -146,7 +146,11 @@ sich vorziehen. Erst `runner-pool setup` (Dienst ab 1.7.0), dann die Workflows u
   nutzen, und vereint ihre `RUNNER_APT` in einem Image. Nach jeder Änderung daran `setup` erneut.
 - Token: Fine-grained PAT für diese Repos mit Administration (Read and write) und Actions (Read),
   einzugeben mit `runner-pool set-token`. Er liegt nur auf dem Server.
-- Hängen Jobs in „Queued“, zuerst `runner-pool status` und `runner-pool logs` prüfen.
+- Hängen Jobs in „Queued“, zuerst `runner-pool status` und `runner-pool logs` prüfen. Der Dienst
+  bedient auch Läufe, die GitHub auf „pending“ stehen lässt, obwohl ihre Jobs warten; ein Lauf, der
+  länger als `STALE` wartet (pool.conf, Vorgabe 1800 s), steht in `status` mit „wartet seit …“ (und
+  „Lauf pending“) und im Leitstand als „lange wartend“, auch wenn der Pool nur voll ist. Abgebrochen
+  wird nie automatisch: läuft er trotzdem nicht an, `gh run cancel <run-id>`.
 - Der Leitstand zeigt im Tab „CI“ (für alle Projekte gleich, Taste 6) die Plätze, je Projekt Runner,
   wartende Jobs, Grenze −/+ und Pausieren/Fortsetzen, die Runner mit Projekt und Job, CPU/RAM, die
   CI-Datenbanken und das Log des Dienstes, mit Plätze −/+ und Pool an/aus. Darunter die

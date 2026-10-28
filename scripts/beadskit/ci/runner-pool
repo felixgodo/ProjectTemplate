@@ -229,7 +229,7 @@ jq -c --arg svc "\$svc" --arg db "\$db" --arg mdb "\$mdb" --arg slots "\$slots" 
 EOF
 }
 
-# {service, token, slots, repos, queued {label: n}, queue [{repo, label, run, pr, branch, title, url, jobs, created, prio, runLabel}], runners [{name, label, repo, slot, busy, github, job, cpu, mem}],
+# {service, token, slots, repos, queued {label: n}, queue [{repo, label, run, pr, branch, title, url, jobs, created, prio, runLabel, runStatus, stale}], runners [{name, label, repo, slot, busy, github, job, cpu, mem}],
 #  mysql und mariadb {container, cpu, mem} | null, slice, at}
 cmd_status_json() {
   tmp=$(mktemp)
@@ -257,7 +257,7 @@ cmd_status() {
     (.runners[] | "  \(.name)\t\(.repo)\t\(if .job then "\(.job.name) · \(.job.branch)" elif .busy then "Job" else "wartet auf Job" end)"),
     ((.limits // {}) | to_entries[] | "  \(.key): \(if .value.paused then "pausiert" elif .value.max then "höchstens \(.value.max) Plätze" else "ohne Grenze" end)"),
     (if (.queued | length) > 0 then "Wartend: \(.queued | to_entries | map("\(.key) \(.value)") | join(", "))" else "Wartend: keine" end),
-    (.queue[:10] | to_entries[] | .value as $q | "  \(.key + 1). \($q.label) \(if $q.pr then "#\($q.pr)" else $q.branch end) · \($q.jobs) Job(s)\(if $q.prio then " · vorgezogen" else "" end)\(if $q.runLabel then "" else " · ohne Run-Label" end)\t\($q.repo) \($q.run)"),
+    (.queue[:10] | to_entries[] | .value as $q | "  \(.key + 1). \($q.label) \(if $q.pr then "#\($q.pr)" else $q.branch end) · \($q.jobs) Job(s)\(if $q.prio then " · vorgezogen" else "" end)\(if $q.runLabel then "" else " · ohne Run-Label" end)\(if $q.stale then " · wartet seit \($q.created | sub("T"; " ") | sub(":[0-9]+Z$"; " UTC"))\(if $q.runStatus == "pending" then ", Lauf pending" else "" end)" else "" end)\t\($q.repo) \($q.run)"),
     (if .mysql then "CI-MySQL: \(.mysql.container)" else empty end),
     (if .mariadb then "CI-MariaDB: \(.mariadb.container)" else empty end),
     (.slice | if . and .cpuPct then "CI gesamt (beadskit-ci.slice): \(.cpuPct) % CPU von \(if .cpus then "\(.cpus * 100) %" else "unbegrenzt" end)" else empty end)'
