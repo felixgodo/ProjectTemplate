@@ -931,6 +931,15 @@ export function parseProjectList(text) {
 }
 
 /**
+ * Projekte, die der Leitstand lädt: die aus projects.txt, davor das eigene Root, wenn es ein
+ * eingerichtetes Projekt ist (mit beads.project.sh). Das Template selbst ist keins und bleibt
+ * ohne Warnung draußen, wenn der Leitstand von dort läuft.
+ */
+export function projectPaths(listed, selfRoot, selfIsProject) {
+  return selfRoot && selfIsProject && !listed.includes(selfRoot) ? [selfRoot, ...listed] : listed;
+}
+
+/**
  * Prüft die Ausgabe von `workers config` und ergänzt Vorgaben; null bei Unbrauchbarem.
  * Eine Config ohne workspaces (beadskit 1.0) bekommt den Workspace code aus ihren Rollen.
  */
@@ -1343,7 +1352,7 @@ function projectRegistry(selfRoot) {
   async function load() {
     let paths = [];
     try { paths = parseProjectList(await readFile(join(CONF_DIR, 'projects.txt'), 'utf8')); } catch { /* noch keine Liste */ }
-    if (selfRoot && !paths.includes(selfRoot)) paths.unshift(selfRoot);
+    paths = projectPaths(paths, selfRoot, !!selfRoot && (await exists(join(selfRoot, 'beads.project.sh'))));
     const list = [];
     for (const root of paths) {
       const cmd = join(root, 'scripts/beadskit/workers');

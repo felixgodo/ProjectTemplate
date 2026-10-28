@@ -72,7 +72,7 @@ rsync -a \
   --exclude '.git/' --exclude '.idea/' --exclude '*.iml' --exclude '.DS_Store' \
   --exclude 'node_modules/' --exclude 'target/' --exclude 'dist/' --exclude '*.tsbuildinfo' \
   --exclude '.dev/' --exclude '/releases/' --exclude '/deploy/deploy.conf' \
-  --exclude '/new-project.sh' --exclude '/devkit-sync.sh' --exclude '/devkit-projects.txt' \
+  --exclude '/new-project.sh' --exclude '/devkit-sync.sh' --exclude '/beadskit-sync.sh' --exclude '/leitstand.sh' --exclude '/devkit-projects.txt' \
   --exclude '/README.md' \
   "$TEMPLATE/" "$DIR/"
 mv "$DIR/README.project.md" "$DIR/README.md"
