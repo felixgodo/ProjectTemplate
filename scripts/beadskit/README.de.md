@@ -151,6 +151,16 @@ sich vorziehen. Erst `runner-pool setup` (Dienst ab 1.7.0), dann die Workflows u
   länger als `STALE` wartet (pool.conf, Vorgabe 1800 s), steht in `status` mit „wartet seit …“ (und
   „Lauf pending“) und im Leitstand als „lange wartend“, auch wenn der Pool nur voll ist. Abgebrochen
   wird nie automatisch: läuft er trotzdem nicht an, `gh run cancel <run-id>`.
+- Zweiter Rechner: `runner-pool setup --host pc` (vom Mac) richtet auf dem PC einen user-Dienst ein,
+  ohne sudo außer einmalig für die Slice (CPUQuota 800 %, MemoryMax 18G) und die Netztrennung
+  (`beadskit-ci-net`: CI-Container erreichen das Internet, aber nicht Rechner, Heimnetz oder Tailnet);
+  den einen sudo-Befehl nennt das Kommando. Jeder Rechner hat einen eigenen Dienst, GitHub ist die
+  gemeinsame Wahrheit: Der Plan zählt die Runner des anderen mit (versorgte Jobs, Grenzen je Projekt),
+  angefasst werden nur eigene. Der Server bleibt die Zentrale und braucht keinen Zugang zum PC; der PC
+  holt je Runde `projects.json`, `prio` und `hosts.json` und legt dort seinen Zustand ab, fällt er aus,
+  läuft der Server allein weiter. `runner-pool drain <host> [--off]` und `size <n> --host <h>`
+  (`/etc/beadskit-ci/hosts.json`): keine neuen Runner, freie enden sofort, laufende Jobs laufen zu Ende.
+  `runner-pool stop` stoppt nur den Dienst auf dem Server.
 - Der Leitstand zeigt im Tab „CI“ (für alle Projekte gleich, Taste 6) die Plätze, je Projekt Runner,
   wartende Jobs, Grenze −/+ und Pausieren/Fortsetzen, die Runner mit Projekt und Job, CPU/RAM, die
   CI-Datenbanken und das Log des Dienstes, mit Plätze −/+ und Pool an/aus. Darunter die
