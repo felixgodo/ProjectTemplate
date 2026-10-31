@@ -85,6 +85,25 @@ test('Text mit Optionen bleibt ein einzelnes Argument', () => {
 
 const NOW = Date.parse('2026-10-16T12:00:00Z');
 
+test('planRunnerAction: Drain und Plätze je Rechner, ungültiger Rechner wird abgelehnt', () => {
+  assert.deepEqual(planRunnerAction({ action: 'drain', host: 'pc' }), ['drain', 'pc']);
+  assert.deepEqual(planRunnerAction({ action: 'drain', host: 'pc', off: true }), ['drain', 'pc', '--off']);
+  assert.deepEqual(planRunnerAction({ action: 'size', n: 3, host: 'pc' }), ['size', '3', '--host', 'pc']);
+  assert.throws(() => planRunnerAction({ action: 'drain' }), /unbekannter Rechner/);
+  for (const host of ['-x', 'P C', 'a;b', '', 7]) assert.throws(() => planRunnerAction({ action: 'drain', host }), /unbekannter Rechner/);
+  assert.throws(() => planRunnerAction({ action: 'size', n: 3, host: '--off' }), /unbekannter Rechner/);
+});
+
+test('parsePool: Rechner und Runner-Herkunft, Ungültiges fällt weg, alter Dienst ohne hosts', () => {
+  const p = parsePool({ hosts: [{ name: 'pc', drain: true, slots: 4, online: true, busy: 2, at: 'x' }, { name: 'A;B' }, null, { name: 'x', slots: 99, busy: -1 }],
+    runners: [{ name: 'pool-pc-a-1-1', host: 'pc', stale: true }] });
+  assert.deepEqual(p.hosts, [{ name: 'pc', drain: true, slots: 4, online: true, busy: 2, at: 'x' },
+    { name: 'x', drain: false, slots: null, online: false, busy: 0, at: null }]);
+  assert.equal(p.runners[0].host, 'pc');
+  assert.equal(p.runners[0].stale, true);
+  assert.deepEqual(parsePool({}).hosts, []);
+});
+
 test('planRunnerAction: Plätze 1–8, Pool und CI-MySQL an/aus, --force nur bei stop mysql', () => {
   assert.deepEqual(planRunnerAction({ action: 'size', n: 3 }), ['size', '3']);
   for (const n of [0, 9, '3', 1.5, undefined]) assert.throws(() => planRunnerAction({ action: 'size', n }), /1–8/);

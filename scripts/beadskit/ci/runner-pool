@@ -8,8 +8,10 @@
 #
 #   runner-pool setup [--dry-run]     Image, Netz, CI-MySQL, Dienst einrichten bzw. aktualisieren
 #   runner-pool set-token             Token von stdin auf den Server (Fine-grained PAT, siehe unten)
+#   runner-pool setup --host <h> [--dry-run]  zweiter Rechner als Satellit (Mac → <h>, siehe unten)
 #   runner-pool status [--json]       Plätze, laufende Runner mit Job, wartende Jobs je Projekt
-#   runner-pool size <n>              Plätze (1–8), gilt ab der nächsten Runde
+#   runner-pool size <n> [--host <h>] Plätze (1–8), gilt ab der nächsten Runde
+#   runner-pool drain <h> [--off]     Rechner auslaufen lassen: keine neuen Runner, freie enden, Jobs laufen zu Ende
 #   runner-pool limit <label> <n|off> Projekt höchstens n Plätze (1–8), off: keine Grenze
 #   runner-pool pause|resume <label>  Projekt bekommt keine neuen Runner (laufende Jobs laufen zu Ende)
 #   runner-pool prio <owner/repo> <run-id> | --off <owner/repo> <run-id> | --clear
@@ -28,6 +30,11 @@
 # (Read and write, für JIT-Runner) und Actions (Read). Er liegt nur auf dem Server
 # (/etc/beadskit-ci/token, 0600). Eingeben: `scripts/beadskit/ci/runner-pool set-token`, dann
 # einfügen und Ctrl-D.
+#
+# Zweiter Rechner: `setup --host pc` installiert dort einen user-Dienst ohne sudo (ssh-Ziel aus
+# HOST_pc_SSH in ~/.config/beadskit/hosts.conf, Token kommt vom Server). Beim ersten Mal bricht es
+# ab und nennt den einen sudo-Befehl für Slice und Netztrennung. Gesteuert wird alles weiter über
+# den Server, auch `status`: der Server braucht keinen Zugang zum Rechner.
 #
 # Einstellungen per Umgebung (Standard): RUNNER_SSH_HOST (server), RUNNER_POOL_SLOTS (4, nur beim
 # ersten setup, danach `size`), RUNNER_CPUS (2) und RUNNER_MEM (6g) je Runner, RUNNER_CI_CPUS (4)
@@ -53,6 +60,10 @@ CONF=/etc/beadskit-ci/pool.conf
 LIMITS=/etc/beadskit-ci/projects.json
 PRIO=/etc/beadskit-ci/prio
 UNIT=beadskit-runner-pool.service
+HOSTS=/etc/beadskit-ci/hosts.json
+RUN_DIR=/run/beadskit-runner-pool
+# Fest, damit die Regeln in beadskit-ci-net genau dieses Netz treffen
+SAT_SUBNET=172.30.77.0/24
 MAX=8
 case $SLOTS_DEFAULT in [1-8]) ;; *) echo "RUNNER_POOL_SLOTS ungültig: '$SLOTS_DEFAULT' (1–8)" >&2; exit 1 ;; esac
 case $CI_CPUS in '' | 0* | *[!0-9]*) echo "RUNNER_CI_CPUS ungültig: '$CI_CPUS' (ganze Zahl ab 1)" >&2; exit 1 ;; esac
@@ -62,7 +73,7 @@ printf '%s' "$MEM" | grep -Eq '^[1-9][0-9]*[kmg]?$' || { echo "RUNNER_MEM ungül
 case $IDLE in '' | *[!0-9]*) echo "RUNNER_POOL_IDLE ungültig: '$IDLE'" >&2; exit 1 ;; esac
 
 usage() {
-  sed -n '9,20s/^# \{0,1\}//p' "$0" >&2
+  sed -n '9,22s/^# \{0,1\}//p' "$0" >&2
   exit 2
 }
 
@@ -87,7 +98,8 @@ projects() {
   done
 }
 
-setup_script() {
+# Aus den Projekt-Zeilen $1: repos, EXTRA_APT, mysql, mariadb; bricht bei ungültigen Werten ab
+read_rows() {
   rows=$1
   repos=$(printf '%s\n' "$rows" | awk -F'\t' 'NF { printf "%s%s:%s", sep, $1, $2; sep = " " }')
   # RUNNER_APT aller Projekte, jedes Paket einmal
@@ -102,6 +114,10 @@ setup_script() {
   for a in $EXTRA_APT; do
     case $a in *[!a-z0-9.+-]*) echo "RUNNER_APT-Paket ungültig: '$a'" >&2; exit 1 ;; esac
   done
+}
+
+setup_script() {
+  read_rows "$1"
   cat <<EOF
 set -euo pipefail
 $(slice_script)
@@ -175,14 +191,148 @@ EOF
   fi
 }
 
+# Satellit $2 (läuft als normaler Nutzer auf dem Rechner). Fehlen Slice oder Netztrennung, legt es
+# root-setup.sh ab und endet mit 3: die braucht einmal sudo, alles andere nicht.
+satellite_script() {
+  read_rows "$1"
+  sat=$2
+  cat <<EOF
+set -euo pipefail
+B=\$HOME/.local/share/beadskit-runner-pool
+C=\$HOME/.config/beadskit/ci
+mkdir -p "\$B" "\$C" "\$HOME/.config/systemd/user"
+cd "\$B"
+cat >root-setup.sh <<'ROOT'
+set -eu
+$(slice_script)
+cat >/usr/local/sbin/beadskit-ci-net <<'NET'
+#!/bin/sh
+# Erzeugt von beadskit ci/runner-pool: CI-Container erreichen das Internet, aber nicht Rechner,
+# Heimnetz oder Tailnet.
+set -eu
+iptables -N BEADSKIT-CI 2>/dev/null || iptables -F BEADSKIT-CI
+iptables -A BEADSKIT-CI -d $SAT_SUBNET -j RETURN
+for n in 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16 100.64.0.0/10 169.254.0.0/16; do
+  iptables -A BEADSKIT-CI -d "\$n" -j REJECT
+done
+iptables -C DOCKER-USER -s $SAT_SUBNET -j BEADSKIT-CI 2>/dev/null || iptables -I DOCKER-USER -s $SAT_SUBNET -j BEADSKIT-CI
+iptables -C INPUT -s $SAT_SUBNET -j REJECT 2>/dev/null || iptables -I INPUT -s $SAT_SUBNET -j REJECT
+NET
+chmod 755 /usr/local/sbin/beadskit-ci-net
+cat >/etc/systemd/system/beadskit-ci-net.service <<'SVC'
+[Unit]
+Description=Netztrennung der CI-Container (beadskit)
+After=docker.service
+Requires=docker.service
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/beadskit-ci-net
+[Install]
+WantedBy=multi-user.target
+SVC
+systemctl daemon-reload
+systemctl enable -q beadskit-ci-net.service
+systemctl restart beadskit-ci-net.service
+ROOT
+if ! systemctl is-active -q beadskit-ci-net.service || ! systemctl cat $SLICE >/dev/null 2>&1; then
+  echo "Einmalig mit sudo auf $sat ausführen, danach setup --host $sat erneut:" >&2
+  echo "  ssh -t $sat sudo bash \$B/root-setup.sh" >&2
+  exit 3
+fi
+cat >Dockerfile <<'DOCKERFILE'
+$(dockerfile)
+DOCKERFILE
+docker build -q -t beadskit-runner:$VERSION -t beadskit-runner:latest . >/dev/null
+docker network inspect beadskit-ci >/dev/null 2>&1 || docker network create --subnet $SAT_SUBNET beadskit-ci >/dev/null
+EOF
+  db_script mysql "$mysql" MYSQL_ROOT_PASSWORD
+  db_script mariadb "$mariadb" MARIADB_ROOT_PASSWORD
+  cat <<EOF
+cat >runner-pool-daemon <<'DAEMON'
+$(cat "$(dirname "$0")/runner-pool-daemon")
+DAEMON
+chmod 755 runner-pool-daemon
+slots=\$(sed -n 's/^SLOTS=\([1-8]\)\$/\1/p' "\$C/pool.conf" 2>/dev/null || true)
+cat >"\$C/pool.conf" <<CONF
+# Erzeugt von beadskit ci/runner-pool setup --host – Plätze ändern: runner-pool size <n> --host $sat
+REPOS="$repos"
+SLOTS=\${slots:-$SLOTS_DEFAULT}
+CPUS=$CPUS
+MEM=$MEM
+IDLE_MAX=$IDLE
+POLL=60
+IMAGE=beadskit-runner:latest
+HOST=$sat
+UPSTREAM=$SSH_HOST
+CONF
+cat >"\$HOME/.config/systemd/user/$UNIT" <<'UNIT'
+# Erzeugt von beadskit ci/runner-pool – nicht von Hand ändern.
+[Unit]
+Description=CI-Runner-Pool (beadskit), Satellit
+After=network-online.target
+
+[Service]
+Environment=POOL_CONF=%h/.config/beadskit/ci/pool.conf POOL_TOKEN_FILE=%h/.config/beadskit/ci/token
+Environment=POOL_STATE=%t/beadskit-runner-pool/state.json POOL_LIMITS=%h/.config/beadskit/ci/projects.json
+Environment=POOL_PRIO=%h/.config/beadskit/ci/prio POOL_HOSTS=%h/.config/beadskit/ci/hosts.json
+ExecStart=%h/.local/share/beadskit-runner-pool/runner-pool-daemon
+Restart=always
+RestartSec=10
+TimeoutStopSec=60
+
+[Install]
+WantedBy=default.target
+UNIT
+systemctl --user daemon-reload
+systemctl --user enable -q $UNIT
+systemctl --user restart $UNIT
+echo "Satellit $sat läuft: \${slots:-$SLOTS_DEFAULT} Plätze"
+EOF
+}
+
+# ssh-Ziel von Rechner $1 aus hosts.conf, sonst sein Name
+host_ssh() {
+  t=$(sed -n "s/^HOST_$1_SSH=//p" "$HOME/.config/beadskit/hosts.conf" 2>/dev/null | tr -d "\"'" | head -n 1)
+  echo "${t:-$1}"
+}
+
+check_host() {
+  case $1 in '' | -* | *[!a-z0-9-]*) echo "Rechner ungültig: '$1'" >&2; exit 2 ;; esac
+}
+
+cmd_setup_host() {
+  sat=$1 dry=$2 target=$(host_ssh "$1")
+  rows=$(projects)
+  [ -n "$rows" ] || { echo "Kein Projekt mit self-hosted-Workflow gefunden." >&2; exit 1; }
+  # Der Rechner trägt mehr als der Server neben Prod, aber Worker, dolt und Leitstand gehen vor
+  CI_CPUS=${RUNNER_CI_CPUS:-8} CI_MEM=${RUNNER_CI_MEM:-18G}
+  if [ -n "$dry" ]; then
+    echo "# ssh $target bash -s"
+    satellite_script "$rows" "$sat"
+    return
+  fi
+  remote 'cat /etc/beadskit-ci/token' | ssh -o BatchMode=yes "$target" \
+    'umask 077 && mkdir -p "$HOME/.config/beadskit/ci" && cat >"$HOME/.config/beadskit/ci/token"'
+  satellite_script "$rows" "$sat" | ssh -o BatchMode=yes "$target" bash -s
+}
+
 cmd_setup() {
-  dry=
-  for a in "$@"; do
-    case $a in
+  dry='' sat=''
+  while [ $# -gt 0 ]; do
+    case $1 in
       --dry-run) dry=1 ;;
+      --host) [ $# -ge 2 ] || usage; sat=$2; shift ;;
       *) usage ;;
     esac
+    shift
   done
+  if [ -n "$sat" ]; then
+    check_host "$sat"
+    [ "$sat" != server ] || usage
+    cmd_setup_host "$sat" "$dry"
+    return
+  fi
   rows=$(projects)
   [ -n "$rows" ] || { echo "Kein Projekt mit self-hosted-Workflow gefunden." >&2; exit 1; }
   if [ -n "$dry" ]; then
@@ -221,15 +371,22 @@ lim=\$(jq -c 'if type == "object" then with_entries(select(.key | test("^[a-z0-9
     paused: (.value.paused == true)}) else {} end' $LIMITS 2>/dev/null || echo '{}')
 pr='[]'
 [ ! -r $PRIO ] || pr=\$(jq -cnR '[inputs | select(test("^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+ [0-9]+\$"))]' $PRIO 2>/dev/null || echo '[]')
+# Rechner: Einstellungen aus der Datei (sofort sichtbar), Zustand der Satelliten aus ihren Ablagen
+sat=\$(cat $RUN_DIR/hosts/*.json 2>/dev/null | jq -cs . 2>/dev/null || echo '[]')
+hc=\$(jq -c 'if type == "object" then . else {} end' $HOSTS 2>/dev/null || echo '{}')
 jq -c --arg svc "\$svc" --arg db "\$db" --arg mdb "\$mdb" --arg slots "\$slots" --argjson tok "\$tok" \\
-  --argjson lim "\$lim" --argjson pr "\$pr" \\
-  '. + {service: \$svc, mysqlState: \$db, mariadbState: \$mdb, slotsConf: (\$slots | tonumber? // null), token: \$tok}
+  --argjson lim "\$lim" --argjson pr "\$pr" --argjson sat "\$sat" --argjson hc "\$hc" \\
+  '. + {service: \$svc, mysqlState: \$db, mariadbState: \$mdb, slotsConf: (\$slots | tonumber? // null), token: \$tok,
+    satellites: \$sat, hostConf: \$hc}
   | if (.limits | type) == "object" then .limits = \$lim else . end
   | if (.queue | type) == "array" then .queue |= map(.prio = ("\\(.repo) \\(.run)" as \$k | any(\$pr[]; . == \$k))) else . end' <<<"\$st"
 EOF
 }
 
-# {service, token, slots, repos, queued {label: n}, queue [{repo, label, run, pr, branch, title, url, jobs, created, prio, runLabel, runStatus, stale}], runners [{name, label, repo, slot, busy, github, job, cpu, mem}],
+# Ab so vielen Sekunden ohne neuen Zustand gilt ein Satellit als offline
+SAT_STALE=90
+
+# {service, token, slots, hosts [{name, drain, slots, online, busy, at}], repos, queued {label: n}, queue [{repo, label, run, pr, branch, title, url, jobs, created, prio, runLabel, runStatus, stale}], runners [{name, host, stale, label, repo, slot, busy, github, job, cpu, mem}],
 #  mysql und mariadb {container, cpu, mem} | null, slice, at}
 cmd_status_json() {
   tmp=$(mktemp)
@@ -239,10 +396,22 @@ cmd_status_json() {
   wait "$upid" || true
   usage=$(jq -c . "$tmp" 2>/dev/null || true)
   rm -f "$tmp"
-  jq -n --argjson s "$st" --argjson u "${usage:-"{}"}" '{
+  jq -n --argjson s "$st" --argjson u "${usage:-"{}"}" --argjson stale "$SAT_STALE" '
+    def online: (now - ((.at // "") | fromdateiso8601? // 0)) < $stale;
+    ($s.hostConf // {}) as $hc
+    | ($s.satellites // [] | map(select(.host)) | map({key: .host, value: .}) | from_entries) as $sat
+    | (($sat | keys) + ($hc | keys) | unique - [$s.host // "server"]) as $names
+    | [($s.runners // [])[] | . + {host: (.host // $s.host // "server"), stale: false,
+        cpu: ($u.containers[.name].cpu // null), mem: ($u.containers[.name].mem // null)}] as $own
+    | [$names[] as $n | ($sat[$n].runners // [])[] | . + {host: $n, stale: ($sat[$n] | online | not)}] as $far
+    | {
     service: $s.service, token: $s.token, slots: ($s.slotsConf // $s.slots // null), at: ($s.at // null),
+    hosts: ([($s.host // "server") as $h | {name: $h, drain: ($hc[$h].drain == true), slots: ($hc[$h].slots // $s.slotsConf // $s.slots // null),
+        online: ($s.service == "active"), busy: ([$own[] | select(.busy)] | length), at: ($s.at // null)}]
+      + [$names[] as $n | {name: $n, drain: ($hc[$n].drain == true), slots: ($hc[$n].slots // $sat[$n].slots // null),
+        online: ($sat[$n] // {} | online), busy: ([$far[] | select(.host == $n and .busy)] | length), at: ($sat[$n].at // null)}]),
     repos: ($s.repos // []), queued: ($s.queued // {}), limits: ($s.limits // null), queue: ($s.queue // []),
-    runners: [($s.runners // [])[] | . + {cpu: ($u.containers[.name].cpu // null), mem: ($u.containers[.name].mem // null)}],
+    runners: ($own + $far),
     mysql: (if ($s.mysqlState // "missing") == "missing" then null
       else {container: $s.mysqlState, cpu: ($u.containers.mysql.cpu // null), mem: ($u.containers.mysql.mem // null)} end),
     mariadb: (if ($s.mariadbState // "missing") == "missing" then null
@@ -253,7 +422,8 @@ cmd_status_json() {
 
 cmd_status() {
   cmd_status_json | jq -r '
-    "Pool: \(.service)\(if .token then "" else " (Token fehlt)" end), \([.runners[] | select(.busy)] | length) von \(.slots // "?") Plätzen mit Job",
+    "Pool: \(.service)\(if .token then "" else " (Token fehlt)" end), \([.runners[] | select(.busy)] | length) von \([.hosts[].slots // 0] | add // 0) Plätzen mit Job",
+    (if (.hosts | length) > 1 or .hosts[0].drain then (.hosts[] | "  Rechner \(.name): \(.busy) von \(.slots // "?")\(if .online then "" else " · offline" end)\(if .drain then " · Drain" else "" end)") else empty end),
     (.runners[] | "  \(.name)\t\(.repo)\t\(if .job then "\(.job.name) · \(.job.branch)" elif .busy then "Job" else "wartet auf Job" end)"),
     ((.limits // {}) | to_entries[] | "  \(.key): \(if .value.paused then "pausiert" elif .value.max then "höchstens \(.value.max) Plätze" else "ohne Grenze" end)"),
     (if (.queued | length) > 0 then "Wartend: \(.queued | to_entries | map("\(.key) \(.value)") | join(", "))" else "Wartend: keine" end),
@@ -264,10 +434,38 @@ cmd_status() {
 }
 
 cmd_size() {
-  [ $# -eq 1 ] || usage
+  [ $# -eq 1 ] || { [ $# -eq 3 ] && [ "$2" = --host ]; } || usage
   case $1 in [1-8]) ;; *) echo "Plätze: 1–$MAX" >&2; exit 2 ;; esac
+  if [ $# -eq 3 ] && [ "$3" != server ]; then
+    set_host "$3" ".slots = $1"
+    echo "Pool: $3 $1 Plätze."
+    return
+  fi
   remote "sed -i 's/^SLOTS=.*/SLOTS=$1/' $CONF && grep -q '^SLOTS=$1\$' $CONF"
   echo "Pool: $1 Plätze."
+}
+
+# Eintrag von Rechner $1 in $HOSTS ändern, $2 jq-Ausdruck. Liegt auf dem Server, auch für Satelliten
+# (die holen ihn sich je Runde). Der Rechner muss bekannt sein, ein Tippfehler soll nicht still wirken.
+set_host() {
+  check_host "$1"
+  remote bash -s <<EOF
+set -eu
+mkdir -p "\$(dirname $HOSTS)"
+cur=\$(jq -c 'if type == "object" then . else {} end' $HOSTS 2>/dev/null || echo '{}')
+[ "$1" = server ] || [ -f $RUN_DIR/hosts/$1.json ] || jq -e --arg h '$1' 'has(\$h)' <<<"\$cur" >/dev/null ||
+  { echo "Rechner '$1' ist nicht im Pool (runner-pool setup --host $1?)" >&2; exit 1; }
+jq --arg h '$1' '.[\$h] = ((.[\$h] // {}) | $2) | with_entries(select(.value | length > 0))' <<<"\$cur" >$HOSTS.tmp
+chmod 644 $HOSTS.tmp && mv $HOSTS.tmp $HOSTS
+EOF
+}
+
+cmd_drain() {
+  case $# in
+    1) set_host "$1" '.drain = true'; echo "Pool: $1 läuft aus, laufende Jobs laufen zu Ende." ;;
+    2) [ "$2" = --off ] || usage; set_host "$1" 'del(.drain)'; echo "Pool: $1 nimmt wieder Jobs." ;;
+    *) usage ;;
+  esac
 }
 
 # Grenze je Projekt in $LIMITS ändern: $1 Label, $2 jq-Ausdruck auf den Eintrag des Labels.
@@ -396,6 +594,7 @@ case $cmd in
     esac
     ;;
   size) cmd_size "$@" ;;
+  drain) cmd_drain "$@" ;;
   limit) cmd_limit "$@" ;;
   pause | resume) cmd_pause "$@" ;;
   prio) cmd_prio "$@" ;;

@@ -398,14 +398,21 @@ export function planWorkerAction({ action, role, name, force, off, counts, thres
 
 const POOL_LABEL_RE = /^[a-z0-9][a-z0-9-]{0,63}$/;
 const POOL_REPO_RE = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
+const POOL_HOST_RE = /^[a-z0-9][a-z0-9-]{0,63}$/;
 
 /**
  * Argumente für scripts/beadskit/ci/runner-pool: Plätze (size 1–8), Dienst an/aus (start/stop ohne
  * n), CI-Datenbank an/aus (n = mysql oder mariadb, stop mit --force trotz laufendem Job) und je
  * Projekt (label) Grenze (limit, n 1–8 oder 'off') und Pause (pause/resume). prio zieht einen Lauf
- * (repo, run) an den Anfang der Warteschlange, mit off nimmt es ihn wieder heraus.
+ * (repo, run) an den Anfang der Warteschlange, mit off nimmt es ihn wieder heraus. drain lässt einen
+ * Rechner (host) auslaufen, mit off nimmt er wieder Jobs; size gilt mit host nur für diesen Rechner.
  */
-export function planRunnerAction({ action, n, force, label, repo, run, off }) {
+export function planRunnerAction({ action, n, force, label, repo, run, off, host }) {
+  if (host !== undefined && !(typeof host === 'string' && POOL_HOST_RE.test(host))) throw new Error('unbekannter Rechner');
+  if (action === 'drain') {
+    if (host === undefined) throw new Error('unbekannter Rechner');
+    return off ? ['drain', host, '--off'] : ['drain', host];
+  }
   if (action === 'prio') {
     if (typeof repo !== 'string' || !POOL_REPO_RE.test(repo)) throw new Error('unbekanntes Repo');
     if (!(Number.isSafeInteger(run) && run > 0)) throw new Error('ungültige Run-ID');
@@ -413,7 +420,7 @@ export function planRunnerAction({ action, n, force, label, repo, run, off }) {
   }
   if (action === 'size') {
     if (!(Number.isInteger(n) && n >= 1 && n <= 8)) throw new Error('Plätze: 1–8');
-    return ['size', String(n)];
+    return host === undefined ? ['size', String(n)] : ['size', String(n), '--host', host];
   }
   if (action === 'limit' || action === 'pause' || action === 'resume') {
     if (typeof label !== 'string' || !POOL_LABEL_RE.test(label)) throw new Error('unbekanntes Projekt-Label');
@@ -433,6 +440,8 @@ export function planRunnerAction({ action, n, force, label, repo, run, off }) {
  * weg. limits ist null, solange der Dienst auf dem Server noch keine Grenzen kennt (setup fehlt).
  * queue: wartende Läufe in der Reihenfolge des Dienstes (vorgezogene zuerst), je Lauf ein Eintrag;
  * stale: wartet seit STALE (Dienst, 30 min) oder länger, runStatus: Status des Laufs bei GitHub.
+ * hosts: Rechner des Pools (Plätze, Drain, erreichbar, belegte Plätze), leer bei altem Dienst. Runner
+ * eines Rechners ohne neuen Zustand tragen stale.
  */
 export function parsePool(d) {
   const job = (j) => (j && typeof j === 'object' ? {
@@ -449,6 +458,16 @@ export function parsePool(d) {
     service: str(o.service, 'missing'),
     token: o.token === true,
     slots: Number.isInteger(o.slots) && o.slots >= 1 && o.slots <= 8 ? o.slots : null,
+    hosts: (Array.isArray(o.hosts) ? o.hosts : [])
+      .filter((h) => h && typeof h.name === 'string' && POOL_HOST_RE.test(h.name))
+      .map((h) => ({
+        name: h.name,
+        drain: h.drain === true,
+        slots: Number.isInteger(h.slots) && h.slots >= 1 && h.slots <= 8 ? h.slots : null,
+        online: h.online === true,
+        busy: Number.isInteger(h.busy) && h.busy > 0 ? h.busy : 0,
+        at: str(h.at, null),
+      })),
     repos: (Array.isArray(o.repos) ? o.repos : [])
       .filter((r) => r && typeof r.repo === 'string' && typeof r.label === 'string')
       .map((r) => ({ repo: r.repo, label: r.label })),
@@ -482,6 +501,8 @@ export function parsePool(d) {
       .filter((r) => r && typeof r.name === 'string' && r.name.startsWith('pool-'))
       .map((r) => ({
         name: r.name,
+        host: str(r.host),
+        stale: r.stale === true,
         label: str(r.label),
         repo: str(r.repo),
         slot: Number(r.slot) || null,

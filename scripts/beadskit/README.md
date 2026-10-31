@@ -162,6 +162,16 @@ switch the workflows: an older service starts runners without the label, and the
   `STALE` (pool.conf, default 1800 s) is flagged in `status` („wartet seit …“, plus „Lauf pending“) and
   in the dashboard („lange wartend“), also when the pool is simply full. It is never cancelled
   automatically: if it still does not start, cancel it with `gh run cancel <run-id>`.
+- Second machine: `runner-pool setup --host pc` (from the Mac) installs a user service on the PC, no
+  sudo except once for the slice (CPUQuota 800 %, MemoryMax 18G) and the network isolation
+  (`beadskit-ci-net`: CI containers reach the internet, not the machine, home network or tailnet); the
+  command prints that one sudo line. Each machine has its own service, GitHub is the shared truth:
+  the plan counts the other machine's runners (covered jobs, per-project limits), but touches only
+  its own. The server stays the centre and needs no access to the PC; the PC fetches `projects.json`,
+  `prio` and `hosts.json` from it every round and stores its state there, and if the PC fails the
+  server carries on alone. `runner-pool drain <host> [--off]` and `size <n> --host <h>`
+  (`/etc/beadskit-ci/hosts.json`): no new runners, idle ones end at once, running jobs finish.
+  `pool stop` only stops the server's service.
 - The Leitstand's „CI“ tab (the same for all projects, key 6) shows the slots; per project the
   runners, waiting jobs, limit −/+ and pause/resume; the runners with project and job, CPU/RAM, the
   CI databases and the service log, with slots −/+ and pool on/off. Below that, the queue of all

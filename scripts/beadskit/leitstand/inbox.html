@@ -90,6 +90,9 @@
   .pooltbl .pname.own b { color: var(--accent); }
   .pooltbl .paused { color: var(--warn); font-weight: 600; }
   .poolsub { margin: 14px 0 8px; font-size: 14px; }
+  .poolhosts { display: flex; flex-direction: column; gap: 6px; margin-bottom: 12px; }
+  .poolhost { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; font-size: 13px; }
+  .poolhost .hbtns { margin-left: auto; display: flex; flex-wrap: wrap; gap: 4px; }
   .poollog summary { cursor: pointer; font-size: 14px; font-weight: 600; margin: 14px 0 8px; }
   .poollog pre { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 11.5px; background: var(--panel);
     border: 1px solid var(--line); border-radius: 10px; padding: 8px 10px; max-height: 420px; overflow: auto; }
@@ -494,6 +497,7 @@
     <h2>CI-Runner-Pool <span class="sub muted" id="runners-n"></span>
       <span id="runners-ctl"></span></h2>
     <p class="muted" style="margin:-4px 0 10px;font-size:13px" id="pool-hint">Ein Pool für alle Projekte: Plätze und an/aus gelten für alle, Grenze und Pause je Projekt. Laufende Jobs laufen immer zu Ende.</p>
+    <div class="poolhosts" id="pool-hosts"></div>
     <div class="pooltbl" id="pool-projects"><span class="muted">lädt …</span></div>
     <h3 class="poolsub">Warteschlange <span class="sub muted" id="pool-queue-n"></span></h3>
     <div class="pqueue" id="pool-queue"><span class="muted">lädt …</span></div>
@@ -1201,9 +1205,11 @@ async function loadPool(force = false) {
   if ($('pool-log').open) loadPoolLog();
 }
 // Übernimmt eine erfolgreiche Aktion sofort in den angezeigten Stand, bis der nächste Abruf ihn bestätigt
-function applyPoolAction(p, { action, n, label, repo, run, off }) {
+function applyPoolAction(p, { action, n, label, repo, run, off, host }) {
   if (!p || p.error) return;
-  if (action === 'size') p.slots = n;
+  const h = (p.hosts || []).find((x) => x.name === host);
+  if (action === 'drain') { if (h) h.drain = !off; } else if (action === 'size' && h) h.slots = n;
+  else if (action === 'size') p.slots = n;
   else if (action === 'start' && n == null) p.service = 'active';
   else if (action === 'stop' && n == null) p.service = 'inactive';
   else if ((action === 'start' || action === 'stop') && p[n]) p[n].container = action === 'start' ? 'running' : 'exited';
@@ -1243,7 +1249,7 @@ function runnerChip(r) {
       <span class="muted">· ${esc(j.branch)}${j.started ? ` · seit ${esc(dur(ms(j.started)))}` : ''}</span></div>`
     : `<div class="job muted">${r.busy ? 'Job läuft' : 'wartet auf einen Job'}</div>`;
   return `<div class="runner on${r.busy ? ' busy' : ''}${own ? '' : ' other'}"><div class="rhead"><span class="dot"></span>
-    <b>${esc(poolName(r.label))}</b><span class="muted" title="${esc(`${r.name} · ${r.repo}`)}">Platz ${esc(r.slot ?? '?')} · ${esc(state)}</span>
+    <b>${esc(poolName(r.label))}</b><span class="muted" title="${esc(`${r.name} · ${r.repo}`)}">${(runners?.hosts?.length || 0) > 1 && r.host ? `${esc(r.host)} · ` : ''}Platz ${esc(r.slot ?? '?')} · ${esc(state)}${r.stale ? ' · alter Stand' : ''}</span>
     ${r.busy ? '<span class="badge warn" title="arbeitet gerade an einem CI-Job">Job</span>' : ''}</div>${job}${use}</div>`;
 }
 // CI-Datenbank (RUNNER_MYSQL bzw. RUNNER_MARIADB): eigene Karte, An/Aus; stop verweigert der Server bei laufendem Job
@@ -1266,6 +1272,21 @@ function sliceText(s) {
   if (!s || s.cpuPct == null) return '';
   const cap = s.cpus != null ? ` von ${Math.round(s.cpus * 100)} %` : ' (ohne Deckel)';
   return ` · CI gesamt ${Math.round(s.cpuPct)} %${cap} CPU, ${gib(s.mem)}`;
+}
+// Je Rechner des Pools: Belegung, Plätze −/+, auslaufen lassen. Im Drain steht dort, ob er schon leer ist.
+function poolHosts(p) {
+  return (p.hosts || []).map((h) => {
+    const name = esc(h.name);
+    const n = h.slots;
+    const state = !h.online ? `<span class="bad" title="${esc(h.at ? `letzter Stand ${clock(h.at)}` : 'noch kein Stand')}">offline</span>`
+      : h.drain ? `<span class="warn-t">${h.busy ? `läuft aus, noch ${h.busy} Job${h.busy > 1 ? 's' : ''}` : 'leer, kann neu starten'}</span>`
+        : `${h.busy} von ${esc(n ?? '?')} Plätzen mit Job`;
+    return `<div class="poolhost"><span class="chip host ${h.online ? '' : 'off'}">${name}</span><span>${state}</span><span class="hbtns">
+      ${Number.isInteger(n) ? `<button class="small" data-ra="size" data-host="${name}" data-n="${n - 1}" ${n > 1 ? '' : 'disabled'} title="Ein Platz weniger auf ${name} (laufende Jobs laufen zu Ende)">− Platz</button>
+      <button class="small" data-ra="size" data-host="${name}" data-n="${n + 1}" ${n < 8 ? '' : 'disabled'} title="Ein Platz mehr auf ${name} (höchstens 8; die CI bleibt im Deckel der Slice)">+ Platz</button>` : ''}
+      <button class="small ${h.drain ? 'on' : ''}" data-ra="drain" data-host="${name}" data-off="${h.drain ? 1 : ''}"
+        title="${h.drain ? `${name} nimmt wieder Jobs` : `Keine neuen Runner auf ${name}, freie enden sofort, laufende Jobs laufen zu Ende`}">${h.drain ? 'Drain · aufheben' : 'auslaufen'}</button></span></div>`;
+  }).join('');
 }
 // Je Projekt im Pool: Runner, wartende Jobs, Grenze −/+ (bis „ohne Grenze“), Pause
 function poolProjects(p) {
@@ -1329,17 +1350,21 @@ function renderRunners() {
   $('tb-ci').textContent = wait || '';
   $('tb-ci').title = wait ? `${wait} CI-Jobs warten auf einen Runner` : '';
   $('ci-line').hidden = !runners;
+  // Plätze aller erreichbaren Rechner; alter Dienst ohne hosts: die des Servers
+  const total = p.hosts?.length ? p.hosts.filter((h) => h.online).reduce((a, h) => a + (h.slots || 0), 0) : p.slots;
   $('ci-line').innerHTML = !runners ? '' : runners.error ? `CI-Runner-Pool: <span class="bad">${esc(runners.error)}</span>`
-    : `CI-Runner-Pool: ${(p.runners || []).filter((r) => r.busy).length} von ${p.slots ?? '?'} Plätzen mit Job${wait ? ` · ${wait} wartend` : ''} · <a href="#" data-goto="ci">Tab CI</a>`;
+    : `CI-Runner-Pool: ${(p.runners || []).filter((r) => r.busy).length} von ${total ?? '?'} Plätzen mit Job${wait ? ` · ${wait} wartend` : ''} · <a href="#" data-goto="ci">Tab CI</a>`;
   if (runners?.error) {
     $('runners').innerHTML = `<span class="msg bad">${esc(runners.error)}</span>`;
     $('runners-n').textContent = '';
     $('runners-ctl').innerHTML = '';
+    $('pool-hosts').innerHTML = '';
     $('pool-projects').innerHTML = '';
     $('pool-queue').innerHTML = '';
     $('pool-queue-n').textContent = '';
     return;
   }
+  $('pool-hosts').innerHTML = runners ? poolHosts(p) : '';
   $('pool-projects').innerHTML = runners ? poolProjects(p) : '<span class="muted">lädt …</span>';
   $('pool-queue').innerHTML = runners ? poolQueue(p) : '<span class="muted">lädt …</span>';
   const nq = p.queue?.length || 0;
@@ -1350,13 +1375,13 @@ function renderRunners() {
   const waitBy = Object.entries(p.queued || {}).map(([l, n]) => `${poolName(l)} ${n}`).join(', ');
   const svc = p.service === 'missing' ? 'nicht eingerichtet' : on ? (p.token ? 'an' : 'an, Token fehlt') : 'aus';
   $('runners-n').textContent = runners
-    ? `${svc} · ${busy} von ${p.slots ?? '?'} Plätzen mit Job${waitBy ? ` · wartend: ${waitBy}` : ''}${sliceText(p.slice)} · Stand ${clock(p.at)}`
+    ? `${svc} · ${busy} von ${total ?? '?'} Plätzen mit Job${waitBy ? ` · wartend: ${waitBy}` : ''}${sliceText(p.slice)} · Stand ${clock(p.at)}`
     : '';
   const n = p.slots;
   $('runners-ctl').innerHTML = !runners || p.service === 'missing' ? ''
-    : `${Number.isInteger(n) ? `<button class="small" data-ra="size" data-n="${n - 1}" ${n > 1 ? '' : 'disabled'} title="Ein Platz weniger (laufende Jobs laufen zu Ende)">− Platz</button>
+    : `${Number.isInteger(n) && !p.hosts?.length ? `<button class="small" data-ra="size" data-n="${n - 1}" ${n > 1 ? '' : 'disabled'} title="Ein Platz weniger (laufende Jobs laufen zu Ende)">− Platz</button>
       <button class="small" data-ra="size" data-n="${n + 1}" ${n < 8 ? '' : 'disabled'} title="Ein Platz mehr (höchstens 8; die CI bleibt im Deckel der Slice)">+ Platz</button>` : ''}
-      ${on ? '<button class="small danger" data-ra="stop" title="Keine neuen Runner starten; laufende Jobs laufen zu Ende">Pool aus</button>'
+      ${on ? '<button class="small danger" data-ra="stop" title="Dienst auf dem Server aus: keine neuen Runner dort; laufende Jobs laufen zu Ende. Andere Rechner einzeln auslaufen lassen.">Pool aus</button>'
         : '<button class="small" data-ra="start">Pool an</button>'}`;
   const chips = [...list.map(runnerChip), ...(p.mysql ? [dbChip(p.mysql, 'mysql', 'CI-MySQL')] : []),
     ...(p.mariadb ? [dbChip(p.mariadb, 'mariadb', 'CI-MariaDB')] : [])];
@@ -1752,15 +1777,16 @@ document.addEventListener('click', async (e) => {
     const repo = ra.dataset.repo || undefined;
     const run = ra.dataset.run ? Number(ra.dataset.run) : undefined;
     const off = !!ra.dataset.off;
+    const host = ra.dataset.host || undefined;
     const ask = force ? 'Job abbrechen?' : action === 'stop' ? `${{ mysql: 'CI-MySQL', mariadb: 'CI-MariaDB' }[n] ?? 'Pool'} aus?`
       : action === 'pause' ? `${poolName(label)} pausieren?` : null;
     if (ask && !armed(ra, ask)) return;
     // ganze Zeile sperren: ein zweiter Klick auf −/+ rechnete sonst mit dem alten Wert
-    const group = [...(ra.closest('.prow, #runners-ctl, .runner, .qrow') || ra.parentElement).querySelectorAll('button[data-ra]')];
+    const group = [...(ra.closest('.prow, .poolhost, #runners-ctl, .runner, .qrow') || ra.parentElement).querySelectorAll('button[data-ra]')];
     for (const b of group) b.disabled = true;
     loadPool.gen++;
     try {
-      const body = { action, n, force, label, repo, run, off };
+      const body = { action, n, force, label, repo, run, off, host };
       const r = await post('/api/pool', body);
       toast(r.output?.split('\n').pop() || 'ok');
       applyPoolAction(runners, body);

@@ -102,7 +102,7 @@ cat "$FX/$key" 2>/dev/null || echo '{}'
   const r = spawnSync('bash', [DAEMON, 'once'], { encoding: 'utf8', env: {
     ...process.env, PATH: `${dir}:${process.env.PATH}`, FX: fx, LOG: log, GH_API: 'https://api.test',
     POOL_CONF: join(dir, 'pool.conf'), POOL_TOKEN_FILE: join(dir, 'token'), POOL_STATE: join(dir, 'state.json'), POOL_LIMITS: join(dir, 'projects.json'),
-    POOL_PRIO: join(dir, 'prio'), ...env,
+    POOL_PRIO: join(dir, 'prio'), ...env, PATH: `${dir}:${env.BIN ? `${env.BIN}:` : ''}${process.env.PATH}`,
   } });
   const out = { ...r, log: readFileSync(log, 'utf8'), state: JSON.parse(readFileSync(join(dir, 'state.json'), 'utf8')) };
   rmSync(dir, { recursive: true, force: true });
@@ -120,7 +120,7 @@ test('Runde: wartender Job → JIT-Runner im Pool-Container mit Slice, Grenzen u
     'repos_o_a_actions_runners_generate-jitconfig': { encoded_jit_config: 'JITCFG' },
   }, 'REPOS="o/a:a"\nSLOTS=2\nCPUS=1.5\nMEM=4g\n');
   assert.equal(r.status, 0, r.stderr);
-  assert.match(r.log, /curl .*-X POST -d \{"name":"pool-a-[0-9]+-1","runner_group_id":1,"labels":\["self-hosted","Linux","X64","a"\]/);
+  assert.match(r.log, /curl .*-X POST -d \{"name":"pool-server-a-[0-9]{10}-1","runner_group_id":1,"labels":\["self-hosted","Linux","X64","a"\]/);
   const run = r.log.split('\n').find((l) => l.startsWith('docker run'));
   assert.ok(run, r.log);
   for (const part of ['--rm', '--cgroup-parent beadskit-ci.slice', '--cpus 1.5', '--memory 4g', '--network beadskit-ci',
@@ -507,3 +507,197 @@ function prioCmd(args, prio, repos = 'o/a:a o/b:b') {
   rmSync(dir, { recursive: true, force: true });
   return out;
 }
+
+// Zwei Rechner: Runner des anderen Rechners tragen Labels, mit Zeitstempel im Namen
+const NOW = 2_000_000_000;
+const two = { ...base, now: NOW, host: 'server' };
+const pcRunner = (over = {}) => ({ repo: 'o/a', name: `pool-pc-a-${NOW - 10}-1`, status: 'online', busy: false, id: 9,
+  labels: ['self-hosted', 'Linux', 'X64', 'a', 'run-5'], ...over });
+
+test('plan: freier Runner des anderen Rechners versorgt den Job seines Laufs, einen anderen nicht', () => {
+  assert.deepEqual(plan({ ...two, queued: [rjob('o/a', 'a', '1', 5)], runners: [pcRunner()] }).start, []);
+  assert.deepEqual(plan({ ...two, queued: [rjob('o/a', 'a', '1', 4)], runners: [pcRunner()] }).start,
+    [{ repo: 'o/a', label: 'a', slot: 1, run: 'run-4' }]);
+  // beschäftigt: versorgt nichts
+  assert.equal(plan({ ...two, queued: [rjob('o/a', 'a', '1', 5)], runners: [pcRunner({ busy: true })] }).start.length, 1);
+});
+
+test('plan: gerade registrierter Runner des anderen Rechners zählt, einer vom abgestürzten Rechner nicht', () => {
+  const fresh = pcRunner({ status: 'offline' });
+  assert.deepEqual(plan({ ...two, queued: [rjob('o/a', 'a', '1', 5)], runners: [fresh] }).start, []);
+  const dead = pcRunner({ status: 'offline', name: `pool-pc-a-${NOW - 500}-1` });
+  assert.equal(plan({ ...two, queued: [rjob('o/a', 'a', '1', 5)], runners: [dead] }).start.length, 1);
+});
+
+test('plan: Grenze je Projekt gilt über beide Rechner', () => {
+  const p = plan({ ...two, limits: { a: { max: 1 } }, queued: [rjob('o/a', 'a', '1', 4)], runners: [pcRunner({ busy: true })] });
+  assert.deepEqual(p.start, []);
+});
+
+test('plan: ohne Grenze deckeln nur die eigenen Plätze, nicht die Runner des anderen Rechners', () => {
+  const q = [4, 6, 7, 8, 9].map((r) => rjob('o/a', 'a', String(r), r));
+  const busy = [1, 2, 3].map((k) => pcRunner({ busy: true, name: `pool-pc-a-${NOW - 10}-${k}`, id: k }));
+  assert.equal(plan({ ...two, queued: q, runners: busy }).start.length, 4);
+});
+
+test('plan: fremde offline-Runner werden nie vergessen, eigene schon', () => {
+  const p = plan({ ...two, runners: [
+    pcRunner({ status: 'offline', name: 'pool-pc-a-1000000000-1', id: 1 }),
+    { repo: 'o/a', name: 'pool-server-a-1000000000-1', status: 'offline', busy: false, id: 2 },
+  ] });
+  assert.deepEqual(p.forget, [{ repo: 'o/a', id: 2, name: 'pool-server-a-1000000000-1' }]);
+});
+
+test('plan: Drain startet nichts, beendet freie Runner sofort und lässt belegte laufen', () => {
+  const p = plan({ ...two, drain: true, queued: [rjob('o/a', 'a', '1', 7)],
+    containers: [
+      { name: 'pool-server-a-1-1', label: 'a', repo: 'o/a', slot: '1', started: NOW - 5 },
+      { name: 'pool-server-a-1-2', label: 'a', repo: 'o/a', slot: '2', started: 1 },
+    ],
+    runners: [
+      { repo: 'o/a', name: 'pool-server-a-1-1', status: 'online', busy: false, id: 1 },
+      { repo: 'o/a', name: 'pool-server-a-1-2', status: 'online', busy: true, id: 2 },
+    ] });
+  assert.deepEqual(p.start, []);
+  assert.deepEqual(p.stop, [{ name: 'pool-server-a-1-1', repo: 'o/a', id: 1 }]);
+});
+
+const qfx = {
+  'repos_o_a_actions_runs': { workflow_runs: [{ id: 11, head_branch: 'x', display_title: 'X' }] },
+  'repos_o_a_actions_runs_11_jobs': { jobs: [{ status: 'queued', labels: ['self-hosted', 'a', 'run-11'], created_at: '2026-10-25T10:00:00Z' }] },
+  'repos_o_a_actions_runners': { runners: [] },
+  'repos_o_a_actions_runners_generate-jitconfig': { encoded_jit_config: 'JITCFG' },
+};
+
+test('Runde: hosts.json setzt Plätze und Drain nur für den eigenen Rechner, Name trägt den Rechner', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'runner-pool-h-'));
+  const file = join(dir, 'hosts.json');
+  writeFileSync(file, '{"server":{"drain":true},"pc":{"slots":3}}');
+  const drained = round(qfx, 'REPOS="o/a:a"\nSLOTS=2\n', undefined, { POOL_HOSTS: file });
+  assert.ok(!drained.log.includes('docker run'), drained.log);
+  assert.equal(drained.state.drain, true);
+  const pc = round(qfx, 'REPOS="o/a:a"\nSLOTS=2\nHOST=pc\n', undefined, { POOL_HOSTS: file });
+  assert.match(pc.log, /docker run .*--name pool-pc-a-[0-9]{10}-1 /);
+  assert.equal(pc.state.slots, 3);
+  assert.equal(pc.state.host, 'pc');
+  assert.equal(pc.state.drain, false);
+  // kaputte Datei: keine Einschränkung
+  writeFileSync(file, 'kaputt');
+  assert.ok(round(qfx, 'REPOS="o/a:a"\nSLOTS=2\n', undefined, { POOL_HOSTS: file }).log.includes('docker run'));
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test('Runde: Satellit holt Steuerdateien, legt seinen Zustand ab und räumt prio nicht auf', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'runner-pool-u-'));
+  const bin = join(dir, 'bin');
+  mkdirSync(bin);
+  writeFileSync(join(bin, 'ssh'), `#!/bin/bash
+echo "ssh $*" >>"$SSHLOG"
+case "$*" in
+  *mkdir*) cat >"$PUSHED" ;;
+  *) [ -z "$SSH_DOWN" ] || exit 255
+     printf '{"a":{"max":2}}\\n\\n---\\no/a 999\\n---\\n{"pc":{"drain":true}}\\n' ;;
+esac
+`);
+  chmodSync(join(bin, 'ssh'), 0o755);
+  const env = { BIN: bin, SSHLOG: join(dir, 'ssh.log'), PUSHED: join(dir, 'pushed.json'),
+    POOL_LIMITS: join(dir, 'projects.json'), POOL_PRIO: join(dir, 'prio'), POOL_HOSTS: join(dir, 'hosts.json') };
+  const conf = 'REPOS="o/a:a"\nSLOTS=2\nHOST=pc\nUPSTREAM=server\n';
+  const r = round(qfx, conf, undefined, env);
+  assert.equal(r.status, 0, r.stderr);
+  assert.ok(!r.log.includes('docker run'), 'Drain der Zentrale gilt auf dem Satelliten');
+  assert.deepEqual(JSON.parse(readFileSync(join(dir, 'pushed.json'), 'utf8')).limits, { a: { max: 2, paused: false } });
+  assert.equal(readFileSync(join(dir, 'prio'), 'utf8'), 'o/a 999\n');
+  // Zentrale weg: letzte Kopie gilt weiter, die Runde läuft durch
+  const down = round(qfx, conf, undefined, { ...env, SSH_DOWN: '1' });
+  assert.equal(down.status, 0, down.stderr);
+  assert.ok(!down.log.includes('docker run'), 'letzte Kopie (Drain) gilt');
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test('setup --host: user-Dienst, Satellit-Konfiguration, Netztrennung, kein Schreiben nach /etc außer im root-Teil', () => {
+  const { dir, paths } = projects([{ slug: 'spot', repo: 'o/spot', mysql: '8.0' }]);
+  const r = spawnSync('sh', [POOL, 'setup', '--host', 'pc', '--dry-run'], { encoding: 'utf8',
+    env: { ...process.env, POOL_PROJECTS: paths.join(' '), HOME: dir } });
+  rmSync(dir, { recursive: true, force: true });
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout, /\nHOST=pc\nUPSTREAM=server\n/);
+  assert.match(r.stdout, /\nPOLL=60\n/);
+  assert.match(r.stdout, /CPUQuota=800%/);
+  assert.match(r.stdout, /MemoryMax=18G/);
+  assert.match(r.stdout, /docker network create --subnet 172\.30\.77\.0\/24 beadskit-ci/);
+  assert.match(r.stdout, /iptables -A BEADSKIT-CI -d "\$n" -j REJECT/);
+  assert.match(r.stdout, /systemctl --user restart beadskit-runner-pool\.service/);
+  assert.equal(spawnSync('bash', ['-n'], { input: r.stdout.replace(/^# ssh.*\n/, '') }).status, 0);
+  const user = r.stdout.slice(r.stdout.indexOf('\nROOT\n'));
+  assert.doesNotMatch(user, /cat >\/etc\//);
+});
+
+test('drain und size --host prüfen ihre Eingaben, bevor sie den Server ansprechen', () => {
+  for (const args of [['drain'], ['drain', 'pc', 'x'], ['drain', 'P;c'], ['drain', '-x'], ['size', '3', '--host', 'A b'], ['size', '3', 'pc']]) {
+    const r = poolCmd(args);
+    assert.equal(r.status, 2, args.join(' '));
+  }
+  assert.equal(spawnSync('sh', [POOL, 'setup', '--host', 'server', '--dry-run'], { encoding: 'utf8' }).status, 2);
+});
+
+function hostCmd(args, { hosts, known } = {}) {
+  const dir = mkdtempSync(join(tmpdir(), 'runner-pool-d-'));
+  const etc = join(dir, 'etc');
+  const run = join(dir, 'run');
+  mkdirSync(etc);
+  mkdirSync(join(run, 'hosts'), { recursive: true });
+  if (hosts !== undefined) writeFileSync(join(etc, 'hosts.json'), hosts);
+  if (known) writeFileSync(join(run, 'hosts', `${known}.json`), '{}');
+  writeFileSync(join(dir, 'ssh'), `#!/bin/bash\nsed -e "s#/etc/beadskit-ci#$ETC#g" -e "s#/run/beadskit-runner-pool#$RUN#g" | bash -s\n`);
+  chmodSync(join(dir, 'ssh'), 0o755);
+  const r = spawnSync('sh', [POOL, ...args], { encoding: 'utf8', env: { ...process.env, PATH: `${dir}:${process.env.PATH}`, ETC: etc, RUN: run } });
+  let file = null;
+  try { file = JSON.parse(readFileSync(join(etc, 'hosts.json'), 'utf8')); } catch { /* fehlt */ }
+  rmSync(dir, { recursive: true, force: true });
+  return { ...r, file };
+}
+
+test('drain und size --host schreiben hosts.json, unbekannte Rechner werden abgelehnt', () => {
+  assert.deepEqual(hostCmd(['drain', 'pc'], { known: 'pc' }).file, { pc: { drain: true } });
+  assert.deepEqual(hostCmd(['drain', 'server']).file, { server: { drain: true } });
+  assert.deepEqual(hostCmd(['drain', 'pc', '--off'], { hosts: '{"pc":{"drain":true,"slots":3}}' }).file, { pc: { slots: 3 } });
+  assert.deepEqual(hostCmd(['drain', 'pc', '--off'], { hosts: '{"pc":{"drain":true}}' }).file, {});
+  assert.deepEqual(hostCmd(['size', '6', '--host', 'pc'], { known: 'pc' }).file, { pc: { slots: 6 } });
+  const typo = hostCmd(['drain', 'pcc']);
+  assert.equal(typo.status, 1);
+  assert.match(typo.stderr, /nicht im Pool/);
+});
+
+test('status --json: Rechner mit Drain sofort aus der Datei, Satellit offline nach 90 s, Runner zusammengeführt', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'runner-pool-t-'));
+  const etc = join(dir, 'etc');
+  const run = join(dir, 'run');
+  mkdirSync(etc);
+  mkdirSync(join(run, 'hosts'), { recursive: true });
+  writeFileSync(join(etc, 'pool.conf'), 'REPOS="o/a:a"\nSLOTS=3\n');
+  writeFileSync(join(etc, 'hosts.json'), '{"pc":{"drain":true,"slots":5}}');
+  writeFileSync(join(etc, 'beadskit-runner-pool.service'), '');
+  const iso = (ago) => new Date(Date.now() - ago * 1000).toISOString().replace(/\.\d+Z$/, 'Z');
+  writeFileSync(join(run, 'state.json'), JSON.stringify({ at: iso(1), host: 'server', slots: 3,
+    runners: [{ name: 'pool-server-a-1-1', busy: true, label: 'a' }] }));
+  const pc = (ago) => JSON.stringify({ at: iso(ago), host: 'pc', slots: 4, runners: [{ name: 'pool-pc-a-1-1', busy: true, label: 'a', cpu: 50, mem: 1024 }] });
+  writeFileSync(join(dir, 'ssh'), `#!/bin/bash\nsed -e "s#/etc/systemd/system#$ETC#g" -e "s#/etc/beadskit-ci#$ETC#g" -e "s#/run/beadskit-runner-pool#$RUN#g" | bash -s\n`);
+  for (const f of ['docker', 'systemctl']) writeFileSync(join(dir, f), '#!/bin/sh\n[ "$1 $2" = "is-active beadskit-runner-pool.service" ] && echo active\nexit 0\n');
+  for (const f of ['ssh', 'docker', 'systemctl']) chmodSync(join(dir, f), 0o755);
+  const status = () => {
+    const r = spawnSync('sh', [POOL, 'status', '--json'], { encoding: 'utf8', env: { ...process.env, PATH: `${dir}:${process.env.PATH}`, ETC: etc, RUN: run } });
+    assert.equal(r.status, 0, r.stderr);
+    return JSON.parse(r.stdout);
+  };
+  writeFileSync(join(run, 'hosts', 'pc.json'), pc(5));
+  const s = status();
+  assert.deepEqual(s.hosts.map((h) => [h.name, h.drain, h.slots, h.online, h.busy]), [['server', false, 3, true, 1], ['pc', true, 5, true, 1]]);
+  assert.deepEqual(s.runners.map((r) => [r.name, r.host, r.stale, r.cpu]),
+    [['pool-server-a-1-1', 'server', false, null], ['pool-pc-a-1-1', 'pc', false, 50]]);
+  writeFileSync(join(run, 'hosts', 'pc.json'), pc(120));
+  const off = status();
+  assert.equal(off.hosts[1].online, false);
+  assert.equal(off.runners[1].stale, true);
+  rmSync(dir, { recursive: true, force: true });
+});
