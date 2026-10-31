@@ -622,7 +622,7 @@ test('setup --host: user-Dienst, Satellit-Konfiguration, Netztrennung, kein Schr
   rmSync(dir, { recursive: true, force: true });
   assert.equal(r.status, 0, r.stderr);
   assert.match(r.stdout, /\nHOST=pc\nUPSTREAM=server\n/);
-  assert.match(r.stdout, /\nPOLL=30\n/);
+  assert.match(r.stdout, /\nPOLL=60\n/);
   assert.match(r.stdout, /CPUQuota=800%/);
   assert.match(r.stdout, /MemoryMax=18G/);
   assert.match(r.stdout, /docker network create --subnet 172\.30\.77\.0\/24 beadskit-ci/);
