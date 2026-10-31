@@ -179,7 +179,7 @@ PLAN=$RANK'
       ($j | {label: .label, run: .runLabel} | key) as $k
       | if (.idle[$k] // 0) > 0 then .idle[$k] -= 1
       elif $lim[$j.label].paused == true then .
-      elif (.per[$j.label] // 0) >= ($lim[$j.label].max // $s.slots) then .
+      elif $lim[$j.label].max != null and (.per[$j.label] // 0) >= $lim[$j.label].max then .
       elif (.free | length) > 0 then .start += [{repo: $j.repo, label: $j.label, slot: .free[0]}
           + (if $j.runLabel then {run: $j.runLabel} else {} end)] | .free = .free[1:]
         | .per[$j.label] += 1

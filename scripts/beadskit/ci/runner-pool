@@ -237,7 +237,7 @@ systemctl restart beadskit-ci-net.service
 ROOT
 if ! systemctl is-active -q beadskit-ci-net.service || ! systemctl cat $SLICE >/dev/null 2>&1; then
   echo "Einmalig mit sudo auf $sat ausführen, danach setup --host $sat erneut:" >&2
-  echo "  ssh -t \$(hostname -s) sudo bash \$B/root-setup.sh" >&2
+  echo "  ssh -t $sat sudo bash \$B/root-setup.sh" >&2
   exit 3
 fi
 cat >Dockerfile <<'DOCKERFILE'

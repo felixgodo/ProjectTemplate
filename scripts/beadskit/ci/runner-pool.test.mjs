@@ -534,6 +534,12 @@ test('plan: Grenze je Projekt gilt über beide Rechner', () => {
   assert.deepEqual(p.start, []);
 });
 
+test('plan: ohne Grenze deckeln nur die eigenen Plätze, nicht die Runner des anderen Rechners', () => {
+  const q = [4, 6, 7, 8, 9].map((r) => rjob('o/a', 'a', String(r), r));
+  const busy = [1, 2, 3].map((k) => pcRunner({ busy: true, name: `pool-pc-a-${NOW - 10}-${k}`, id: k }));
+  assert.equal(plan({ ...two, queued: q, runners: busy }).start.length, 4);
+});
+
 test('plan: fremde offline-Runner werden nie vergessen, eigene schon', () => {
   const p = plan({ ...two, runners: [
     pcRunner({ status: 'offline', name: 'pool-pc-a-1000000000-1', id: 1 }),
