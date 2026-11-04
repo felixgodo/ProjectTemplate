@@ -717,11 +717,13 @@ function renderHead() {
   }).join('')}
     <label class="small muted" style="font-size:12.5px" title="Rechner für „starten“ und +1">Neue auf
       <select id="start-host">${hosts().map((h) => `<option value="${esc(h.name)}" ${h.name === startHost() ? 'selected' : ''} ${h.ok ? '' : 'disabled'}>${esc(h.name)}</option>`).join('')}</select></label>` : '';
+  const modelHtml = models().length ? `<label class="small muted" style="font-size:12.5px" title="Claude-Modell für „starten“ und +1; Neustarts behalten das Modell des Workers">Modell
+      <select id="start-model">${models().map((m) => `<option value="${esc(m.id)}" ${m.id === startModel() ? 'selected' : ''}>${esc(m.label)}</option>`).join('')}</select></label>` : '';
   const ar = st.autorestart || {};
   const recent = (ar.recent || []).map((x) => `${clock(x.at)} ${x.name} (${ktok(x.tokens)}): ${x.ok ? 'neu gestartet' : 'verweigert'}`).join('\n');
   const opts = [0, 150_000, 200_000, 300_000, 400_000, 600_000];
   if (ar.threshold && !opts.includes(ar.threshold)) opts.push(ar.threshold);
-  const html = `${slot}${hostHtml}
+  const html = `${slot}${hostHtml}${modelHtml}
     <button class="small ${d.all ? 'on' : ''}" data-wa="drain" data-role="all" data-off="${d.all ? 1 : ''}"
       title="${d.all ? 'Drain für alle aufheben' : 'Alle Worker auslaufen lassen: laufenden Schritt fertig, nichts Neues claimen'}">
       ${d.all ? 'Drain aktiv · aufheben' : 'Alle auslaufen lassen'}</button>
@@ -747,8 +749,18 @@ function startHost() {
   return ok.find((x) => x.name === h)?.name ?? ok.find((x) => x.leader)?.name ?? ok[0]?.name ?? null;
 }
 
+// Claude-Modell für neue Worker ('' = Standard von Claude Code); Liste vom Server
+const models = () => st?.models || [];
+function startModel() {
+  let m = null;
+  try { m = localStorage.getItem('leitstand-model'); } catch { /* nur Komfort */ }
+  return models().some((x) => x.id === m) ? m : '';
+}
+const modelLabel = () => models().find((x) => x.id === startModel())?.label;
+
 function openStart() {
   const sh = startHost();
+  const sm = startModel();
   // Anzahl je Rechner: start zählt die Worker des Rechners, auf dem er läuft
   const have = (r) => st?.workers.filter((w) => w.role === r && (!sh || w.host === sh)).length || 0;
   const def = meta().defaults;
@@ -758,7 +770,8 @@ function openStart() {
       <p class="muted" style="margin:0;font-size:13px">Anzahl ist die <b>Gesamtzahl</b> je Rolle (${esc(r0)}-1 … ${esc(r0)}-N);
         laufende Worker werden übersprungen. <code>start</code> hebt einen aktiven Drain auf${st.workspace === 'code' ? '' : ` (nur für ${esc(meta().label)})`}.
         ${sh ? `Startet auf <b>${esc(sh)}</b> (oben unter „Neue auf“ wählbar), als Terminal-Fenster (Mac: iTerm-Tab, Linux: tmux-Fenster).`
-    : 'Die Worker öffnen sich als Tabs in iTerm auf dem Mac (ohne iTerm-Freigabe im Hintergrund).'}</p>
+    : 'Die Worker öffnen sich als Tabs in iTerm auf dem Mac (ohne iTerm-Freigabe im Hintergrund).'}
+        Modell: <b>${esc(sm ? modelLabel() : 'Standard')}</b> (oben unter „Modell“ wählbar).</p>
       <div class="inline">${ROLES.map((r) => `<label>${esc(ROLE_LABEL[r])} <span class="muted">(läuft: ${have(r)})</span>
         <input type="number" name="${esc(r)}" min="0" max="8" value="${Math.max(have(r), def[r] ?? 0)}"></label>`).join('')}</div>
       <div class="actions"><button class="primary" type="submit">Starten</button><span class="msg" id="s-msg"></span></div>
@@ -1755,6 +1768,7 @@ document.addEventListener('click', async (e) => {
     const body = { action: wa.dataset.wa, role: wa.dataset.role, off: !!wa.dataset.off, ws: st?.workspace };
     if (wa.dataset.host) body.host = wa.dataset.host;
     else if (body.action === 'add' && startHost()) body.host = startHost();
+    if (body.action === 'add' && startModel()) body.model = startModel();
     if (body.action === 'add' && !armed(wa, `${body.role} starten?`)) return;
     wa.disabled = true;
     try {
@@ -1890,6 +1904,11 @@ document.addEventListener('change', (e) => {
   if (e.target.id === 'i-prio' && drawer?.kind === 'issue') {
     issueAction(drawer.id, { action: 'priority', value: Number(e.target.value) }, `${drawer.id}: Priorität P${e.target.value}`);
   }
+  if (e.target.id === 'start-model') {
+    try { localStorage.setItem('leitstand-model', e.target.value); } catch { /* nur Komfort */ }
+    keys.controls = '';
+    renderHead();
+  }
   if (e.target.id === 'start-host') {
     try { localStorage.setItem('leitstand-host', e.target.value); } catch { /* nur Komfort */ }
     keys.controls = '';
@@ -1930,7 +1949,7 @@ document.addEventListener('submit', async (e) => {
     const msg = $('s-msg');
     msg.className = 'msg'; msg.textContent = 'startet …';
     try {
-      const r = await post('/api/workers', { action: 'start', ws: st.workspace, counts, ...(startHost() ? { host: startHost() } : {}) });
+      const r = await post('/api/workers', { action: 'start', ws: st.workspace, counts, ...(startHost() ? { host: startHost() } : {}), ...(startModel() ? { model: startModel() } : {}) });
       toast(r.output || 'gestartet'); closeDrawer(); await reload();
     } catch (err) { msg.className = 'msg bad'; msg.textContent = err.message; }
     return;
