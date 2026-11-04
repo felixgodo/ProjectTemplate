@@ -4,15 +4,15 @@
 # der beads-Actor (bdw). Rollen gehören zu einem Workspace: code (BK_ROLES) und die weiteren
 # aus BK_WORKSPACES in beads.project.sh.
 #
-#   workers start [--ws <ws>] [<rolle>=N …] [--term iterm|tmux|bg] [--model <id>] [--dry-run]   Workspace starten
-#   workers add <rolle>[=N] … [--ws <ws>] [--term …] [--model <id>] [--dry-run]   N weitere Worker (Standard 1)
+#   workers start [--ws <ws>] [<rolle>=N …] [--term iterm|tmux|bg] [--model <id>] [--rc|--no-rc] [--dry-run]   Workspace starten
+#   workers add <rolle>[=N] … [--ws <ws>] [--term …] [--model <id>] [--rc|--no-rc] [--dry-run]   N weitere Worker (Standard 1)
 #   workers ls [--ws <ws>]      Worker dieses Repos mit Rolle und Status
 #   workers attach <name>       Worker in diesem Terminal öffnen (Hintergrund oder tmux-Fenster)
 #   workers logs <name>         letzte Ausgabe eines Hintergrund-Workers
 #   workers drain [rolle…] [--ws <ws>] [--host <h>] [--off]   Worker (alle, Rollen, Workspace, Rechner) auslaufen lassen
 #   workers drain-check [rolle]   DRAIN, wenn dieser Worker auslaufen soll (Rolle sonst aus dem Worktree)
 #   workers stop <name>|--all [--force]   Worker sofort stoppen (Hintergrund und Terminal)
-#   workers restart <name> [--force] [--term …] [--dry-run]   Worker mit frischem Kontext neu starten (behält --model)
+#   workers restart <name> [--force] [--term …] [--dry-run]   Worker mit frischem Kontext neu starten (behält --model, --rc)
 #   workers autorestart [--over 200k] [--off]   Leitstand startet große Kontexte selbst neu
 #   workers send <name> [--] <text>   Nachricht oder /befehl in das Terminal eines Workers tippen
 #   workers screen <name> [--lines N]   Bildschirm des Terminals eines Workers (z. B. eine Rückfrage)
@@ -76,6 +76,8 @@ BK_MODULES=""
 BK_START="fix=2 search=1 verify=1 regress=0"
 BK_WORKSPACES=""
 BK_REPOS=""
+# 1 = Worker im Terminal mit Remote Control (claude.ai/code, Claude-App); Umgebung oder beads.project.sh
+BK_REMOTE_CONTROL=${BK_REMOTE_CONTROL:-0}
 if [ ! -f "$ROOT/beads.project.sh" ]; then
   echo "beads.project.sh fehlt in $ROOT (Einrichtung: ProjectTemplate/beadskit-sync.sh --adopt)" >&2
   exit 1
@@ -310,8 +312,31 @@ model_of_pid() {
   }'
 }
 
+# Remote Control (--rc, BK_REMOTE_CONTROL=1): die Session erscheint auf claude.ai/code und in der
+# Claude-App als <slug>-<name> und lässt sich dort lesen, anschreiben und Rückfragen beantworten.
+# Nur für Worker im Terminal; --bg-Sessions starten ohne.
+rc=""
+check_rc() {
+  case $rc in
+    0|1) ;;
+    *) echo "BK_REMOTE_CONTROL muss 0 oder 1 sein, nicht: $rc" >&2; exit 2 ;;
+  esac
+}
+# " --remote-control <slug>-<name>" für die Startzeile, leer ohne; nur a-z0-9-, weil die Zeile getippt wird
+rc_opt() {
+  [ "$rc" = 1 ] || return 0
+  printf ' --remote-control %s' "$(printf '%s-%s' "$BK_SLUG" "$1" | tr -cs 'a-z0-9-' '-')"
+}
+# 1, wenn der Prozess $1 mit --remote-control läuft, sonst 0
+rc_of_pid() {
+  case " $(ps -o args= -p "$1" 2>/dev/null) " in
+    *" --remote-control "*|*" --remote-control="*) echo 1 ;;
+    *) echo 0 ;;
+  esac
+}
+
 # Startbefehl im Terminal (Shell des Tabs bzw. tmux-Fensters)
-term_cmd() { printf '%s\n' "cd '$ROOT' && claude -w $2 -n $2$(model_opt) '$(prompt_for "$1")'"; }
+term_cmd() { printf '%s\n' "cd '$ROOT' && claude -w $2 -n $2$(model_opt)$(rc_opt "$2") '$(prompt_for "$1")'"; }
 
 usage() {
   sed -n '7,22s/^# \{0,1\}//p' "$0" >&2
@@ -393,7 +418,7 @@ check_term() {
 parse_args() {
   [ "${npm_config_bg-}" = true ] && term='bg'
   [ "${npm_config_dry_run-}" = true ] && dry=1
-  given="" ws=""
+  given="" ws="" rc=$BK_REMOTE_CONTROL
   while [ $# -gt 0 ]; do
     case $1 in
       --iterm) term=iterm ;;
@@ -406,6 +431,8 @@ parse_args() {
       --ws=*) ws=${1#*=} ;;
       --model) [ $# -ge 2 ] || usage; model=$2; shift ;;
       --model=*) model=${1#*=} ;;
+      --rc) rc=1 ;;
+      --no-rc) rc=0 ;;
       *=*) set_count "${1%%=*}" "${1#*=}" ;;
       *)
         [ "$bare" = 1 ] || { echo "unbekanntes Argument: $1" >&2; usage; }
@@ -416,6 +443,7 @@ parse_args() {
   done
   check_term
   check_model
+  check_rc
   [ -z "$ws" ] || is_ws "$ws" || { echo "unbekannter Workspace: $ws ($WORKSPACES)" >&2; exit 2; }
 }
 
@@ -451,10 +479,13 @@ launch() {
     queued="$queued$role $name
 "
     if [ "$dry" = 1 ]; then
-      if [ "$term" = tmux ]; then echo "tmux-Fenster $name: claude -w $name -n $name$(model_opt) '$prompt'"
-      else echo "iTerm-Tab $name: claude -w $name -n $name$(model_opt) '$prompt'"; fi
+      if [ "$term" = tmux ]; then echo "tmux-Fenster $name: claude -w $name -n $name$(model_opt)$(rc_opt "$name") '$prompt'"
+      else echo "iTerm-Tab $name: claude -w $name -n $name$(model_opt)$(rc_opt "$name") '$prompt'"; fi
     fi
-  elif [ "$dry" = 1 ]; then
+    return 0
+  fi
+  [ "$rc" != 1 ] || echo "Hinweis: $name läuft im Hintergrund, ohne Remote Control (nur im Terminal)" >&2
+  if [ "$dry" = 1 ]; then
     echo "(cd '$ROOT' && claude --bg -w $name -n $name$(model_opt) '$prompt')"
   else
     echo "starte $name ($prompt${model:+, $model})"
@@ -1034,6 +1065,8 @@ cmd_restart() {
   # dasselbe Modell wie bisher
   model=$(model_of_pid "$pid")
   check_model
+  # und Remote Control wie bisher
+  rc=$(rc_of_pid "$pid")
   if drain_all || mark_has "drain-$role"; then
     echo "Drain aktiv für $role: $target hört ohnehin auf, kein Neustart" >&2
     exit 1
