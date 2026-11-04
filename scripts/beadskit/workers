@@ -4,15 +4,15 @@
 # der beads-Actor (bdw). Rollen gehören zu einem Workspace: code (BK_ROLES) und die weiteren
 # aus BK_WORKSPACES in beads.project.sh.
 #
-#   workers start [--ws <ws>] [<rolle>=N …] [--term iterm|tmux|bg] [--dry-run]   Workspace starten
-#   workers add <rolle>[=N] … [--ws <ws>] [--term …] [--dry-run]   N weitere Worker (Standard 1)
+#   workers start [--ws <ws>] [<rolle>=N …] [--term iterm|tmux|bg] [--model <id>] [--dry-run]   Workspace starten
+#   workers add <rolle>[=N] … [--ws <ws>] [--term …] [--model <id>] [--dry-run]   N weitere Worker (Standard 1)
 #   workers ls [--ws <ws>]      Worker dieses Repos mit Rolle und Status
 #   workers attach <name>       Worker in diesem Terminal öffnen (Hintergrund oder tmux-Fenster)
 #   workers logs <name>         letzte Ausgabe eines Hintergrund-Workers
 #   workers drain [rolle…] [--ws <ws>] [--host <h>] [--off]   Worker (alle, Rollen, Workspace, Rechner) auslaufen lassen
 #   workers drain-check [rolle]   DRAIN, wenn dieser Worker auslaufen soll (Rolle sonst aus dem Worktree)
 #   workers stop <name>|--all [--force]   Worker sofort stoppen (Hintergrund und Terminal)
-#   workers restart <name> [--force] [--term …] [--dry-run]   Worker mit frischem Kontext neu starten
+#   workers restart <name> [--force] [--term …] [--dry-run]   Worker mit frischem Kontext neu starten (behält --model)
 #   workers autorestart [--over 200k] [--off]   Leitstand startet große Kontexte selbst neu
 #   workers send <name> [--] <text>   Nachricht oder /befehl in das Terminal eines Workers tippen
 #   workers screen <name> [--lines N]   Bildschirm des Terminals eines Workers (z. B. eine Rückfrage)
@@ -285,8 +285,33 @@ drained() {
 # Name des n-ten Workers einer Rolle auf diesem Rechner
 worker_name() { echo "$1-$((BK_HOST_BASE + $2))"; }
 
+# Claude-Modell der neuen Worker (--model): leer = Standard von Claude Code. Nur Modell-IDs
+# (claude-…) und Aliase, weil der Wert auch in eine getippte Shellzeile geht.
+model=""
+check_model() {
+  case $model in
+    '') ;;
+    opus|sonnet|haiku|fable) ;;
+    claude-*[!a-z0-9-]*|claude-) echo "unbekanntes Modell: $model" >&2; exit 2 ;;
+    claude-*) ;;
+    *) echo "unbekanntes Modell: $model (claude-… oder opus, sonnet, haiku, fable)" >&2; exit 2 ;;
+  esac
+}
+# " --model <id>" für die Startzeile, leer ohne Modell
+model_opt() { [ -z "$model" ] || printf ' --model %s' "$model"; }
+
+# Modell aus der Kommandozeile des Prozesses $1 (--model X oder --model=X), leer ohne
+model_of_pid() {
+  ps -o args= -p "$1" 2>/dev/null | awk '{
+    for (i = 1; i <= NF; i++) {
+      if ($i == "--model" && i < NF) { print $(i + 1); exit }
+      if (index($i, "--model=") == 1) { print substr($i, 9); exit }
+    }
+  }'
+}
+
 # Startbefehl im Terminal (Shell des Tabs bzw. tmux-Fensters)
-term_cmd() { printf '%s\n' "cd '$ROOT' && claude -w $2 -n $2 '$(prompt_for "$1")'"; }
+term_cmd() { printf '%s\n' "cd '$ROOT' && claude -w $2 -n $2$(model_opt) '$(prompt_for "$1")'"; }
 
 usage() {
   sed -n '7,22s/^# \{0,1\}//p' "$0" >&2
@@ -379,6 +404,8 @@ parse_args() {
       --dry-run) dry=1 ;;
       --ws) [ $# -ge 2 ] || usage; ws=$2; shift ;;
       --ws=*) ws=${1#*=} ;;
+      --model) [ $# -ge 2 ] || usage; model=$2; shift ;;
+      --model=*) model=${1#*=} ;;
       *=*) set_count "${1%%=*}" "${1#*=}" ;;
       *)
         [ "$bare" = 1 ] || { echo "unbekanntes Argument: $1" >&2; usage; }
@@ -388,6 +415,7 @@ parse_args() {
     shift
   done
   check_term
+  check_model
   [ -z "$ws" ] || is_ws "$ws" || { echo "unbekannter Workspace: $ws ($WORKSPACES)" >&2; exit 2; }
 }
 
@@ -423,14 +451,14 @@ launch() {
     queued="$queued$role $name
 "
     if [ "$dry" = 1 ]; then
-      if [ "$term" = tmux ]; then echo "tmux-Fenster $name: claude -w $name -n $name '$prompt'"
-      else echo "iTerm-Tab $name: claude -w $name -n $name '$prompt'"; fi
+      if [ "$term" = tmux ]; then echo "tmux-Fenster $name: claude -w $name -n $name$(model_opt) '$prompt'"
+      else echo "iTerm-Tab $name: claude -w $name -n $name$(model_opt) '$prompt'"; fi
     fi
   elif [ "$dry" = 1 ]; then
-    echo "(cd '$ROOT' && claude --bg -w $name -n $name '$prompt')"
+    echo "(cd '$ROOT' && claude --bg -w $name -n $name$(model_opt) '$prompt')"
   else
-    echo "starte $name ($prompt)"
-    bg_scope sh -c 'cd "$1" && shift && exec claude --bg "$@"' sh "$ROOT" -w "$name" -n "$name" "$prompt"
+    echo "starte $name ($prompt${model:+, $model})"
+    bg_scope sh -c 'cd "$1" && shift && exec claude --bg "$@"' sh "$ROOT" -w "$name" -n "$name" ${model:+--model "$model"} "$prompt"
   fi
   return 0
 }
@@ -1003,6 +1031,9 @@ cmd_restart() {
   # shellcheck disable=SC2086 # Absicht: "<worktree> <kind> <status> <name> <pid> <ref>" zerlegen
   set -- $line
   kind=$2 status=$3 session=$6 pid=$5
+  # dasselbe Modell wie bisher
+  model=$(model_of_pid "$pid")
+  check_model
   if drain_all || mark_has "drain-$role"; then
     echo "Drain aktiv für $role: $target hört ohnehin auf, kein Neustart" >&2
     exit 1

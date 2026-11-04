@@ -473,6 +473,13 @@ test('planWorkerAction: nur bekannte Rollen und Worker-Namen', () => {
     ['start', '--ws', 'code', 'fix=3', 'search=0', 'verify=1', 'regress=0']);
   assert.throws(() => p({ action: 'start', counts: { fix: 9 } }), /0–8/);
   assert.throws(() => p({ action: 'start', counts: { fix: '1 --iterm' } }), /0–8/);
+  // Modell nur aus MODELS, Standard ohne --model
+  assert.deepEqual(p({ action: 'add', role: 'fix', model: 'claude-opus-5-5' }), ['add', 'fix', '--model', 'claude-opus-5-5']);
+  assert.deepEqual(p({ action: 'add', role: 'fix', model: '' }), ['add', 'fix']);
+  assert.deepEqual(p({ action: 'start', counts: { fix: 1 }, model: 'claude-sonnet-5-5' }),
+    ['start', '--ws', 'code', 'fix=1', 'search=0', 'verify=0', 'regress=0', '--model', 'claude-sonnet-5-5']);
+  assert.throws(() => p({ action: 'add', role: 'fix', model: '--dry-run' }), /Modell/);
+  assert.throws(() => p({ action: 'add', role: 'fix', model: ['claude-opus-5-5'] }), /Modell/);
   assert.ok(workerRe(['fix', 'x|y', 'audit']).test('audit-3'));
   assert.equal(workerRe(['fix', 'x|y']).test('y-1'), false);
 });

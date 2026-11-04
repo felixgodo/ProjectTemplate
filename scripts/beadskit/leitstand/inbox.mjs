@@ -332,10 +332,10 @@ export function planCreate({ title, description, priority, modul, type, human, .
 /**
  * Argumente für scripts/beadskit/workers. `ws` (Standard code) bestimmt, welche Rollen start, add
  * und drain annehmen. drain mit role 'all' = globaler Drain, role 'ws' = alle Rollen des Workspaces,
- * role 'host' = alle Worker des Rechners `host` (einer aus `hosts`). Wo die Aktion läuft, sagt
- * routeWorkerAction.
+ * role 'host' = alle Worker des Rechners `host` (einer aus `hosts`). start und add nehmen ein
+ * `model` aus MODELS (--model). Wo die Aktion läuft, sagt routeWorkerAction.
  */
-export function planWorkerAction({ action, role, name, force, off, counts, threshold, text, ws, host }, workspaces, hosts = []) {
+export function planWorkerAction({ action, role, name, force, off, counts, threshold, text, ws, host, model }, workspaces, hosts = []) {
   const w = ws ?? 'code';
   if (typeof w !== 'string' || !Object.hasOwn(workspaces, w)) throw new Error('unbekannter Workspace');
   const roles = workspaces[w].roles;
@@ -350,11 +350,11 @@ export function planWorkerAction({ action, role, name, force, off, counts, thres
         if (!Number.isInteger(n) || n < 0 || n > 8) throw new Error(`Anzahl ${r}: 0–8`);
         args.push(`${r}=${n}`);
       }
-      return args;
+      return [...args, ...modelArgs(model)];
     }
     case 'add':
       if (!roles.includes(role)) throw new Error('unbekannte Rolle');
-      return ['add', role];
+      return ['add', role, ...modelArgs(model)];
     case 'drain': {
       // role 'host': nur die Worker eines Rechners (zwei Rechner)
       if (role === 'host') {
@@ -725,6 +725,22 @@ export function decisionOf({ description, notes } = {}) {
 
 /** Tasten, die der Leitstand an eine Rückfrage schicken darf (workers press). */
 export const PRESS_KEYS = ['1', '2', '3', '4', '5', '6', '7', '8', '9', 'Escape', 'Enter'];
+
+/** Claude-Modelle für neue Worker (Select „Modell“ im Leitstand); id '' = Standard von Claude Code, kein --model. */
+export const MODELS = [
+  { id: '', label: 'Standard' },
+  { id: 'claude-fable-5-1', label: 'Fable 5.1' },
+  { id: 'claude-opus-5-5', label: 'Opus 5.5' },
+  { id: 'claude-sonnet-5-5', label: 'Sonnet 5.5' },
+  { id: 'claude-haiku-5-5', label: 'Haiku 5.5' },
+];
+
+/** ['--model', id] für ein Modell aus MODELS, [] für Standard; anderes wirft. */
+function modelArgs(model) {
+  if (model == null || model === '') return [];
+  if (typeof model !== 'string' || !MODELS.some((m) => m.id === model)) throw new Error('unbekanntes Modell');
+  return ['--model', model];
+}
 
 const OPTION_RE = /^\s*(?:[❯›>]\s*)?([1-9])\.\s+(.+?)\s*$/;
 const SEPARATOR_RE = /^\s*[─━╌┄═╭╰]{8,}/;
@@ -1709,6 +1725,7 @@ function startServer(token, selfRoot) {
         host: workers.find((w) => w.name === slot.holder)?.host ?? null } : null,
       drain,
       autorestart: { threshold, recent: restartsOf(cfg.slug).recent.slice(0, 5) },
+      models: MODELS,
       workers,
       // zwei Rechner: Name, erreichbar, Leitrechner, dieser; leer bei einem Rechner
       hosts: conf ? hosts : [],

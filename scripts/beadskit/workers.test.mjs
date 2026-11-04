@@ -210,6 +210,22 @@ test('start --ws clubs --dry-run plant die vier Club-Rollen mit ihren Prompts', 
   assert.doesNotMatch(busy.stdout, /club-settings-|fix-/);
 });
 
+test('--model: Terminal und --bg starten mit dem Modell, ungültige Werte abgelehnt', () => {
+  const { root, workers } = testRepo();
+  clearMarkers(testRepo());
+  const t = workers(root, ['add', 'club-test', '--model', 'claude-sonnet-5-5', '--dry-run']);
+  assert.equal(t.status, 0, t.stderr);
+  assert.deepEqual(launches(t.stdout), ["iTerm-Tab club-test-1: claude -w club-test-1 -n club-test-1 --model claude-sonnet-5-5 '/loop 15m /spot-club-test'"]);
+  const bg = workers(root, ['start', '--ws', 'clubs', 'club-search=1', 'club-add=0', 'club-settings=0', 'club-test=0', '--model=opus', '--bg', '--dry-run']);
+  assert.equal(bg.status, 0, bg.stderr);
+  assert.match(bg.stdout, /claude --bg -w club-search-1 -n club-search-1 --model opus '\/loop 30m \/spot-club-search'/);
+  for (const bad of ["x'; rm -rf ~", 'claude-OPUS', 'claude-', 'gpt-4']) {
+    const r = workers(root, ['add', 'club-test', '--model', bad, '--dry-run']);
+    assert.equal(r.status, 2, bad);
+    assert.match(r.stderr, /unbekanntes Modell/);
+  }
+});
+
 test('start ohne --ws startet nur code mit den bisherigen Standards, Rollen anderer Workspaces abgelehnt', () => {
   const { root, workers } = testRepo();
   clearMarkers(testRepo());
@@ -363,7 +379,8 @@ case $1 in
   list-panes) echo "/dev/pts/7 %3" ;;
 esac
 `);
-writeFileSync(join(fakeBin, 'ps'), '#!/bin/sh\nprintf \'%s\\n\' "$FAKE_TTY"\n');
+// ps -o args= gibt FAKE_ARGS aus (Kommandozeile mit --model)
+writeFileSync(join(fakeBin, 'ps'), '#!/bin/sh\ncase "$2" in args=) printf \'%s\\n\' "$FAKE_ARGS" ;; *) printf \'%s\\n\' "$FAKE_TTY" ;; esac\n');
 chmodSync(join(fakeBin, 'tmux'), 0o755);
 chmodSync(join(fakeBin, 'ps'), 0o755);
 const tmuxEnv = (extra = {}) => ({ PATH: `${fakeBin}:${dir}:${process.env.PATH}`, BK_TERM: 'tmux', BK_UNAME: 'Linux', BK_SEND_WAIT: '0', ...extra });
@@ -424,6 +441,13 @@ test('tmux: restart beendet die Session und tippt den Startbefehl ins selbe Fens
     `send-keys -t %3 -l -- cd '${root}' && claude -w fix-3 -n fix-3 '/loop 10m /spot-fix'`, 'send-keys -t %3 Enter',
   ]);
   assert.match(r.stdout, /fix-3 im Terminal \/dev\/pts\/7 neu gestartet/);
+
+  // das Modell des laufenden Workers bleibt
+  const pid2 = Number(execFileSync('sh', ['-c', 'sleep 60 >/dev/null 2>&1 & echo $!'], { encoding: 'utf8' }).trim());
+  const term2 = [{ ...term[0], pid: pid2 }];
+  const m = workers(root, ['restart', 'fix-3'], term2, tmuxEnv({ FAKE_TTY: 'pts/7', FAKE_ARGS: 'claude -w fix-3 -n fix-3 --model claude-haiku-5-5 /loop 10m /spot-fix' }));
+  assert.equal(m.status, 0, m.stderr);
+  assert.ok(tmuxCalls(m.calls).includes(`send-keys -t %3 -l -- cd '${root}' && claude -w fix-3 -n fix-3 --model claude-haiku-5-5 '/loop 10m /spot-fix'`), m.calls.join('\n'));
 });
 
 // ---- Zwei Rechner (hosts.conf) ----

@@ -77,7 +77,8 @@ scripts/beadskit/workers send fix-2 -- /compact            # Zeile ins Terminal 
 Worker laufen im Terminal, Farbe je Rolle: auf dem Mac als iTerm-Tabs, unter Linux als Fenster
 der tmux-Session `bk-<slug>` (`workers attach <name>`). `--term iterm|tmux|bg` bzw. `BK_TERM`
 wählt selbst, `--bg` startet Hintergrund-Sessions; ohne steuerbares Terminal automatisch im
-Hintergrund.
+Hintergrund. `--model <id>` (`claude-…` oder `opus`, `sonnet`, `haiku`, `fable`) startet Worker von
+`start`/`add` mit diesem Claude-Modell; `restart` behält das Modell des laufenden Workers.
 
 **Zwei Rechner** (`~/.config/beadskit/hosts.conf`, Einrichtung in
 `ProjectTemplate/scripts/remote`): Worker heißen `<rolle>-<BK_HOST_BASE + n>` (Mac `fix-1`, PC
@@ -98,7 +99,8 @@ für alle mit gemeinsamem Text: läuft je Issue über dieselben Endpunkte, höch
 eine Knopf-Aktion gilt nur für die Karten, an denen sie frei ist, Fehler bleiben an der Karte), Kanban mit Drag & Drop je Workspace,
 PRs mit CI-Stand (aller Repos aus `BK_REPOS`) und die CI-Runner, wenn das Projekt welche nutzt.
 Er steuert Issues und Worker als Actor `user` und startet mit `autorestart` Worker mit großem
-Kontext selbst neu. Tests: `node --test scripts/beadskit/leitstand/*.test.mjs`.
+Kontext selbst neu. Das Select **Modell** oben (neben „Neue auf“ bei zwei Rechnern, je Browser
+gespeichert) gibt „starten …“ und +1 ein `--model` mit; *Standard* nimmt die Einstellung von Claude Code. Tests: `node --test scripts/beadskit/leitstand/*.test.mjs`.
 
 Die Seite hat fünf Tabs (oben, auf dem iPhone unten; `#<slug>/<tab>`, Tasten 1–5): **Entscheiden**
 (Rückfragen und `human`), **Worker** (Kennzahlen, Steuerung, CI-Runner), **Board**, **PRs** und
