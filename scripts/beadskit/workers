@@ -4,8 +4,8 @@
 # der beads-Actor (bdw). Rollen gehören zu einem Workspace: code (BK_ROLES) und die weiteren
 # aus BK_WORKSPACES in beads.project.sh.
 #
-#   workers start [--ws <ws>] [<rolle>=N …] [--term iterm|tmux|bg] [--model <id>] [--rc|--no-rc] [--dry-run]   Workspace starten
-#   workers add <rolle>[=N] … [--ws <ws>] [--term …] [--model <id>] [--rc|--no-rc] [--dry-run]   N weitere Worker (Standard 1)
+#   workers start [--ws <ws>] [<rolle>=N …] [--term iterm|tmux|bg] [--model [<rolle>=]<id> …] [--rc|--no-rc] [--dry-run]   Workspace starten
+#   workers add <rolle>[=N] … [--ws <ws>] [--term …] [--model [<rolle>=]<id> …] [--rc|--no-rc] [--dry-run]   N weitere Worker (Standard 1)
 #   workers ls [--ws <ws>]      Worker dieses Repos mit Rolle und Status
 #   workers attach <name>       Worker in diesem Terminal öffnen (Hintergrund oder tmux-Fenster)
 #   workers logs <name>         letzte Ausgabe eines Hintergrund-Workers
@@ -121,27 +121,45 @@ default_color() {
   esac
 }
 
-# Anzahl einer Rolle aus einer Vorgabe wie "fix=2 search=1"; 0, wenn sie fehlt
-start_count() {
+# Wert einer Rolle aus einer Liste wie "fix=2 search=1", sonst $3 (leer)
+list_value() {
   for kv in $2; do [ "${kv%%=*}" != "$1" ] || { echo "${kv#*=}"; return; }; done
-  echo 0
+  echo "${3-}"
 }
 
-# Rollentabelle: rolle|workspace|prompt|iTerm-Tabfarbe "r g b"|Anzahl bei start ohne Angabe.
+# Anzahl einer Rolle aus einer Vorgabe wie "fix=2 search=1"; 0, wenn sie fehlt
+start_count() { list_value "$1" "$2" 0; }
+
+# Gültiges Claude-Modell: leer, Modell-ID claude-[a-z0-9-] oder Alias. Nur das, weil der Wert auch
+# in eine getippte Shellzeile geht.
+valid_model() {
+  case $1 in
+    ''|opus|sonnet|haiku|fable) return 0 ;;
+    claude-*[!a-z0-9-]*|claude-) return 1 ;;
+    claude-*) return 0 ;;
+  esac
+  return 1
+}
+
+# Rollentabelle: rolle|workspace|prompt|iTerm-Tabfarbe "r g b"|Anzahl bei start ohne Angabe|Modell
+# (BK_MODELS bzw. BK_WS_<ws>_MODELS, leer = Standard von Claude Code).
 # Rollennamen nur a-z und "-" (die Zähler-Variable ersetzt "-" durch "_"), Workspaces nur a-z.
 ROLE_TABLE=""
 for w in $WORKSPACES; do
   # [:lower:] statt a-z: in manchen Locales liegt „C“ zwischen a und z
   case $w in ''|*[![:lower:]]*) echo "Workspace-Name nur a-z: $w (BK_WORKSPACES in beads.project.sh)" >&2; exit 1 ;; esac
-  if [ "$w" = code ]; then roles=$BK_ROLES start=$BK_START; else roles=$(ws_var "$w" ROLES) start=$(ws_var "$w" START); fi
+  if [ "$w" = code ]; then roles=$BK_ROLES start=$BK_START models=${BK_MODELS-}
+  else roles=$(ws_var "$w" ROLES) start=$(ws_var "$w" START) models=$(ws_var "$w" MODELS); fi
   [ -n "$roles" ] || { echo "Workspace $w ohne Rollen (BK_WS_${w}_ROLES in beads.project.sh)" >&2; exit 1; }
   for r in $roles; do
     case $r in *[![:lower:]-]*|[![:lower:]]*|*-|*--*) echo "Rollenname nur a-z und -: $r (beads.project.sh)" >&2; exit 1 ;; esac
     case "
 $ROLE_TABLE" in *"
 $r|"*) echo "Rolle $r doppelt (beads.project.sh)" >&2; exit 1 ;; esac
+    m=$(list_value "$r" "$models")
+    valid_model "$m" || { echo "unbekanntes Modell für $r: $m (BK_MODELS/BK_WS_${w}_MODELS in beads.project.sh)" >&2; exit 1; }
     ROLE_TABLE="$ROLE_TABLE${ROLE_TABLE:+
-}$r|$w|$(default_prompt "$r")|$(default_color "$r")|$(start_count "$r" "$start")"
+}$r|$w|$(default_prompt "$r")|$(default_color "$r")|$(start_count "$r" "$start")|$m"
   done
 done
 
@@ -249,7 +267,7 @@ default_term() {
   else echo bg; fi
 }
 
-# Feld $2 (1 rolle, 2 workspace, 3 prompt, 4 farbe, 5 standard) der Rolle $1, leer wenn unbekannt
+# Feld $2 (1 rolle, 2 workspace, 3 prompt, 4 farbe, 5 standard, 6 modell) der Rolle $1, leer wenn unbekannt
 role_field() {
   printf '%s\n' "$ROLE_TABLE" | awk -F'|' -v r="$1" -v f="$2" '$1 == r { print $f; exit }'
 }
@@ -287,20 +305,41 @@ drained() {
 # Name des n-ten Workers einer Rolle auf diesem Rechner
 worker_name() { echo "$1-$((BK_HOST_BASE + $2))"; }
 
-# Claude-Modell der neuen Worker (--model): leer = Standard von Claude Code. Nur Modell-IDs
-# (claude-…) und Aliase, weil der Wert auch in eine getippte Shellzeile geht.
+# Claude-Modell der neuen Worker: --model <id> für alle Rollen ($model), --model <rolle>=<id> für
+# eine (mdl_<rolle> mit mdlset_<rolle>=1; leer = ausdrücklich Standard von Claude Code), sonst die
+# Vorgabe der Rolle aus beads.project.sh, sonst der Standard von Claude Code.
 model=""
 check_model() {
-  case $model in
-    '') ;;
-    opus|sonnet|haiku|fable) ;;
-    claude-*[!a-z0-9-]*|claude-) echo "unbekanntes Modell: $model" >&2; exit 2 ;;
-    claude-*) ;;
-    *) echo "unbekanntes Modell: $model (claude-… oder opus, sonnet, haiku, fable)" >&2; exit 2 ;;
+  valid_model "$1" || { echo "unbekanntes Modell: $1 (claude-… oder opus, sonnet, haiku, fable)" >&2; exit 2; }
+}
+# Variablen-Suffix der Rolle (club-add → club_add)
+role_var() { echo "$1" | tr - _; }
+# Setzt das Modell einer Rolle (--model <rolle>=<id>)
+set_role_model() {
+  is_role "$1" || { echo "unbekannte Rolle: $1" >&2; usage; }
+  check_model "$2"
+  v=$(role_var "$1")
+  eval "mdl_$v=\$2; mdlset_$v=1"
+}
+# --model <id> oder --model <rolle>=<id>
+set_model() {
+  case $1 in
+    *=*) set_role_model "${1%%=*}" "${1#*=}" ;;
+    *) check_model "$1"; model=$1 ;;
   esac
 }
-# " --model <id>" für die Startzeile, leer ohne Modell
-model_opt() { [ -z "$model" ] || printf ' --model %s' "$model"; }
+# Modell, mit dem ein Worker der Rolle $1 startet (leer = Standard von Claude Code)
+model_for() {
+  v=$(role_var "$1")
+  if eval "[ -n \"\${mdlset_$v-}\" ]"; then eval "echo \"\${mdl_$v-}\""
+  elif [ -n "$model" ]; then echo "$model"
+  else role_field "$1" 6; fi
+}
+# " --model <id>" für die Startzeile der Rolle $1, leer ohne Modell
+model_opt() {
+  m=$(model_for "$1")
+  [ -z "$m" ] || printf ' --model %s' "$m"
+}
 
 # Modell aus der Kommandozeile des Prozesses $1 (--model X oder --model=X), leer ohne
 model_of_pid() {
@@ -336,7 +375,7 @@ rc_of_pid() {
 }
 
 # Startbefehl im Terminal (Shell des Tabs bzw. tmux-Fensters)
-term_cmd() { printf '%s\n' "cd '$ROOT' && claude -w $2 -n $2$(model_opt)$(rc_opt "$2") '$(prompt_for "$1")'"; }
+term_cmd() { printf '%s\n' "cd '$ROOT' && claude -w $2 -n $2$(model_opt "$1")$(rc_opt "$2") '$(prompt_for "$1")'"; }
 
 usage() {
   sed -n '7,22s/^# \{0,1\}//p' "$0" >&2
@@ -429,8 +468,8 @@ parse_args() {
       --dry-run) dry=1 ;;
       --ws) [ $# -ge 2 ] || usage; ws=$2; shift ;;
       --ws=*) ws=${1#*=} ;;
-      --model) [ $# -ge 2 ] || usage; model=$2; shift ;;
-      --model=*) model=${1#*=} ;;
+      --model) [ $# -ge 2 ] || usage; set_model "$2"; shift ;;
+      --model=*) set_model "${1#*=}" ;;
       --rc) rc=1 ;;
       --no-rc) rc=0 ;;
       *=*) set_count "${1%%=*}" "${1#*=}" ;;
@@ -442,7 +481,6 @@ parse_args() {
     shift
   done
   check_term
-  check_model
   check_rc
   [ -z "$ws" ] || is_ws "$ws" || { echo "unbekannter Workspace: $ws ($WORKSPACES)" >&2; exit 2; }
 }
@@ -479,17 +517,18 @@ launch() {
     queued="$queued$role $name
 "
     if [ "$dry" = 1 ]; then
-      if [ "$term" = tmux ]; then echo "tmux-Fenster $name: claude -w $name -n $name$(model_opt)$(rc_opt "$name") '$prompt'"
-      else echo "iTerm-Tab $name: claude -w $name -n $name$(model_opt)$(rc_opt "$name") '$prompt'"; fi
+      if [ "$term" = tmux ]; then echo "tmux-Fenster $name: claude -w $name -n $name$(model_opt "$role")$(rc_opt "$name") '$prompt'"
+      else echo "iTerm-Tab $name: claude -w $name -n $name$(model_opt "$role")$(rc_opt "$name") '$prompt'"; fi
     fi
     return 0
   fi
   [ "$rc" != 1 ] || echo "Hinweis: $name läuft im Hintergrund, ohne Remote Control (nur im Terminal)" >&2
   if [ "$dry" = 1 ]; then
-    echo "(cd '$ROOT' && claude --bg -w $name -n $name$(model_opt) '$prompt')"
+    echo "(cd '$ROOT' && claude --bg -w $name -n $name$(model_opt "$role") '$prompt')"
   else
-    echo "starte $name ($prompt${model:+, $model})"
-    bg_scope sh -c 'cd "$1" && shift && exec claude --bg "$@"' sh "$ROOT" -w "$name" -n "$name" ${model:+--model "$model"} "$prompt"
+    m=$(model_for "$role")
+    echo "starte $name ($prompt${m:+, $m})"
+    bg_scope sh -c 'cd "$1" && shift && exec claude --bg "$@"' sh "$ROOT" -w "$name" -n "$name" ${m:+--model "$m"} "$prompt"
   fi
   return 0
 }
@@ -1062,9 +1101,8 @@ cmd_restart() {
   # shellcheck disable=SC2086 # Absicht: "<worktree> <kind> <status> <name> <pid> <ref>" zerlegen
   set -- $line
   kind=$2 status=$3 session=$6 pid=$5
-  # dasselbe Modell wie bisher
-  model=$(model_of_pid "$pid")
-  check_model
+  # dasselbe Modell wie bisher; ohne --model auch keine Vorgabe der Rolle
+  set_role_model "$role" "$(model_of_pid "$pid")"
   # und Remote Control wie bisher
   rc=$(rc_of_pid "$pid")
   if drain_all || mark_has "drain-$role"; then
@@ -1217,9 +1255,9 @@ cmd_config() {
   runners=false
   ! grep -qs 'self-hosted' "$ROOT"/.github/workflows/*.y*ml || runners=true
   {
-    printf '%s\n' "$ROLE_TABLE" | while IFS='|' read -r r w p c d; do
-      jq -nc --arg r "$r" --arg w "$w" --arg p "$p" --arg c "$c" --arg d "$d" \
-        '{kind: "role", role: $r, ws: $w, prompt: $p, color: ($c | split(" ") | map(tonumber)), start: ($d | tonumber)}'
+    printf '%s\n' "$ROLE_TABLE" | while IFS='|' read -r r w p c d m; do
+      jq -nc --arg r "$r" --arg w "$w" --arg p "$p" --arg c "$c" --arg d "$d" --arg m "$m" \
+        '{kind: "role", role: $r, ws: $w, prompt: $p, color: ($c | split(" ") | map(tonumber)), start: ($d | tonumber), model: $m}'
     done
     for w in $WORKSPACES; do
       if [ "$w" = code ]; then name=Code phases=$BK_PHASES; else name=$(ws_var "$w" NAME) phases=$(ws_var "$w" PHASES); fi
@@ -1241,6 +1279,7 @@ cmd_config() {
         start: ($roles | map({key: .role, value: .start}) | from_entries),
         prompts: ($roles | map({key: .role, value: .prompt}) | from_entries),
         colors: ($roles | map({key: .role, value: .color}) | from_entries),
+        models: ($roles | map({key: .role, value: .model}) | from_entries),
         workspaces: [map(select(.kind == "ws"))[] | .ws as $w
           | {key: $w, name, phases: (.phases | phases), roles: [$roles[] | select(.ws == $w) | .role]}],
         repos: [map(select(.kind == "repo"))[] | {key, path}], runners: $runners,

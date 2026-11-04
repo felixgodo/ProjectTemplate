@@ -78,7 +78,10 @@ Worker laufen im Terminal, Farbe je Rolle: auf dem Mac als iTerm-Tabs, unter Lin
 der tmux-Session `bk-<slug>` (`workers attach <name>`). `--term iterm|tmux|bg` bzw. `BK_TERM`
 wählt selbst, `--bg` startet Hintergrund-Sessions; ohne steuerbares Terminal automatisch im
 Hintergrund. `--model <id>` (`claude-…` oder `opus`, `sonnet`, `haiku`, `fable`) startet Worker von
-`start`/`add` mit diesem Claude-Modell; `restart` behält das Modell des laufenden Workers.
+`start`/`add` mit diesem Claude-Modell, `--model <rolle>=<id>` nur die Worker dieser Rolle (`<rolle>=`
+leer: Standard von Claude Code). Ohne Angabe gilt die Vorgabe der Rolle (`BK_MODELS` bzw.
+`BK_WS_<ws>_MODELS`, z. B. `"artist-search=claude-haiku-5-5"`), sonst der Standard von Claude Code;
+`restart` behält das Modell des laufenden Workers.
 `--rc` (Vorgabe `BK_REMOTE_CONTROL=1` in `beads.project.sh` oder der Umgebung, `--no-rc` schaltet
 ab) startet Terminal-Worker mit Remote Control als `<slug>-<name>` (z. B. `spot-fix-1`): Die Session
 erscheint auf claude.ai/code und in der Claude-App; dort lassen sich der ganze Verlauf lesen, dem
@@ -106,7 +109,8 @@ eine Knopf-Aktion gilt nur für die Karten, an denen sie frei ist, Fehler bleibe
 PRs mit CI-Stand (aller Repos aus `BK_REPOS`) und die CI-Runner, wenn das Projekt welche nutzt.
 Er steuert Issues und Worker als Actor `user` und startet mit `autorestart` Worker mit großem
 Kontext selbst neu. Das Select **Modell** oben (neben „Neue auf“ bei zwei Rechnern, je Browser
-gespeichert) gibt „starten …“ und +1 ein `--model` mit; *Standard* nimmt die Einstellung von Claude Code. Tests: `node --test scripts/beadskit/leitstand/*.test.mjs`.
+gespeichert) gibt „starten …“ und +1 ein `--model` mit; *Rollen-Vorgabe* nimmt die Vorgabe der Rolle. Im
+Start-Dialog hat jede Rolle ein eigenes Modell-Select (vorbelegt mit dem oberen Modell bzw. der Vorgabe). Tests: `node --test scripts/beadskit/leitstand/*.test.mjs`.
 
 Die Seite hat fünf Tabs (oben, auf dem iPhone unten; `#<slug>/<tab>`, Tasten 1–5): **Entscheiden**
 (Rückfragen und `human`), **Worker** (Kennzahlen, Steuerung, CI-Runner), **Board**, **PRs** und
@@ -189,7 +193,8 @@ sich vorziehen. Erst `runner-pool setup` (Dienst ab 1.7.0), dann die Workflows u
 | `bk_prompt <rolle>` | eigener Startbefehl je Rolle (Funktion, optional) | `/loop … /<prefix>-<rolle>` |
 | `BK_PHASES` | Phasen von code; die erste claimen Worker | `fix verify merge` |
 | `BK_WORKSPACES` | weitere Workspaces (nur a-z), Issues mit Label `ws:<name>` | leer |
-| `BK_WS_<ws>_NAME` / `_ROLES` / `_START` / `_PHASES` | Anzeigename, Rollen, Vorgabe, Phasen (`key:Titel`) | – |
+| `BK_MODELS` | Claude-Modell je Rolle von code (`fix=claude-opus-5-5 …`) | leer (Standard von Claude Code) |
+| `BK_WS_<ws>_NAME` / `_ROLES` / `_START` / `_PHASES` / `_MODELS` | Anzeigename, Rollen, Vorgabe, Phasen (`key:Titel`), Modelle je Rolle | – |
 | `bk_color <rolle>` | iTerm-Tabfarbe `"r g b"` (Funktion, optional) | je Rolle |
 | `BK_REPOS` | weitere Repos `<schlüssel>:<pfad>`; Label `modul:<schlüssel>` → dort bearbeiten | leer |
 | `RUNNER_APT`, `RUNNER_MYSQL`, `RUNNER_MARIADB` | Zusatzpakete im Pool-Image (alle Projekte vereint), Version der CI-MySQL bzw. CI-MariaDB | leer |

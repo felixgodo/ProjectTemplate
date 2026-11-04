@@ -15,6 +15,8 @@ BK_ROLES="fix search verify regress"
 BK_MODULES="{{MODULES}}"
 # Vorgabe für `workers start` ohne Anzahlen
 BK_START="fix=2 search=1 verify=1 regress=0"
+# Claude-Modell je Rolle (leer = Standard von Claude Code); im Leitstand-Start je Rolle änderbar
+# BK_MODELS="fix=claude-opus-5-5 search=claude-sonnet-5-5"
 
 # Startbefehl je Rolle anders als die Vorgabe (/loop 10m /<prefix>-fix …)? Leer = Vorgabe.
 # bk_prompt() {
@@ -28,6 +30,7 @@ BK_START="fix=2 search=1 verify=1 regress=0"
 # BK_WS_clubs_NAME="Clubs"
 # BK_WS_clubs_ROLES="club-search club-add"          # Rollen a-z und -
 # BK_WS_clubs_START="club-search=1 club-add=1"
+# BK_WS_clubs_MODELS="club-search=claude-haiku-5-5"
 # BK_WS_clubs_PHASES="place:Anlegen settings test"  # erste = die, die Worker claimen; :Titel optional
 # Phasen von code (Standard fix verify merge):
 # BK_PHASES="fix verify merge"

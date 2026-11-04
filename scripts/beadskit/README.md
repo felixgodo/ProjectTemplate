@@ -81,7 +81,10 @@ Workers run in a terminal, colored by role: on the Mac as iTerm tabs, on Linux a
 tmux session `bk-<slug>` (`workers attach <name>`). `--term iterm|tmux|bg` or `BK_TERM` chooses
 explicitly, `--bg` starts background sessions; without a controllable terminal they run in the
 background automatically. `--model <id>` (`claude-…` or `opus`, `sonnet`, `haiku`, `fable`) starts
-`start`/`add` workers with that Claude model; `restart` keeps the model of the running worker.
+`start`/`add` workers with that Claude model, `--model <role>=<id>` only the workers of that role
+(`<role>=` empty: Claude Code default). Without it the role's default applies (`BK_MODELS` or
+`BK_WS_<ws>_MODELS`, e.g. `"artist-search=claude-haiku-5-5"`), otherwise the Claude Code default;
+`restart` keeps the model of the running worker.
 `--rc` (default `BK_REMOTE_CONTROL=1` in `beads.project.sh` or the environment, `--no-rc` turns it
 off) starts terminal workers with Remote Control as `<slug>-<name>` (e.g. `spot-fix-1`): the session
 shows up on claude.ai/code and in the Claude app, where you can read the full transcript, write to
@@ -114,7 +117,8 @@ with drag & drop per workspace, PRs with CI status (of all repos from `BK_REPOS`
 runners, if the project uses any.
 It controls issues and workers as actor `user` and uses `autorestart` to restart workers with a
 large context on its own. The header select **Model** (next to “Start on” with two machines, stored
-per browser) passes `--model` to “start …” and +1; *Standard* uses the Claude Code setting. Tests: `node --test scripts/beadskit/leitstand/*.test.mjs`.
+per browser) passes `--model` to “start …” and +1; *Role default* uses the role's default. In the start
+dialog every role has its own model select (prefilled with the header model or the role default). Tests: `node --test scripts/beadskit/leitstand/*.test.mjs`.
 
 The page has five tabs (at the top, at the bottom on the iPhone; `#<slug>/<tab>`, keys 1–5):
 **Entscheiden** (decide: prompts and `human`), **Worker** (metrics, controls, CI runners),
@@ -199,7 +203,8 @@ switch the workflows: an older service starts runners without the label, and the
 | `bk_prompt <role>` | custom start command per role (function, optional) | `/loop … /<prefix>-<role>` |
 | `BK_PHASES` | phases of code; workers claim the first one | `fix verify merge` |
 | `BK_WORKSPACES` | additional workspaces (a-z only), issues with label `ws:<name>` | empty |
-| `BK_WS_<ws>_NAME` / `_ROLES` / `_START` / `_PHASES` | display name, roles, default, phases (`key:Title`) | – |
+| `BK_MODELS` | Claude model per role of code (`fix=claude-opus-5-5 …`) | empty (Claude Code default) |
+| `BK_WS_<ws>_NAME` / `_ROLES` / `_START` / `_PHASES` / `_MODELS` | display name, roles, default, phases (`key:Title`), models per role | – |
 | `bk_color <role>` | iTerm tab color `"r g b"` (function, optional) | per role |
 | `BK_REPOS` | additional repos `<key>:<path>`; label `modul:<key>` → work there | empty |
 | `RUNNER_APT`, `RUNNER_MYSQL`, `RUNNER_MARIADB` | extra packages in the pool image (merged across all projects), version of the CI MySQL or CI MariaDB | empty |

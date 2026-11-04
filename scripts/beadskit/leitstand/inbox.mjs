@@ -149,6 +149,8 @@ export function buildWorkspaces(cfg, ext = {}) {
       roleLabels,
       colors,
       defaults: Object.fromEntries(w.roles.map((r) => [r, Number(cfg.start?.[r] ?? 0)])),
+      // Modell-Vorgabe je Rolle (BK_MODELS / BK_WS_<ws>_MODELS), '' = Standard von Claude Code
+      roleModels: Object.fromEntries(w.roles.map((r) => [r, typeof cfg.models?.[r] === 'string' ? cfg.models[r] : ''])),
       phases,
       readyPhase: phases[0],
       moveTargets: ['ready', ...phases.slice(1), 'human', 'deferred', 'done'],
@@ -333,9 +335,9 @@ export function planCreate({ title, description, priority, modul, type, human, .
  * Argumente für scripts/beadskit/workers. `ws` (Standard code) bestimmt, welche Rollen start, add
  * und drain annehmen. drain mit role 'all' = globaler Drain, role 'ws' = alle Rollen des Workspaces,
  * role 'host' = alle Worker des Rechners `host` (einer aus `hosts`). start und add nehmen ein
- * `model` aus MODELS (--model). Wo die Aktion läuft, sagt routeWorkerAction.
+ * `model` aus MODELS (--model), start dazu `models` je Rolle (--model rolle=id). Wo die Aktion läuft, sagt routeWorkerAction.
  */
-export function planWorkerAction({ action, role, name, force, off, counts, threshold, text, ws, host, model }, workspaces, hosts = []) {
+export function planWorkerAction({ action, role, name, force, off, counts, threshold, text, ws, host, model, models }, workspaces, hosts = []) {
   const w = ws ?? 'code';
   if (typeof w !== 'string' || !Object.hasOwn(workspaces, w)) throw new Error('unbekannter Workspace');
   const roles = workspaces[w].roles;
@@ -350,7 +352,7 @@ export function planWorkerAction({ action, role, name, force, off, counts, thres
         if (!Number.isInteger(n) || n < 0 || n > 8) throw new Error(`Anzahl ${r}: 0–8`);
         args.push(`${r}=${n}`);
       }
-      return [...args, ...modelArgs(model)];
+      return [...args, ...modelArgs(model), ...roleModelArgs(models, roles, workspaces[w].roleModels)];
     }
     case 'add':
       if (!roles.includes(role)) throw new Error('unbekannte Rolle');
@@ -740,6 +742,21 @@ function modelArgs(model) {
   if (model == null || model === '') return [];
   if (typeof model !== 'string' || !MODELS.some((m) => m.id === model)) throw new Error('unbekanntes Modell');
   return ['--model', model];
+}
+
+/**
+ * ['--model', 'rolle=id', …] für ein Modell je Rolle ({rolle: id}); '' heißt ausdrücklich Standard
+ * von Claude Code. Erlaubt sind MODELS und die Vorgaben des Projekts (roleModels, z. B. Aliase).
+ */
+function roleModelArgs(models, roles, roleModels = {}) {
+  if (models == null) return [];
+  if (typeof models !== 'object' || Array.isArray(models)) throw new Error('unbekanntes Modell');
+  const ok = new Set([...MODELS.map((m) => m.id), ...Object.values(roleModels)]);
+  return Object.entries(models).flatMap(([r, id]) => {
+    if (!roles.includes(r)) throw new Error('unbekannte Rolle');
+    if (typeof id !== 'string' || !ok.has(id)) throw new Error(`unbekanntes Modell für ${r}`);
+    return ['--model', `${r}=${id}`];
+  });
 }
 
 const OPTION_RE = /^\s*(?:[❯›>]\s*)?([1-9])\.\s+(.+?)\s*$/;
