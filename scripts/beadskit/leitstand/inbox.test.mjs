@@ -619,6 +619,19 @@ test('projectPaths: eigenes Root nur als eingerichtetes Projekt, ohne Dublette',
   assert.deepEqual(projectPaths(['/a'], null, true), ['/a']);
 });
 
+test('normalizeConfig: Modell-Vorgaben je Rolle kommen bis roleModels der Workspaces durch', () => {
+  const cfg = normalizeConfig({ root: '/x', slug: 'spot', roles: ['fix', 'artist-check', 'artist-verify'],
+    workspaces: [{ key: 'code', phases: [{ key: 'fix' }], roles: ['fix'] }, { key: 'artists', phases: [{ key: 'check' }], roles: ['artist-check', 'artist-verify'] }],
+    models: { 'artist-check': 'claude-sonnet-5-5', 'artist-verify': 'opus', fix: "x'; rm", 'Bad Role': 'opus' } });
+  assert.deepEqual(cfg.models, { 'artist-check': 'claude-sonnet-5-5', 'artist-verify': 'opus' });
+  const ws = buildWorkspaces(cfg, normalizeExt({}));
+  assert.deepEqual(ws.artists.roleModels, { 'artist-check': 'claude-sonnet-5-5', 'artist-verify': 'opus' });
+  assert.deepEqual(ws.code.roleModels, { fix: '' });
+  // und start nimmt die Projekt-Vorgabe (Alias) an
+  assert.deepEqual(planWorkerAction({ action: 'start', ws: 'artists', counts: { 'artist-verify': 1 }, models: { 'artist-verify': 'opus' } }, ws).slice(-2),
+    ['--model', 'artist-verify=opus']);
+});
+
 test('normalizeConfig: Vorgaben, ungültige Werte fallen weg, publicConfig ohne Pfade', () => {
   assert.equal(normalizeConfig(null), null);
   assert.equal(normalizeConfig({ root: '/r', slug: 'Böse Slug' }), null);

@@ -737,6 +737,9 @@ export const MODELS = [
   { id: 'claude-haiku-5-5', label: 'Haiku 5.5' },
 ];
 
+// gültiger Modellname wie valid_model in workers: Modell-ID claude-[a-z0-9-] oder Alias
+const MODEL_RE = /^(claude-[a-z0-9-]+|opus|sonnet|haiku|fable)$/;
+
 /** ['--model', id] für ein Modell aus MODELS, [] für Standard; anderes wirft. */
 function modelArgs(model) {
   if (model == null || model === '') return [];
@@ -1038,6 +1041,9 @@ export function normalizeConfig(cfg) {
     start: cfg.start && typeof cfg.start === 'object' ? cfg.start : {},
     prompts: cfg.prompts && typeof cfg.prompts === 'object' ? cfg.prompts : {},
     colors: cfg.colors && typeof cfg.colors === 'object' ? cfg.colors : {},
+    // Modell-Vorgabe je Rolle (workers config .models), nur gültige Modellnamen wie in workers
+    models: Object.fromEntries(Object.entries(cfg.models && typeof cfg.models === 'object' ? cfg.models : {})
+      .filter(([r, m]) => ROLE_RE.test(r) && typeof m === 'string' && MODEL_RE.test(m))),
     workspaces,
     repos: repos.some((r) => r.key === '.') ? repos : [{ key: '.', path: cfg.root }, ...repos],
     runners: cfg.runners === true,
