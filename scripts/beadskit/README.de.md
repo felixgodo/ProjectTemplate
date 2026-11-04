@@ -79,6 +79,12 @@ der tmux-Session `bk-<slug>` (`workers attach <name>`). `--term iterm|tmux|bg` b
 wählt selbst, `--bg` startet Hintergrund-Sessions; ohne steuerbares Terminal automatisch im
 Hintergrund. `--model <id>` (`claude-…` oder `opus`, `sonnet`, `haiku`, `fable`) startet Worker von
 `start`/`add` mit diesem Claude-Modell; `restart` behält das Modell des laufenden Workers.
+`--rc` (Vorgabe `BK_REMOTE_CONTROL=1` in `beads.project.sh` oder der Umgebung, `--no-rc` schaltet
+ab) startet Terminal-Worker mit Remote Control als `<slug>-<name>` (z. B. `spot-fix-1`): Die Session
+erscheint auf claude.ai/code und in der Claude-App; dort lassen sich der ganze Verlauf lesen, dem
+Worker schreiben und Freigabe-Rückfragen beantworten. Sie läuft weiter lokal mit allen Zugängen;
+`--bg`-Worker starten ohne. `restart` behält die Einstellung. Setzt eine claude.ai-Anmeldung voraus
+(keinen API-Key).
 
 **Zwei Rechner** (`~/.config/beadskit/hosts.conf`, Einrichtung in
 `ProjectTemplate/scripts/remote`): Worker heißen `<rolle>-<BK_HOST_BASE + n>` (Mac `fix-1`, PC

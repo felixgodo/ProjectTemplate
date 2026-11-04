@@ -226,6 +226,30 @@ test('--model: Terminal und --bg starten mit dem Modell, ungültige Werte abgele
   }
 });
 
+test('--rc / BK_REMOTE_CONTROL: Terminal-Worker mit Remote Control <slug>-<name>, --bg ohne, ungültiger Wert abgelehnt', () => {
+  const { root, workers } = testRepo();
+  clearMarkers(testRepo());
+  const t = workers(root, ['add', 'club-test', '--rc', '--model', 'opus', '--dry-run']);
+  assert.equal(t.status, 0, t.stderr);
+  assert.deepEqual(launches(t.stdout), ["iTerm-Tab club-test-1: claude -w club-test-1 -n club-test-1 --model opus --remote-control spot-club-test-1 '/loop 15m /spot-club-test'"]);
+  // ohne Schalter unverändert
+  const off = workers(root, ['add', 'club-test', '--dry-run']);
+  assert.doesNotMatch(off.stdout, /remote-control/);
+  // Vorgabe aus der Umgebung, --no-rc schaltet sie ab
+  const env = workers(root, ['add', 'club-test', '--dry-run'], [], { BK_REMOTE_CONTROL: '1', BK_TERM: 'tmux' });
+  assert.match(env.stdout, /tmux-Fenster club-test-1: claude -w club-test-1 -n club-test-1 --remote-control spot-club-test-1 '/);
+  const no = workers(root, ['add', 'club-test', '--no-rc', '--dry-run'], [], { BK_REMOTE_CONTROL: '1' });
+  assert.doesNotMatch(no.stdout, /remote-control/);
+  // Hintergrund: ohne Remote Control, mit Hinweis
+  const bg = workers(root, ['add', 'club-test', '--rc', '--bg', '--dry-run']);
+  assert.equal(bg.status, 0, bg.stderr);
+  assert.doesNotMatch(bg.stdout, /remote-control/);
+  assert.match(bg.stderr, /ohne Remote Control/);
+  const bad = workers(root, ['add', 'club-test', '--dry-run'], [], { BK_REMOTE_CONTROL: 'ja' });
+  assert.equal(bad.status, 2);
+  assert.match(bad.stderr, /BK_REMOTE_CONTROL muss 0 oder 1/);
+});
+
 test('start ohne --ws startet nur code mit den bisherigen Standards, Rollen anderer Workspaces abgelehnt', () => {
   const { root, workers } = testRepo();
   clearMarkers(testRepo());
@@ -448,6 +472,13 @@ test('tmux: restart beendet die Session und tippt den Startbefehl ins selbe Fens
   const m = workers(root, ['restart', 'fix-3'], term2, tmuxEnv({ FAKE_TTY: 'pts/7', FAKE_ARGS: 'claude -w fix-3 -n fix-3 --model claude-haiku-5-5 /loop 10m /spot-fix' }));
   assert.equal(m.status, 0, m.stderr);
   assert.ok(tmuxCalls(m.calls).includes(`send-keys -t %3 -l -- cd '${root}' && claude -w fix-3 -n fix-3 --model claude-haiku-5-5 '/loop 10m /spot-fix'`), m.calls.join('\n'));
+
+  // Remote Control des laufenden Workers bleibt
+  const pid3 = Number(execFileSync('sh', ['-c', 'sleep 60 >/dev/null 2>&1 & echo $!'], { encoding: 'utf8' }).trim());
+  const term3 = [{ ...term[0], pid: pid3 }];
+  const rc = workers(root, ['restart', 'fix-3'], term3, tmuxEnv({ FAKE_TTY: 'pts/7', FAKE_ARGS: 'claude -w fix-3 -n fix-3 --remote-control spot-fix-3 /loop 10m /spot-fix' }));
+  assert.equal(rc.status, 0, rc.stderr);
+  assert.ok(tmuxCalls(rc.calls).includes(`send-keys -t %3 -l -- cd '${root}' && claude -w fix-3 -n fix-3 --remote-control spot-fix-3 '/loop 10m /spot-fix'`), rc.calls.join('\n'));
 });
 
 // ---- Zwei Rechner (hosts.conf) ----
