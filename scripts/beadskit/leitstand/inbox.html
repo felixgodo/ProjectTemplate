@@ -717,8 +717,8 @@ function renderHead() {
   }).join('')}
     <label class="small muted" style="font-size:12.5px" title="Rechner für „starten“ und +1">Neue auf
       <select id="start-host">${hosts().map((h) => `<option value="${esc(h.name)}" ${h.name === startHost() ? 'selected' : ''} ${h.ok ? '' : 'disabled'}>${esc(h.name)}</option>`).join('')}</select></label>` : '';
-  const modelHtml = models().length ? `<label class="small muted" style="font-size:12.5px" title="Claude-Modell für „starten“ und +1; Neustarts behalten das Modell des Workers">Modell
-      <select id="start-model">${models().map((m) => `<option value="${esc(m.id)}" ${m.id === startModel() ? 'selected' : ''}>${esc(m.label)}</option>`).join('')}</select></label>` : '';
+  const modelHtml = models().length ? `<label class="small muted" style="font-size:12.5px" title="Claude-Modell für „starten“ und +1. „Rollen-Vorgabe“: je Rolle das Modell aus beads.project.sh (ohne Vorgabe der Standard von Claude Code). Neustarts behalten das Modell des Workers.">Modell
+      <select id="start-model">${models().map((m) => `<option value="${esc(m.id)}" ${m.id === startModel() ? 'selected' : ''}>${esc(m.id ? m.label : 'Rollen-Vorgabe')}</option>`).join('')}</select></label>` : '';
   const ar = st.autorestart || {};
   const recent = (ar.recent || []).map((x) => `${clock(x.at)} ${x.name} (${ktok(x.tokens)}): ${x.ok ? 'neu gestartet' : 'verweigert'}`).join('\n');
   const opts = [0, 150_000, 200_000, 300_000, 400_000, 600_000];
@@ -756,7 +756,10 @@ function startModel() {
   try { m = localStorage.getItem('leitstand-model'); } catch { /* nur Komfort */ }
   return models().some((x) => x.id === m) ? m : '';
 }
-const modelLabel = () => models().find((x) => x.id === startModel())?.label;
+// Anzeigename eines Modells; '' = Standard von Claude Code, unbekannte IDs (Aliase) wie sie sind
+const modelName = (id) => (id ? models().find((x) => x.id === id)?.label ?? id : 'Claude-Standard');
+// Modell, mit dem ein neuer Worker der Rolle startet: oben gewählt, sonst die Vorgabe der Rolle
+const roleModel = (r) => startModel() || meta().roleModels?.[r] || '';
 
 function openStart() {
   const sh = startHost();
@@ -771,9 +774,15 @@ function openStart() {
         laufende Worker werden übersprungen. <code>start</code> hebt einen aktiven Drain auf${st.workspace === 'code' ? '' : ` (nur für ${esc(meta().label)})`}.
         ${sh ? `Startet auf <b>${esc(sh)}</b> (oben unter „Neue auf“ wählbar), als Terminal-Fenster (Mac: iTerm-Tab, Linux: tmux-Fenster).`
     : 'Die Worker öffnen sich als Tabs in iTerm auf dem Mac (ohne iTerm-Freigabe im Hintergrund).'}
-        Modell: <b>${esc(sm ? modelLabel() : 'Standard')}</b> (oben unter „Modell“ wählbar).</p>
-      <div class="inline">${ROLES.map((r) => `<label>${esc(ROLE_LABEL[r])} <span class="muted">(läuft: ${have(r)})</span>
-        <input type="number" name="${esc(r)}" min="0" max="8" value="${Math.max(have(r), def[r] ?? 0)}"></label>`).join('')}</div>
+        Modell je Rolle: vorbelegt mit ${sm ? `<b>${esc(modelName(sm))}</b> (oben unter „Modell“ gewählt)` : 'der Vorgabe der Rolle'}; laufende Worker behalten ihr Modell.</p>
+      <div class="inline">${ROLES.map((r) => {
+    const rm = meta().roleModels?.[r] || '';
+    const ids = [...new Set(['', ...models().map((m) => m.id).filter(Boolean), ...(rm ? [rm] : [])])];
+    const sel = roleModel(r);
+    return `<label>${esc(ROLE_LABEL[r])} <span class="muted">(läuft: ${have(r)})</span>
+        <input type="number" name="${esc(r)}" min="0" max="8" value="${Math.max(have(r), def[r] ?? 0)}">
+        <select name="model-${esc(r)}" title="Claude-Modell für neue ${esc(r)}-Worker${rm ? ` (Vorgabe: ${esc(modelName(rm))})` : ''}">${ids.map((id) => `<option value="${esc(id)}" ${id === sel ? 'selected' : ''}>${esc(modelName(id))}${id && id === rm ? ' · Vorgabe' : ''}</option>`).join('')}</select></label>`;
+  }).join('')}</div>
       <div class="actions"><button class="primary" type="submit">Starten</button><span class="msg" id="s-msg"></span></div>
     </form>`);
 }
@@ -833,7 +842,7 @@ function renderWorkers() {
     return `<section style="--c:${roleVar(r)}">
       <div class="role-head"><span class="sw"></span><b>${esc(ROLE_LABEL[r])}</b>
         <span class="muted">${ws.length} Worker, ${ws.filter((w) => w.status !== 'idle').length} aktiv</span>
-        <button class="small" data-wa="add" data-role="${esc(r)}" title="Einen weiteren ${esc(r)}-Worker im Terminal starten${hosts().length ? ' (auf dem Rechner unter „Neue auf“)' : ''}">+1</button>
+        <button class="small" data-wa="add" data-role="${esc(r)}" title="Einen weiteren ${esc(r)}-Worker im Terminal starten${hosts().length ? ' (auf dem Rechner unter „Neue auf“)' : ''}, Modell: ${esc(modelName(roleModel(r)))}">+1</button>
         <button class="small ${drained ? 'on' : ''}" data-wa="drain" data-role="${esc(r)}" data-off="${drained ? 1 : ''}"
           ${st.drain.all ? 'disabled title="globaler Drain aktiv"' : ''}>${drained ? 'Drain aktiv · aufheben' : 'auslaufen lassen'}</button>
       </div>
@@ -1907,7 +1916,9 @@ document.addEventListener('change', (e) => {
   if (e.target.id === 'start-model') {
     try { localStorage.setItem('leitstand-model', e.target.value); } catch { /* nur Komfort */ }
     keys.controls = '';
+    keys.workers = ''; // Tooltip von +1 nennt das Modell
     renderHead();
+    renderWorkers();
   }
   if (e.target.id === 'start-host') {
     try { localStorage.setItem('leitstand-host', e.target.value); } catch { /* nur Komfort */ }
@@ -1946,10 +1957,11 @@ document.addEventListener('submit', async (e) => {
   if (e.target.id === 'start') {
     e.preventDefault();
     const counts = Object.fromEntries(ROLES.map((r) => [r, Number(e.target[r].value)]));
+    const models = Object.fromEntries(ROLES.map((r) => [r, e.target[`model-${r}`]?.value ?? '']));
     const msg = $('s-msg');
     msg.className = 'msg'; msg.textContent = 'startet …';
     try {
-      const r = await post('/api/workers', { action: 'start', ws: st.workspace, counts, ...(startHost() ? { host: startHost() } : {}), ...(startModel() ? { model: startModel() } : {}) });
+      const r = await post('/api/workers', { action: 'start', ws: st.workspace, counts, models, ...(startHost() ? { host: startHost() } : {}) });
       toast(r.output || 'gestartet'); closeDrawer(); await reload();
     } catch (err) { msg.className = 'msg bad'; msg.textContent = err.message; }
     return;

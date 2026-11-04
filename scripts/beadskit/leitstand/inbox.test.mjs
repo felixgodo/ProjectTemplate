@@ -480,6 +480,15 @@ test('planWorkerAction: nur bekannte Rollen und Worker-Namen', () => {
     ['start', '--ws', 'code', 'fix=1', 'search=0', 'verify=0', 'regress=0', '--model', 'claude-sonnet-5-5']);
   assert.throws(() => p({ action: 'add', role: 'fix', model: '--dry-run' }), /Modell/);
   assert.throws(() => p({ action: 'add', role: 'fix', model: ['claude-opus-5-5'] }), /Modell/);
+  // Modell je Rolle: MODELS, '' (ausdrücklich Standard) und Vorgaben des Projekts
+  const ws2 = { ...WS, code: { ...WS.code, roleModels: { ...WS.code.roleModels, search: 'sonnet' } } };
+  assert.deepEqual(planWorkerAction({ action: 'start', counts: { fix: 1 }, models: { fix: 'claude-haiku-5-5', search: 'sonnet', verify: '' } }, ws2),
+    ['start', '--ws', 'code', 'fix=1', 'search=0', 'verify=0', 'regress=0', '--model', 'fix=claude-haiku-5-5', '--model', 'search=sonnet', '--model', 'verify=']);
+  assert.throws(() => p({ action: 'start', counts: { fix: 1 }, models: { fix: 'sonnet' } }), /Modell für fix/);
+  assert.throws(() => p({ action: 'start', counts: { fix: 1 }, models: { 'club-add': 'claude-opus-5-5' } }), /Rolle/);
+  assert.throws(() => p({ action: 'start', counts: { fix: 1 }, models: { fix: "x'; rm" } }), /Modell/);
+  assert.throws(() => p({ action: 'start', counts: { fix: 1 }, models: 'claude-opus-5-5' }), /Modell/);
+  assert.deepEqual(WS.code.roleModels.fix, '');
   assert.ok(workerRe(['fix', 'x|y', 'audit']).test('audit-3'));
   assert.equal(workerRe(['fix', 'x|y']).test('y-1'), false);
 });

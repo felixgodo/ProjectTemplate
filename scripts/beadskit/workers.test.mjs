@@ -226,6 +226,41 @@ test('--model: Terminal und --bg starten mit dem Modell, ungültige Werte abgele
   }
 });
 
+test('Modell je Rolle: Vorgabe aus BK_WS_<ws>_MODELS, --model id für alle, --model rolle=id je Rolle', () => {
+  const { root, workers } = testRepo();
+  clearMarkers(testRepo());
+  const file = join(root, 'beads.project.sh');
+  const orig = readFileSync(file, 'utf8');
+  try {
+    writeFileSync(file, `${orig}BK_WS_clubs_MODELS="club-search=claude-haiku-5-5 club-test=sonnet"\n`);
+    const run = (...extra) => launches(workers(root, ['start', '--ws', 'clubs', '--dry-run', ...extra]).stdout)
+      .map((l) => l.replace(/^iTerm-Tab ([a-z-]+-\d+): .*?(--model \S+)?( --remote-control \S+)? '.*$/, (_, n, m) => `${n} ${m ?? '-'}`));
+    // Vorgabe: club-search Haiku, club-test Alias, übrige ohne
+    assert.deepEqual(run(), ['club-search-1 --model claude-haiku-5-5', 'club-add-1 -', 'club-settings-1 -', 'club-settings-2 -', 'club-test-1 --model sonnet']);
+    // --model id überschreibt die Vorgaben
+    assert.ok(run('--model', 'claude-opus-5-5').every((l) => l.endsWith('--model claude-opus-5-5')));
+    // je Rolle: leer = ausdrücklich ohne Modell, andere Rollen behalten Vorgabe bzw. globales Modell
+    assert.deepEqual(run('--model', 'club-search=', '--model=club-add=claude-opus-5-5'),
+      ['club-search-1 -', 'club-add-1 --model claude-opus-5-5', 'club-settings-1 -', 'club-settings-2 -', 'club-test-1 --model sonnet']);
+    assert.deepEqual(run('--model', 'opus', '--model', 'club-test='),
+      ['club-search-1 --model opus', 'club-add-1 --model opus', 'club-settings-1 --model opus', 'club-settings-2 --model opus', 'club-test-1 -']);
+    // unbekannte Rolle bzw. ungültiges Modell je Rolle
+    assert.equal(workers(root, ['start', '--ws', 'clubs', '--model', 'nix=opus', '--dry-run']).status, 2);
+    assert.equal(workers(root, ['start', '--ws', 'clubs', '--model', "club-add=x'y", '--dry-run']).status, 2);
+    // config liefert die Vorgaben
+    const c = JSON.parse(workers(root, ['config']).stdout);
+    assert.equal(c.models['club-search'], 'claude-haiku-5-5');
+    assert.equal(c.models['club-add'], '');
+    // ungültige Vorgabe im Projekt bricht ab
+    writeFileSync(file, `${orig}BK_WS_clubs_MODELS="club-add=gpt-4"\n`);
+    const bad = workers(root, ['ls']);
+    assert.equal(bad.status, 1);
+    assert.match(bad.stderr, /unbekanntes Modell für club-add: gpt-4/);
+  } finally {
+    writeFileSync(file, orig);
+  }
+});
+
 test('--rc / BK_REMOTE_CONTROL: Terminal-Worker mit Remote Control <slug>-<name>, --bg ohne, ungültiger Wert abgelehnt', () => {
   const { root, workers } = testRepo();
   clearMarkers(testRepo());
@@ -472,6 +507,19 @@ test('tmux: restart beendet die Session und tippt den Startbefehl ins selbe Fens
   const m = workers(root, ['restart', 'fix-3'], term2, tmuxEnv({ FAKE_TTY: 'pts/7', FAKE_ARGS: 'claude -w fix-3 -n fix-3 --model claude-haiku-5-5 /loop 10m /spot-fix' }));
   assert.equal(m.status, 0, m.stderr);
   assert.ok(tmuxCalls(m.calls).includes(`send-keys -t %3 -l -- cd '${root}' && claude -w fix-3 -n fix-3 --model claude-haiku-5-5 '/loop 10m /spot-fix'`), m.calls.join('\n'));
+
+  // ohne --model im Prozess bleibt es beim Standard, auch wenn die Rolle eine Vorgabe hat
+  const file = join(root, 'beads.project.sh');
+  const orig = readFileSync(file, 'utf8');
+  try {
+    writeFileSync(file, `${orig}BK_MODELS="fix=claude-opus-5-5"\n`);
+    const pid3 = Number(execFileSync('sh', ['-c', 'sleep 60 >/dev/null 2>&1 & echo $!'], { encoding: 'utf8' }).trim());
+    const d = workers(root, ['restart', 'fix-3'], [{ ...term[0], pid: pid3 }], tmuxEnv({ FAKE_TTY: 'pts/7', FAKE_ARGS: 'claude -w fix-3 -n fix-3 /loop 10m /spot-fix' }));
+    assert.equal(d.status, 0, d.stderr);
+    assert.ok(tmuxCalls(d.calls).includes(`send-keys -t %3 -l -- cd '${root}' && claude -w fix-3 -n fix-3 '/loop 10m /spot-fix'`), d.calls.join('\n'));
+  } finally {
+    writeFileSync(file, orig);
+  }
 
   // Remote Control des laufenden Workers bleibt
   const pid3 = Number(execFileSync('sh', ['-c', 'sleep 60 >/dev/null 2>&1 & echo $!'], { encoding: 'utf8' }).trim());
