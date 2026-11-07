@@ -112,13 +112,26 @@ Kontext selbst neu. Das Select **Modell** oben (neben „Neue auf“ bei zwei Re
 gespeichert) gibt „starten …“ und +1 ein `--model` mit; *Rollen-Vorgabe* nimmt die Vorgabe der Rolle. Im
 Start-Dialog hat jede Rolle ein eigenes Modell-Select (vorbelegt mit dem oberen Modell bzw. der Vorgabe). Tests: `node --test scripts/beadskit/leitstand/*.test.mjs`.
 
-Die Seite hat fünf Tabs (oben, auf dem iPhone unten; `#<slug>/<tab>`, Tasten 1–5): **Entscheiden**
+Die Seite hat bis zu sieben Tabs (oben, auf dem iPhone unten; `#<slug>/<tab>`, Tasten 1–7): **Entscheiden**
 (Rückfragen und `human`), **Worker** (Kennzahlen, Steuerung, CI-Runner), **Board**, **PRs** und
 **System** (`/api/system`: CPU gesamt und je Kern mit Verlauf, Load, RAM, Platte, Temperatur,
 Dienste je Rechner aus hosts.conf, über `host-agent.mjs system`; dazu die `servers` aus
-`beads.leitstand.mjs`, gemessen per ssh mit einem sh-Skript, ohne node und beadskit dort). Über Eingabefeldern stehen
+`beads.leitstand.mjs`, gemessen per ssh mit einem sh-Skript, ohne node und beadskit dort), **CI** und **Tokens** (siehe unten). Über Eingabefeldern stehen
 Antworten zum Antippen (Entscheidung, Schließgrund, Chat, Titel-Vorlagen, Filter); auf Touch-Geräten
 ersetzt der Knopf ⇄ an der Karte das Ziehen. Als Web-App auf den Home-Bildschirm legbar.
+
+**Tokens** (`/api/usage?range=7|30|90`, alle Projekte gemeinsam): Token-Verbrauch je Modell und
+Rechner aus den Transkripten unter `~/.claude/projects` (auch Subagenten), Tagesbalken je
+Modellfamilie, Wochen- und 5-Stunden-Limit in Prozent mit Hochrechnung und eine Schätzung, wie viel
+100 % sind. Jeder Rechner zählt selbst (`host-agent.mjs usage`, inkrementell, Summen je 10 Minuten in
+`~/.local/state/beadskit/usage/store.json`, bleiben nach dem Löschen alter Transkripte), der
+Leitrechner holt sie per ssh und merkt sich alles in `leader.json`. Die Limit-Prozente gibt Claude
+Code nur der Statuszeile: `node scripts/beadskit/leitstand/usage-statusline.mjs install --apply` auf
+jedem Rechner einmal eintragen (eine fremde `statusLine` bleibt, außer mit `--force`). Die
+Schätzung rechnet Tokens zu API-Listenpreisen (`usage-prices.mjs`) in einen $-Gegenwert um:
+„100 % der Woche ≈ Verbrauch seit Fensterbeginn ÷ Prozent“, mit Streuung über die Intervalle
+zwischen den Messungen; ab genug Intervallen lernt sie, wie stark Modelle und Token-Arten ins Limit
+zählen. Nutzung außerhalb dieser Rechner (claude.ai, App) sieht sie nicht.
 
 Fernzugang: `scripts/beadskit/leitstand/leitstand-remote` (Login mit Token oder Benutzer/Passwort
 `leitstand-remote password [benutzer]`, zurück auf das Token mit `password --off`; Sperre je IP
