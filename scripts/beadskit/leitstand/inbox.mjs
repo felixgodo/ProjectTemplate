@@ -30,7 +30,7 @@
 // X-Beads-Inbox erzwingt bei fremden Seiten einen CORS-Preflight, den der Server nicht erlaubt.
 import { execFile } from 'node:child_process';
 import { createHash, createHmac, randomBytes, scrypt as scryptCb, timingSafeEqual } from 'node:crypto';
-import { access, readFile, stat } from 'node:fs/promises';
+import { access, mkdir, readFile, rename, stat, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import { homedir, hostname } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -38,6 +38,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { promisify } from 'node:util';
 import { chatTranscript, readTail, sessionSummary, transcriptPath } from './sessions.mjs';
 import { parseServerStats, pushHistory, serverCommand, systemStats, UNIT_RE } from './sysinfo.mjs';
+import { HOUR_MS, mergeIncoming, stateDir, summarize } from './usage.mjs';
 
 const run = promisify(execFile);
 const scrypt = promisify(scryptCb);
@@ -1587,6 +1588,51 @@ function startServer(token, selfRoot) {
     return { at: new Date().toISOString(), systems: [...hosts, ...srv] };
   }
 
+  // Token-Verbrauch aller Rechner (Tab „Tokens“, usage.mjs): je Rechner host-agent.mjs usage, beim
+  // ersten Mal alles, danach ab 2 h vor dem letzten Abruf. Der Leitrechner hält den Stand in
+  // leader.json, damit Verlauf und Schätzung bleiben, wenn ein Rechner aus ist (dann „stale“).
+  // Höchstens ein Abruf je Minute; der erste Scan eines Rechners läuft über mehrere Abrufe.
+  const usageFile = join(stateDir(), 'leader.json');
+  let usageHosts = null;
+  let usageAt = 0;
+  let usageBusy = null;
+  async function refreshUsage() {
+    if (!usageHosts) {
+      try { usageHosts = new Map(Object.entries(JSON.parse(await readFile(usageFile, 'utf8')))); } catch { usageHosts = new Map(); }
+    }
+    const conf = await hostsConf();
+    const names = conf ? conf.hosts.map((h) => h.name) : [hostname().split('.')[0]];
+    await Promise.all(names.map(async (name) => {
+      const prev = usageHosts.get(name);
+      // solange der Erstscan läuft, kommen auch alte Slots dazu: dann immer alles holen
+      const since = prev?.at && prev.scan?.done && prev.ok !== false ? Math.max(0, prev.at - 2 * HOUR_MS) : 0;
+      try {
+        const { stdout } = await onHost(conf, conf ? name : null, selfRoot, 'scripts/beadskit/leitstand/host-agent.mjs', ['usage', String(since)], { timeout: 45_000 });
+        usageHosts.set(name, { name, ...mergeIncoming(prev, JSON.parse(stdout)) });
+      } catch (e) {
+        const error = e.code === 'ETIMEDOUT' || e.killed ? 'keine Antwort' : cmdOutput(e);
+        usageHosts.set(name, { ...(prev || { buckets: null, limits: [] }), name, ok: false, error, stale: !!prev?.buckets });
+      }
+    }));
+    for (const k of [...usageHosts.keys()]) if (!names.includes(k)) usageHosts.delete(k);
+    try {
+      await mkdir(dirname(usageFile), { recursive: true });
+      await writeFile(`${usageFile}.tmp`, JSON.stringify(Object.fromEntries(usageHosts)));
+      await rename(`${usageFile}.tmp`, usageFile);
+    } catch (e) { console.error(`Tokens: ${usageFile}: ${e.message}`); }
+    usageAt = Date.now();
+  }
+  async function usage(rangeDays) {
+    if (!selfRoot) throw new Error('Leitstand läuft nicht aus einem git-Checkout');
+    if (Date.now() - usageAt > 60_000) {
+      usageBusy ||= refreshUsage().finally(() => { usageBusy = null; });
+      // ein laufender Erstscan soll die Seite nicht aufhalten: alter Stand reicht
+      if (usageHosts?.size) await Promise.race([usageBusy, new Promise((r) => setTimeout(r, 3_000))]);
+      else await usageBusy;
+    }
+    return summarize([...usageHosts.values()], { rangeDays });
+  }
+
   // Drain-Markierungen und Schwelle des Auto-Neustarts (null wenn aus): Dateien oder bd kv
   async function markers(cfg, conf) {
     if (cfg.markers === 'kv') {
@@ -1930,6 +1976,10 @@ function startServer(token, selfRoot) {
       }
       if (req.method === 'GET' && path === '/api/projects') return send(res, 200, await projectList());
       if (path === '/api/pool' || path === '/api/pool/logs') return await pool(req, res, path);
+      if (req.method === 'GET' && path === '/api/usage') {
+        const range = [7, 30, 90].includes(Number(url.searchParams.get('range'))) ? Number(url.searchParams.get('range')) : 30;
+        return send(res, 200, await usage(range));
+      }
 
       // Alles Weitere gehört zu einem Projekt
       const slug = url.searchParams.get('p') || '';
