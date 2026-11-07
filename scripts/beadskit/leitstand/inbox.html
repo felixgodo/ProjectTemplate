@@ -17,12 +17,14 @@
     --fix: #c83c3c; --verify: #32a050; --merge: #7c3aed; --tests: #0e7490; --search: #3c6ed2; --regress: #d2aa28;
     --ready: #6b7280; --done: #15803d; --human: #c2410c;
     --chip: #efeee8; --shadow: 0 10px 40px rgba(0,0,0,.18);
+    --s-opus: #2a78d6; --s-sonnet: #eb6834; --s-haiku: #1baf7a; --s-fable: #eda100; --s-other: #e87ba4;
   }
   @media (prefers-color-scheme: dark) {
     :root {
       --bg: #161614; --panel: #1f1f1c; --ink: #ecebe6; --muted: #9a998f; --line: #34332e;
       --accent: #f97316; --accent-ink: #1a1a18; --chip: #2a2a26; --ready: #9ca3af; --done: #22c55e;
       --ok: #22c55e; --warn: #f59e0b; --bad: #ef4444; --shadow: 0 10px 40px rgba(0,0,0,.5);
+      --s-opus: #3987e5; --s-sonnet: #d95926; --s-haiku: #199e70; --s-fable: #c98500; --s-other: #d55181;
     }
   }
   * { box-sizing: border-box; }
@@ -373,6 +375,39 @@
   .core .col2 i { display: block; width: 100%; border-radius: 4px; background: var(--lv, var(--ok)); min-height: 2px; }
   .core-detail { margin-top: 6px; display: flex; align-items: center; gap: 10px; flex-wrap: wrap; font-size: 12.5px; }
   .svc { display: flex; gap: 6px; flex-wrap: wrap; }
+  /* Tab Tokens */
+  .seg { display: inline-flex; gap: 0; margin-left: auto; text-transform: none; letter-spacing: 0; }
+  .seg button { border-radius: 0; padding: 3px 10px; font-size: 12px; }
+  .seg button:first-child { border-radius: 6px 0 0 6px; } .seg button:last-child { border-radius: 0 6px 6px 0; }
+  .seg button + button { margin-left: -1px; }
+  .seg button.on { background: var(--ink); color: var(--bg); border-color: var(--ink); }
+  .tok-tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(210px, 100%), 1fr)); gap: 10px; }
+  .tok-tile { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 10px 14px; min-width: 0; display: grid; gap: 6px; align-content: start; }
+  .tok-tile .k { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .05em; }
+  .tok-tile .big { font-size: 26px; font-weight: 700; font-variant-numeric: tabular-nums; line-height: 1.1; }
+  .tok-tile .big small { font-size: 13px; font-weight: 500; color: var(--muted); }
+  .tok-tile .sub2 { font-size: 12.5px; color: var(--muted); font-variant-numeric: tabular-nums; }
+  .tok-tile .meter { flex: none; min-width: 0; }
+  .tok-chart { display: block; width: 100%; height: 190px; overflow: visible; }
+  .tok-chart .grid { stroke: var(--line); stroke-width: 1; }
+  .tok-chart .axis { fill: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; }
+  .tok-chart .hit { fill: transparent; }
+  .tok-chart g.day:hover .hit { fill: color-mix(in srgb, var(--ink) 6%, transparent); }
+  .tok-chart .wline { fill: none; stroke: var(--s-opus); stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; }
+  .tok-chart .wproj { fill: none; stroke: var(--muted); stroke-width: 1.5; stroke-dasharray: 4 4; }
+  .tok-chart .wnow { stroke: var(--muted); stroke-width: 1; stroke-dasharray: 2 3; }
+  .tok-chart .wdot { fill: var(--s-opus); stroke: var(--panel); stroke-width: 2; }
+  .tok-legend { display: flex; gap: 14px; flex-wrap: wrap; font-size: 12.5px; color: var(--muted); margin-top: 6px; }
+  .tok-legend i { display: inline-block; width: 10px; height: 10px; border-radius: 3px; margin-right: 5px; vertical-align: -1px; }
+  .tok-tip { min-height: 18px; font-size: 12.5px; color: var(--muted); font-variant-numeric: tabular-nums; }
+  .tok-table { overflow-x: auto; }
+  .tok-table table { border-collapse: collapse; width: 100%; font-size: 12.5px; font-variant-numeric: tabular-nums; }
+  .tok-table th, .tok-table td { padding: 5px 8px; text-align: right; border-top: 1px solid var(--line); white-space: nowrap; }
+  .tok-table th { color: var(--muted); font-weight: 500; border-top: 0; }
+  .tok-table th:first-child, .tok-table td:first-child { text-align: left; }
+  .tok-table tfoot td { font-weight: 600; }
+  .tok-notes .msg { margin: 0 0 8px; overflow-wrap: anywhere; }
+  .tok-notes code { white-space: normal; }
   .svc .chip .dot { background: var(--ok); }
   .svc .chip.bad .dot { background: var(--bad); }
 
@@ -467,6 +502,7 @@
     <button data-tab="prs" role="tab" title="PRs (4)"><svg viewBox="0 0 24 24"><circle cx="6" cy="6" r="2.5"/><circle cx="6" cy="18" r="2.5"/><circle cx="18" cy="18" r="2.5"/><path d="M6 8.5v7M18 15.5V9a3 3 0 0 0-3-3h-4"/><path d="M13 3.5L10.5 6 13 8.5"/></svg><span class="tl">PRs</span><span class="tb calm" id="tb-prs"></span></button>
     <button data-tab="system" role="tab" title="System (5)"><svg viewBox="0 0 24 24"><path d="M3 12h4l3-8 4 16 3-8h4"/></svg><span class="tl">System</span><span class="tb" id="tb-system"></span></button>
     <button data-tab="ci" role="tab" title="CI-Runner-Pool (6)" hidden><svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="6" rx="1.5"/><rect x="3" y="14" width="18" height="6" rx="1.5"/><path d="M7 7h.01M7 17h.01M11 7h6M11 17h6"/></svg><span class="tl">CI</span><span class="tb calm" id="tb-ci"></span></button>
+    <button data-tab="tokens" role="tab" title="Token-Verbrauch (7)"><svg viewBox="0 0 24 24"><path d="M4 20V10M10 20V4M16 20v-7M22 20H2"/></svg><span class="tl">Tokens</span><span class="tb" id="tb-tokens"></span></button>
   </nav>
   <div id="errors"></div>
 
@@ -535,6 +571,21 @@
     <h2>System <span class="sub muted" id="system-sub"></span></h2>
     <div class="systems" id="systems"><span class="muted" style="font-size:13px">lädt …</span></div>
   </section>
+
+  <section data-pane="tokens" hidden>
+    <h2>Tokens <span class="sub muted" id="tok-sub"></span>
+      <span class="seg" id="tok-range" role="group" aria-label="Zeitraum"><button data-r="7">7 Tage</button><button data-r="30">30 Tage</button><button data-r="90">90 Tage</button></span></h2>
+    <div class="tok-notes" id="tok-notes"></div>
+    <div class="tok-tiles" id="tok-tiles"><span class="muted" style="font-size:13px">lädt …</span></div>
+    <h2>Pro Tag <span class="seg" id="tok-unit" role="group" aria-label="Einheit"><button data-u="cost">$-Gegenwert</button><button data-u="tokens">Tokens</button></span></h2>
+    <div class="sys" id="tok-days"></div>
+    <h2>Laufende Woche <span class="sub muted" id="tok-week-sub"></span></h2>
+    <div class="sys" id="tok-week"></div>
+    <h2>Modelle und Rechner</h2>
+    <div class="sys tok-table" id="tok-models"></div>
+    <h2>Schätzung des Limits</h2>
+    <div class="sys" id="tok-est"></div>
+  </section>
 </main>
 
 <div class="scrim" id="scrim"></div>
@@ -584,7 +635,7 @@ const keys = {};               // letzte Render-Schlüssel je Bereich
 let dragging = null;
 let drawer = null;             // { kind: 'issue'|'worker'|'create', id }
 // Bereiche als Tabs; der aktive steht im Hash (#<projekt>/<tab>) und im Browser
-const TABS = ['decide', 'worker', 'board', 'prs', 'system', 'ci'];
+const TABS = ['decide', 'worker', 'board', 'prs', 'system', 'ci', 'tokens'];
 let TAB = 'decide';
 // Finger statt Maus (iPhone): kein Drag & Drop, Bestätigen per zweitem Tippen
 const TOUCH = matchMedia('(pointer: coarse)').matches;
@@ -1999,8 +2050,8 @@ document.addEventListener('keydown', (e) => {
     const dc = !drawer && onDecide && /^[1-9]$/.test(e.key) && [...document.querySelectorAll('#inbox .card.decide')].find((c) => c.querySelector('button[data-choose]'));
     const ob = dc && dc.querySelector(`button[data-choose="${e.key}"]`);
     if (ob) { e.preventDefault(); chooseOption(ob); return; }
-    // sonst 1–6 wechselt den Tab
-    if (!drawer && /^[1-6]$/.test(e.key)) { e.preventDefault(); showTab(TABS[Number(e.key) - 1]); }
+    // sonst 1–7 wechselt den Tab
+    if (!drawer && /^[1-7]$/.test(e.key)) { e.preventDefault(); showTab(TABS[Number(e.key) - 1]); }
     return;
   }
   if (e.key === 'Enter') {
@@ -2201,6 +2252,7 @@ function showTab(tab, first = false) {
   if (tab === 'decide') $('tb-decide').classList.remove('pulse');
   if (tab === 'system') loadSystem();
   if (tab === 'ci') loadPool(true);
+  if (tab === 'tokens') loadUsage();
   if (changed && !first) window.scrollTo({ top: 0 });
 }
 
@@ -2344,6 +2396,248 @@ function renderSystem() {
   const nSrv = list.filter((h) => h.kind === 'server').length, nHost = list.length - nSrv;
   $('system-sub').textContent = `${nHost > 1 || nSrv ? `${nHost} Rechner · ` : ''}${nSrv ? `${nSrv} Server · ` : ''}Stand ${clock(d.at)} · alle ${SYS_EVERY / 1000} s`;
   $('systems').innerHTML = list.map((h) => sysCard(h, list.length > 1)).join('') || '<span class="muted">keine Werte</span>';
+}
+
+// ---- Tokens ----
+// Verbrauch aller Rechner je Modell (Transkripte) und Limit-Prozente (Statuszeile) über /api/usage,
+// rechnerübergreifend, unabhängig vom Projekt. Lädt beim Öffnen und jede Minute, solange offen.
+let usageData = null;
+let usageRange = 30;
+let usageUnit = 'cost';
+try {
+  usageRange = Number(localStorage.getItem('leitstand-tok-range')) || 30;
+  usageUnit = localStorage.getItem('leitstand-tok-unit') === 'tokens' ? 'tokens' : 'cost';
+} catch { /* nur Komfort */ }
+const USAGE_EVERY = 60_000;
+async function loadUsage() {
+  if (loadUsage.busy) return;
+  loadUsage.busy = true;
+  try {
+    const r = await fetch(`/api/usage?range=${usageRange}`);
+    if (r.status === 401) { location.href = '/login'; return; }
+    const res = await r.json().catch(() => ({}));
+    usageData = r.ok ? res : { error: res.error || r.statusText };
+  } catch (e) {
+    usageData = { error: e.message };
+  } finally { loadUsage.busy = false; }
+  renderUsage();
+}
+setInterval(() => { if (TAB === 'tokens' && !document.hidden) loadUsage(); }, USAGE_EVERY);
+document.addEventListener('click', (e) => {
+  const r = e.target.closest?.('#tok-range button[data-r]');
+  const u = e.target.closest?.('#tok-unit button[data-u]');
+  if (r) {
+    usageRange = Number(r.dataset.r);
+    try { localStorage.setItem('leitstand-tok-range', String(usageRange)); } catch { /* nur Komfort */ }
+    loadUsage();
+  }
+  if (u) {
+    usageUnit = u.dataset.u;
+    try { localStorage.setItem('leitstand-tok-unit', usageUnit); } catch { /* nur Komfort */ }
+    renderUsage();
+  }
+});
+
+const FAMILIES = ['Opus', 'Sonnet', 'Haiku', 'Fable'];
+const famVar = (f) => `var(--s-${FAMILIES.includes(f) ? f.toLowerCase() : 'other'})`;
+const famOf = (model) => { const m = /claude-([a-z]+)/.exec(model || ''); const f = m ? m[1][0].toUpperCase() + m[1].slice(1) : ''; return FAMILIES.includes(f) ? f : 'Andere'; };
+const de = (n, d = 0) => (Number.isFinite(n) ? n.toLocaleString('de-DE', { maximumFractionDigits: d, minimumFractionDigits: d }) : '–');
+function fmtTok(n) {
+  if (!Number.isFinite(n)) return '–';
+  if (n >= 1e9) return `${de(n / 1e9, n >= 1e10 ? 0 : 1)} Mrd.`;
+  if (n >= 1e6) return `${de(n / 1e6, n >= 1e7 ? 0 : 1)} Mio.`;
+  if (n >= 1e3) return `${de(n / 1e3, n >= 1e4 ? 0 : 1)} Tsd.`;
+  return de(n);
+}
+const fmtUsd = (n) => (Number.isFinite(n) ? `${de(n, n < 10 ? 2 : 0)} $` : '–');
+const WDAY = ['So', 'Mo', 'Di', 'Mi', 'Do', 'Fr', 'Sa'];
+const when = (t) => { if (!t) return '–'; const d = new Date(t); return `${WDAY[d.getDay()]} ${d.getDate()}.${d.getMonth() + 1}. ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`; };
+
+function usageTile(k, big, sub = '', extra = '') {
+  return `<div class="tok-tile"><span class="k">${esc(k)}</span><div class="big">${big}</div>${extra}${sub ? `<div class="sub2">${sub}</div>` : ''}</div>`;
+}
+
+function renderUsage() {
+  const d = usageData;
+  const latest = d?.limits?.latest;
+  const wk = latest?.d7 && latest.d7[1] > Date.now() ? latest.d7[0] : null;
+  // Warnpunkt am Tab ab 80 % der Woche
+  $('tb-tokens').className = `tb${wk >= 80 ? ' dot' : ''}`;
+  $('tb-tokens').textContent = wk >= 80 ? ' ' : '';
+  $('tb-tokens').title = wk >= 80 ? `Wochenlimit zu ${Math.round(wk)} % verbraucht` : '';
+  if (TAB !== 'tokens') return;
+  document.querySelectorAll('#tok-range button').forEach((b) => b.classList.toggle('on', Number(b.dataset.r) === usageRange));
+  document.querySelectorAll('#tok-unit button').forEach((b) => b.classList.toggle('on', b.dataset.u === usageUnit));
+  if (d?.error) { $('tok-tiles').innerHTML = `<div class="error">${esc(d.error)}</div>`; return; }
+  if (!d) return;
+  $('tok-sub').textContent = `${d.hosts.map((h) => h.name).join(' + ')} · Stand ${clock(d.at)} · jede Minute`;
+
+  // Hinweise: Rechner offline, Erstscan, Statuszeile fehlt, unbekannte Modelle
+  const notes = [];
+  for (const h of d.hosts) {
+    if (!h.ok) notes.push(`<div class="msg bad">${esc(h.name)} nicht erreichbar${h.stale && h.at ? `, Stand vom ${esc(when(h.at))}` : ''}: ${esc(h.error || '?')}</div>`);
+    if (h.scan && !h.scan.done) notes.push(`<div class="msg">${esc(h.name)}: Transkripte werden gelesen (${Math.round((h.scan.bytesDone / Math.max(1, h.scan.bytes)) * 100)} %), Schätzung danach.</div>`);
+    if (h.ok && h.statusline === false) notes.push(`<div class="msg warn-t">${esc(h.name)}: Statuszeile fehlt, dort kommen keine Limit-Prozente an. Eintragen: <code>node scripts/beadskit/leitstand/usage-statusline.mjs install --apply</code></div>`);
+  }
+  if (d.unknown?.length) notes.push(`<div class="msg">Ohne Preis (zählt wie Sonnet): ${esc(d.unknown.join(', '))}, in usage-prices.mjs ergänzen.</div>`);
+  $('tok-notes').innerHTML = notes.join('');
+
+  // Kacheln
+  const e = d.estimate || {};
+  const pw = d.projection?.d7, p5 = d.projection?.h5;
+  const tiles = [];
+  if (pw) {
+    tiles.push(usageTile('Woche', pct(pw.p), `Reset ${esc(when(pw.resetsAt))}`, meter(pw.p, lvl(pw.p, 70, 90))));
+  } else {
+    tiles.push(usageTile('Woche', '–', d.limits.snapshots ? 'kein laufendes Fenster' : 'noch keine Limit-Daten (Statuszeile)'));
+  }
+  if (p5) tiles.push(usageTile('5 Stunden', pct(p5.p), `Reset ${esc(when(p5.resetsAt))}`, meter(p5.p, lvl(p5.p, 70, 90))));
+  const w = e.week || {};
+  if (w.usdPer100) {
+    const spread = w.low && w.high && w.high > w.low ? ` (${fmtUsd(w.low)}–${fmtUsd(w.high)})` : '';
+    tiles.push(usageTile('Wochenlimit geschätzt', `≈ ${fmtUsd(w.usdPer100)}`,
+      `$-Gegenwert${spread}${w.tokens ? ` · ≈ ${fmtTok(w.tokens)} Tokens bei deinem Mix` : ''} · ${w.windows.length} Woche${w.windows.length === 1 ? '' : 'n'}, ${w.intervals} Intervalle`));
+  } else {
+    tiles.push(usageTile('Wochenlimit geschätzt', '–', e.scanning ? 'wartet auf den Erstscan' : `sammelt Daten (${d.limits.snapshots} Snapshots, ab 5 % Wochenverbrauch)`));
+  }
+  if (pw) {
+    const hit = pw.hitAt ? `100 % am ${esc(when(pw.hitAt))}` : pw.rate != null ? 'reicht bis zum Reset' : '–';
+    tiles.push(usageTile('Hochrechnung', hit, pw.rate != null ? `${de(pw.rate, 2)} % je Stunde (letzte 24 h)` : 'zu wenig Messpunkte'));
+  }
+  const cw = d.series?.costNow;
+  tiles.push(usageTile('Heute', fmtTok(d.today?.tokens || 0), `${fmtUsd(d.today?.cost || 0)} $-Gegenwert${cw != null ? ` · Woche bisher ${fmtUsd(cw)}` : ''}`));
+  tiles.push(usageTile(`${d.rangeDays} Tage`, fmtTok(d.total.tokens), `${fmtUsd(d.total.cost)} $-Gegenwert · ${de(d.total.requests)} Antworten`));
+  $('tok-tiles').innerHTML = tiles.join('');
+
+  $('tok-days').innerHTML = usageDays(d);
+  $('tok-week').innerHTML = usageWeek(d);
+  $('tok-week-sub').textContent = d.series ? `${when(d.series.start)} – ${when(d.series.end)}` : '';
+  $('tok-models').innerHTML = usageTable(d);
+  $('tok-est').innerHTML = usageEstimate(d);
+}
+
+// Breite in Pixeln wie der Kasten, damit die Schrift nicht verzerrt wird
+const chartWidth = (id) => Math.max(300, ($(id)?.clientWidth || 828) - 28);
+let tokResize = 0;
+addEventListener('resize', () => { clearTimeout(tokResize); tokResize = setTimeout(() => { if (TAB === 'tokens') renderUsage(); }, 150); });
+
+// Gestapelte Balken je Tag und Modellfamilie (feste Farbe je Familie), Zeigen zeigt die Werte
+function usageDays(d) {
+  const key = usageUnit === 'tokens' ? 'tokens' : 'cost';
+  const fams = [...new Set(d.models.map((m) => famOf(m.model)))].sort((a, b) => (FAMILIES.indexOf(a) + 9) % 9 - (FAMILIES.indexOf(b) + 9) % 9);
+  const days = d.days.map((x) => {
+    const byFam = {};
+    for (const [m, v] of Object.entries(x.models)) byFam[famOf(m)] = (byFam[famOf(m)] || 0) + v[key];
+    return { day: x.day, total: x[key], byFam, x };
+  });
+  const max = Math.max(...days.map((x) => x.total), 0);
+  if (!max) return '<span class="muted">kein Verbrauch im Zeitraum</span>';
+  const W = chartWidth('tok-days'), H = 190, L = 44, B = 20, T = 6;
+  const bw = (W - L) / days.length;
+  const y = (v) => H - B - (v / max) * (H - B - T);
+  const fmt = (v) => (key === 'cost' ? fmtUsd(v) : fmtTok(v));
+  let out = '';
+  for (const g of [0.5, 1]) out += `<line class="grid" x1="${L}" x2="${W}" y1="${y(max * g)}" y2="${y(max * g)}"/><text class="axis" x="${L - 6}" y="${y(max * g) + 4}" text-anchor="end">${esc(fmt(max * g))}</text>`;
+  out += `<line class="grid" x1="${L}" x2="${W}" y1="${H - B}" y2="${H - B}"/>`;
+  const labelEvery = Math.max(1, Math.ceil(44 / bw)); // mindestens 44 px je Beschriftung
+  days.forEach((x, i) => {
+    const x0 = L + i * bw + Math.min(2, bw * 0.15), w = Math.max(1, bw - 2 * Math.min(2, bw * 0.15));
+    let acc = 0, bars = '';
+    const order = fams.filter((f) => x.byFam[f]);
+    order.forEach((f, j) => {
+      const v = x.byFam[f];
+      const top = y(acc + v), bot = y(acc);
+      // 2px Fuge zwischen Segmenten, oberstes Segment mit runder Kante
+      const h = Math.max(0, bot - top - (j ? 2 : 0));
+      const r = j === order.length - 1 ? Math.min(4, w / 2, h) : 0;
+      bars += r
+        ? `<path d="M${x0},${top + h}V${top + r}Q${x0},${top} ${x0 + r},${top}H${x0 + w - r}Q${x0 + w},${top} ${x0 + w},${top + r}V${top + h}Z" fill="${famVar(f)}"/>`
+        : `<rect x="${x0}" y="${top}" width="${w}" height="${h}" fill="${famVar(f)}"/>`;
+      acc += v;
+    });
+    const tip = `${x.day}: ${fmt(x.total)}${order.length > 1 ? ` (${order.map((f) => `${f} ${fmt(x.byFam[f])}`).join(', ')})` : ''}`;
+    out += `<g class="day" data-tip="${esc(tip)}"><rect class="hit" x="${L + i * bw}" y="${T}" width="${bw}" height="${H - B - T}"/>${bars}</g>`;
+    if (i % labelEvery === 0) out += `<text class="axis" x="${L + i * bw + bw / 2}" y="${H - 5}" text-anchor="middle">${esc(x.day.slice(8))}.${esc(String(Number(x.day.slice(5, 7))))}.</text>`;
+  });
+  const legend = fams.length > 1 ? `<div class="tok-legend">${fams.map((f) => `<span><i style="background:${famVar(f)}"></i>${esc(f)}</span>`).join('')}</div>` : '';
+  return `<svg class="tok-chart" viewBox="0 0 ${W} ${H}" role="img" aria-label="Verbrauch pro Tag">${out}</svg>${legend}<div class="tok-tip" id="tok-tip">Zeigen oder Antippen zeigt den Tag</div>`;
+}
+for (const t of ['pointermove', 'pointerdown']) {
+  document.addEventListener(t, (e) => {
+    const g = e.target.closest?.('#tok-days g.day');
+    if (g && $('tok-tip')) $('tok-tip').textContent = g.dataset.tip;
+  });
+}
+
+// Laufendes Wochenfenster: Prozent über die Zeit (eine Achse 0–100 %), gestrichelt die Hochrechnung
+function usageWeek(d) {
+  const s = d.series, pw = d.projection?.d7;
+  if (!s || !s.points.length) return `<span class="muted">${d.limits.snapshots ? 'kein laufendes Wochenfenster in den Snapshots' : 'noch keine Limit-Prozente: Statuszeile eintragen (siehe oben), dann füllt sich der Verlauf mit jeder Claude-Antwort'}</span>`;
+  const W = chartWidth('tok-week'), H = 190, L = 40, B = 20, T = 6;
+  const x = (t) => L + ((t - s.start) / (s.end - s.start)) * (W - L);
+  const y = (p) => H - B - (Math.max(0, Math.min(100, p)) / 100) * (H - B - T);
+  let out = '';
+  for (const g of [25, 50, 75, 100]) out += `<line class="grid" x1="${L}" x2="${W}" y1="${y(g)}" y2="${y(g)}"/><text class="axis" x="${L - 6}" y="${y(g) + 4}" text-anchor="end">${g} %</text>`;
+  out += `<line class="grid" x1="${L}" x2="${W}" y1="${y(0)}" y2="${y(0)}"/>`;
+  for (let i = 0; i <= 7; i++) {
+    const t = s.start + i * 86_400_000;
+    if (i < 7) out += `<text class="axis" x="${x(t + 43_200_000)}" y="${H - 5}" text-anchor="middle">${WDAY[new Date(t + 43_200_000).getDay()]}</text>`;
+  }
+  const now = Date.now();
+  out += `<line class="wnow" x1="${x(now)}" x2="${x(now)}" y1="${T}" y2="${H - B}"/>`;
+  const pts = s.points.map((p) => [x(p.ts), y(p.p)]);
+  out += `<path class="wline" d="${pts.map(([a, b], i) => `${i ? 'L' : 'M'}${a.toFixed(1)},${b.toFixed(1)}`).join('')}"/>`;
+  const last = s.points.at(-1);
+  if (pw?.rate) {
+    const tEnd = pw.hitAt || s.end;
+    const pEnd = Math.min(100, last.p + (pw.rate * (tEnd - last.ts)) / 3_600_000);
+    out += `<path class="wproj" d="M${x(last.ts).toFixed(1)},${y(last.p).toFixed(1)}L${x(tEnd).toFixed(1)},${y(pEnd).toFixed(1)}"/>`;
+  }
+  out += `<circle class="wdot" cx="${x(last.ts)}" cy="${y(last.p)}" r="4.5"/>`;
+  const cost = s.costNow != null ? ` · bisher ${fmtUsd(s.costNow)} $-Gegenwert` : '';
+  return `<svg class="tok-chart" viewBox="0 0 ${W} ${H}" role="img" aria-label="Wochenverbrauch in Prozent, zuletzt ${Math.round(last.p)} %">${out}</svg>
+    <div class="tok-tip">Zuletzt ${de(last.p, 1)} % (${esc(when(last.ts))})${cost}${pw?.rate ? ' · gestrichelt: Hochrechnung aus den letzten 24 h' : ''}</div>`;
+}
+
+// Tabelle Modell × Rechner
+function usageTable(d) {
+  if (!d.models.length) return '<span class="muted">kein Verbrauch im Zeitraum</span>';
+  const hosts = d.hosts.map((h) => h.name);
+  const multi = hosts.length > 1;
+  const th = `<tr><th>Modell</th>${multi ? hosts.map((h) => `<th>${esc(h)}</th>`).join('') : ''}<th>Antworten</th><th>Eingabe</th><th>Ausgabe</th><th>Cache lesen</th><th>Cache schreiben</th><th>$-Gegenwert</th><th>Anteil</th></tr>`;
+  const row = (label, color, v, cost, share, perHost) => `<tr><td>${color ? `<i style="display:inline-block;width:9px;height:9px;border-radius:3px;margin-right:6px;background:${color}"></i>` : ''}${esc(label)}</td>${multi ? hosts.map((h) => `<td>${perHost ? fmtTok(perHost[h]) : ''}</td>`).join('') : ''}<td>${de(v[0])}</td><td>${fmtTok(v[1])}</td><td>${fmtTok(v[2])}</td><td>${fmtTok(v[3])}</td><td>${fmtTok(v[4] + v[5])}</td><td>${fmtUsd(cost)}</td><td>${share != null ? `${de(share * 100, 1)} %` : ''}</td></tr>`;
+  const sum = [0, 0, 0, 0, 0, 0];
+  const hostSum = {};
+  const rows = d.models.map((m) => {
+    m.v.forEach((x, i) => { sum[i] += x; });
+    const ph = {};
+    for (const h of hosts) { const v = m.hosts[h]?.v; ph[h] = v ? v[1] + v[2] + v[3] + v[4] + v[5] : 0; hostSum[h] = (hostSum[h] || 0) + ph[h]; }
+    return row(m.label, famVar(famOf(m.model)), m.v, m.cost, m.share, ph);
+  }).join('');
+  return `<table><thead>${th}</thead><tbody>${rows}</tbody><tfoot>${row('Summe', '', sum, d.total.cost, 1, hostSum)}</tfoot></table>
+    <div class="tok-tip">Spalten je Rechner: alle Tokens (Eingabe, Ausgabe, Cache). $-Gegenwert zu API-Listenpreisen, nicht die Abo-Rechnung.</div>`;
+}
+
+// Schätzung: je Woche Verbrauch und Prozent, gelernte Gewichte, Erklärung
+function usageEstimate(d) {
+  const w = d.estimate?.week || {}, f = d.estimate?.five || {};
+  const parts = [];
+  parts.push(`<p class="msg muted">Claude Code meldet das Limit nur in Prozent. Der Leitstand misst gleichzeitig, wie viele Tokens Mac und PC verbrauchen, und rechnet sie zu API-Listenpreisen in einen $-Gegenwert um (Modelle und Cache vergleichbar). „100 % ≈ X“ = Verbrauch seit Fensterbeginn ÷ Prozent. Je mehr Wochen, desto genauer. Nutzung außerhalb dieser Rechner (claude.ai, App) ist nicht sichtbar und macht die Schätzung höher.</p>`);
+  if (w.windows?.length) {
+    parts.push(`<div class="tok-table"><table><thead><tr><th>Woche bis</th><th>Prozent</th><th>Verbrauch</th><th>100 % ≈</th></tr></thead><tbody>${w.windows.slice().reverse().map((x) => `<tr><td>${esc(when(x.end))}${x.open ? ' (läuft)' : ''}</td><td>${de(x.p, 1)} %</td><td>${fmtUsd(x.cost)}</td><td>${x.capped ? 'Limit erreicht' : fmtUsd(x.est)}</td></tr>`).join('')}</tbody></table></div>`);
+  }
+  const lines = [];
+  if (w.usdPer100) lines.push(`Woche: 100 % ≈ <b>${fmtUsd(w.usdPer100)}</b>${w.outTokens ? `, bei deinem Mix ≈ ${fmtTok(w.tokens)} Tokens bzw. ${fmtTok(w.outTokens)} Ausgabe-Tokens` : ''}`);
+  if (f.usdPer100) lines.push(`5 Stunden: 100 % ≈ <b>${fmtUsd(f.usdPer100)}</b> (${f.windows.length} Fenster)${f.tokens ? `, ≈ ${fmtTok(f.tokens)} Tokens` : ''}`);
+  if (w.usdPer100 && f.usdPer100) lines.push(`Eine Woche ≈ ${de(w.usdPer100 / f.usdPer100, 1)} volle 5-Stunden-Fenster`);
+  const wt = w.weights;
+  const tentative = w.intervals < 40 ? ' (vorläufig, wenige Intervalle)' : '';
+  if (wt?.family) lines.push(`Gewicht je Modell (1 = zählt wie der Listenpreis): ${Object.entries(wt.family).map(([k, v]) => `${esc(k)} ${de(v, 2)}`).join(' · ')}${tentative}`);
+  if (wt?.type) lines.push(`Gewicht je Token-Art: ${Object.entries(wt.type).map(([k, v]) => `${esc(k)} ${de(v, 2)}`).join(' · ')}${tentative}`);
+  if (!wt && w.usdPer100) lines.push(`<span class="muted">Gewichte je Modell und Token-Art: ab 8 Intervallen mit gemischtem Verbrauch (bisher ${w.intervals}).</span>`);
+  if (!lines.length) lines.push(`<span class="muted">Noch keine Schätzung: ${d.limits.snapshots} Limit-Snapshots${d.limits.first ? ` seit ${esc(when(d.limits.first))}` : ''}. Sie beginnt, sobald eine Woche 5 % erreicht.</span>`);
+  parts.push(`<div class="msg" style="display:grid;gap:4px;margin-top:8px">${lines.map((l) => `<div>${l}</div>`).join('')}</div>`);
+  return parts.join('');
 }
 
 // ---- iPhone ----

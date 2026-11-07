@@ -120,14 +120,27 @@ large context on its own. The header select **Model** (next to “Start on” wi
 per browser) passes `--model` to “start …” and +1; *Role default* uses the role's default. In the start
 dialog every role has its own model select (prefilled with the header model or the role default). Tests: `node --test scripts/beadskit/leitstand/*.test.mjs`.
 
-The page has five tabs (at the top, at the bottom on the iPhone; `#<slug>/<tab>`, keys 1–5):
+The page has up to seven tabs (at the top, at the bottom on the iPhone; `#<slug>/<tab>`, keys 1–7):
 **Entscheiden** (decide: prompts and `human`), **Worker** (metrics, controls, CI runners),
 **Board**, **PRs** and **System** (`/api/system`: total and per-core CPU with history, load, RAM,
 disk, temperature, services per machine from hosts.conf, via `host-agent.mjs system`; plus the
 `servers` from `beads.leitstand.mjs`, measured via ssh with an sh script, without node or beadskit
-there). Above input fields there are tap-to-use answers (decision, close reason, chat, title
+there), **CI** and **Tokens** (see below). Above input fields there are tap-to-use answers (decision, close reason, chat, title
 templates, filters); on touch devices the ⇄ button on the card replaces dragging. Can be added to
 the home screen as a web app.
+
+**Tokens** (`/api/usage?range=7|30|90`, shared by all projects): token usage per model and machine
+from the transcripts under `~/.claude/projects` (subagents included), daily bars per model family,
+weekly and 5-hour limit in percent with a projection, and an estimate of what 100 % amounts to.
+Each machine counts on its own (`host-agent.mjs usage`, incremental, totals per 10 minutes in
+`~/.local/state/beadskit/usage/store.json`, kept after old transcripts are deleted); the leader
+fetches them via ssh and keeps everything in `leader.json`. Claude Code exposes the limit
+percentages only to the status line: run `node scripts/beadskit/leitstand/usage-statusline.mjs
+install --apply` once on every machine (an existing foreign `statusLine` stays unless `--force`). The
+estimate converts tokens to an API list-price equivalent (`usage-prices.mjs`): "100 % of the week ≈
+usage since the window start ÷ percent", with the spread across the intervals between measurements;
+with enough intervals it learns how strongly models and token types count. Usage outside these
+machines (claude.ai, the app) is invisible to it.
 
 Remote access: `scripts/beadskit/leitstand/leitstand-remote` (login with a token or user/password
 `leitstand-remote password [user]`, back to the token with `password --off`; per-IP lockout for
