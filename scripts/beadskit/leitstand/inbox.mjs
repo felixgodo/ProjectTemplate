@@ -207,10 +207,28 @@ export function wsOfRole(role, workspaces) {
 }
 
 /**
+ * bdw-Schritte zum Schließen durch den User. bd lehnt close ab, solange ein anderer Actor als
+ * Assignee eingetragen ist. Ein verwaister Assignee (Status nicht in_progress, z. B. nach Abgabe
+ * per Label ohne unclaim) wird vorher per Compare-and-swap geleert; einen laufenden Claim
+ * (in_progress) räumt der Leitstand nicht ungefragt ab, dafür gibt es „Unclaim“.
+ */
+export function planClose(id, reason, current = {}) {
+  const assignee = typeof current.assignee === 'string' ? current.assignee : '';
+  if (assignee && current.status === 'in_progress') {
+    throw new Error(`Issue ist von ${assignee} geclaimt – erst „Unclaim“, dann schließen`);
+  }
+  return [
+    ...(assignee ? [['update', id, '--assignee', '', '--if-assignee', assignee]] : []),
+    ['close', id, '--reason', reason],
+  ];
+}
+
+/**
  * Übersetzt eine Entscheidung in bdw-Aufrufe (je ein Argument-Array, ohne Shell).
+ * `current` ist der Stand aus `bdw show` (für close: assignee, status).
  * Wirft bei ungültiger Eingabe einen Error mit deutscher Meldung.
  */
-export function planDecision({ id, action, text }, date = today()) {
+export function planDecision({ id, action, text }, date = today(), current = {}) {
   checkId(id);
   if (!ACTIONS.includes(action)) throw new Error('unbekannte Aktion');
   const t = cleanText(text);
@@ -226,7 +244,7 @@ export function planDecision({ id, action, text }, date = today()) {
       return [...(t ? [['update', id, '--append-notes', note]] : []), ['defer', id]];
     case 'close':
       if (!t) throw new Error('Zum Schließen bitte einen Grund eintragen');
-      return [['close', id, '--reason', `${note}`]];
+      return planClose(id, note, current);
   }
 }
 
@@ -258,7 +276,7 @@ export function planIssueAction({ id, action, value, to, text }, current = {}, w
       if (to === 'done') {
         if (!t) throw new Error('Zum Schließen bitte einen Grund eintragen');
         if (status === 'closed') throw new Error('Issue ist schon geschlossen');
-        return [['close', id, '--reason', `User-Entscheidung ${date}: ${t}`]];
+        return planClose(id, `User-Entscheidung ${date}: ${t}`, current);
       }
       if (to === 'deferred') {
         if (status === 'deferred') throw new Error('Issue ist schon zurückgestellt');
@@ -2024,8 +2042,14 @@ function startServer(token, selfRoot) {
         return send(res, e.code || 400, { error: e.message });
       }
       if (path === '/api/decide') {
+        let current = {};
+        if (body?.action === 'close') {
+          if (typeof body.id !== 'string' || !ID_RE.test(body.id)) return send(res, 400, { error: 'ungültige Issue-ID' });
+          current = await showIssue(t, body.id);
+          if (!current) return send(res, 404, { error: 'Issue nicht gefunden' });
+        }
         let steps;
-        try { steps = planDecision(body); } catch (e) { return send(res, 400, { error: e.message }); }
+        try { steps = planDecision(body, today(), current); } catch (e) { return send(res, 400, { error: e.message }); }
         return runSteps(res, t, steps);
       }
       if (path === '/api/issue') {

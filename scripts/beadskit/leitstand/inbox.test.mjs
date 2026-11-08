@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import {
   buildWorkspaces, cardExtras, clientIp, groupIssues, isOwnHost, isPagePath, isSameOrigin, labelSlug, loginGuard, metrics,
-  normalizeConfig, normalizeExt, parseCookies, parseProjectList, projectPaths, parseMysql, parsePool, parseSlice, parseWorkers, planCreate, planDecision,
+  normalizeConfig, normalizeExt, parseCookies, parseProjectList, projectPaths, parseMysql, parsePool, parseSlice, parseWorkers, planClose, planCreate, planDecision,
   planIssueAction, planRestarts, planRunnerAction, planWorkerAction, prSummary, publicConfig, readBody, repoOfIssue,
   RESTART_COOLDOWN_MS, safeEqual, signSession, today, verifySession, hashPassword, parsePasswordLine, verifyPassword,
   workerRe, wsOfIssue, parseHostsConf, mapRoot, shQuote, remoteCommand, mergeHostWorkers, parseMarkers, routeWorkerAction,
@@ -69,6 +69,24 @@ test('Schließen nutzt den Text als Grund', () => {
   assert.deepEqual(planDecision({ id: 'spot-wxt.1', action: 'close', text: 'erledigt' }, D), [
     ['close', 'spot-wxt.1', '--reason', `User-Entscheidung ${D}: erledigt`],
   ]);
+});
+
+test('Schließen leert vorher einen verwaisten Assignee, lehnt einen laufenden Claim ab', () => {
+  // Abgabe per Label ohne unclaim: Status open, Assignee bleibt stehen, bd close lehnt ab
+  const stale = { status: 'open', assignee: 'club-add-101' };
+  assert.deepEqual(planDecision({ id: 'spot-u0l.53.3', action: 'close', text: 'erledigt' }, D, stale), [
+    ['update', 'spot-u0l.53.3', '--assignee', '', '--if-assignee', 'club-add-101'],
+    ['close', 'spot-u0l.53.3', '--reason', `User-Entscheidung ${D}: erledigt`],
+  ]);
+  assert.deepEqual(planIssueAction({ id: 'spot-1', action: 'move', to: 'done', text: 'doppelt' }, { labels: [], ...stale }, CODE, D), [
+    ['update', 'spot-1', '--assignee', '', '--if-assignee', 'club-add-101'],
+    ['close', 'spot-1', '--reason', `User-Entscheidung ${D}: doppelt`],
+  ]);
+  const live = { status: 'in_progress', assignee: 'fix-101' };
+  assert.throws(() => planDecision({ id: 'spot-1', action: 'close', text: 'x' }, D, live), /fix-101.*Unclaim/);
+  assert.throws(() => planIssueAction({ id: 'spot-1', action: 'move', to: 'done', text: 'x' }, { labels: [], ...live }, CODE, D), /Unclaim/);
+  assert.deepEqual(planClose('spot-1', 'r', { status: 'open', assignee: '' }), [['close', 'spot-1', '--reason', 'r']]);
+  assert.deepEqual(planClose('spot-1', 'r'), [['close', 'spot-1', '--reason', 'r']]);
 });
 
 test('ungültige ID, Aktion oder Länge werden abgelehnt', () => {
