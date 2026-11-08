@@ -59,6 +59,7 @@
   button.danger { color: var(--bad); }
   button.danger[data-armed] { background: var(--bad); border-color: var(--bad); color: #fff; }
   button.small { padding: 2px 8px; font-size: 12px; border-radius: 6px; }
+  select.small { padding: 1px 4px; font-size: 12px; border-radius: 6px; }
   button:disabled { opacity: .5; cursor: wait; }
   button.on { background: color-mix(in srgb, var(--warn) 20%, var(--panel)); border-color: var(--warn); }
   input, select, textarea { font: inherit; color: var(--ink); background: var(--bg); border: 1px solid var(--line);
@@ -468,7 +469,7 @@
   /* Finger statt Maus: größere Ziele, kein Drag & Drop */
   @media (pointer: coarse) {
     button, select, input:not([type=checkbox]):not([type=radio]) { min-height: 44px; }
-    button.small, .quick button, .coljump button, .projects button, .wsswitch button { min-height: 36px; }
+    button.small, select.small, .quick button, .coljump button, .projects button, .wsswitch button { min-height: 36px; }
     .core { min-height: 0; }
     .tabs button { min-height: 50px; }
     input[type=checkbox] { width: 20px; height: 20px; }
@@ -874,10 +875,23 @@ function workerCard(w) {
   </div>`;
 }
 
+// Abstand der /loop-Runden: Vorgabe aus dem Prompt (beads.project.sh), gesetzt per `workers interval`
+const INTERVALS = ['1m', '2m', '5m', '10m', '15m', '30m', '1h', '2h'];
+const loopDefault = (r) => /^\/loop (\d+[smhd]) \S/.exec(st.project.prompts?.[r] || '')?.[1] || null;
+function intervalSelect(r) {
+  const def = loopDefault(r);
+  if (!def) return '';
+  const cur = st.intervals?.[r] || '';
+  const opts = [...new Set([...INTERVALS, ...(cur ? [cur] : [])])]
+    .map((v) => `<option value="${esc(v)}" ${v === cur ? 'selected' : ''}>alle ${esc(v)}</option>`).join('');
+  return `<select class="small" data-interval="${esc(r)}" title="Abstand der Runden (/loop). Gilt ab dem nächsten Start; idle Worker ohne Claim startet der Leitstand gleich neu.">
+    <option value="" ${cur ? '' : 'selected'}>alle ${esc(def)} (Vorgabe)</option>${opts}</select>`;
+}
+
 const overLimit = (a) => !!st?.autorestart?.threshold && a?.contextTokens > st.autorestart.threshold;
 
 function renderWorkers() {
-  const key = JSON.stringify([P, st.workspace, st.workers, st.drain, st.hosts, st.autorestart?.threshold, st.prs.map((p) => [p.repo, p.number, p.ci, p.mergeable])]);
+  const key = JSON.stringify([P, st.workspace, st.workers, st.drain, st.hosts, st.autorestart?.threshold, st.intervals, st.prs.map((p) => [p.repo, p.number, p.ci, p.mergeable])]);
   if (keys.workers === key) return;
   keys.workers = key;
   const mine = st.workers.filter((w) => ROLES.includes(w.role));
@@ -893,6 +907,7 @@ function renderWorkers() {
     return `<section style="--c:${roleVar(r)}">
       <div class="role-head"><span class="sw"></span><b>${esc(ROLE_LABEL[r])}</b>
         <span class="muted">${ws.length} Worker, ${ws.filter((w) => w.status !== 'idle').length} aktiv</span>
+        ${intervalSelect(r)}
         <button class="small" data-wa="add" data-role="${esc(r)}" title="Einen weiteren ${esc(r)}-Worker im Terminal starten${hosts().length ? ' (auf dem Rechner unter „Neue auf“)' : ''}, Modell: ${esc(modelName(roleModel(r)))}">+1</button>
         <button class="small ${drained ? 'on' : ''}" data-wa="drain" data-role="${esc(r)}" data-off="${drained ? 1 : ''}"
           ${st.drain.all ? 'disabled title="globaler Drain aktiv"' : ''}>${drained ? 'Drain aktiv · aufheben' : 'auslaufen lassen'}</button>
@@ -1976,6 +1991,7 @@ document.addEventListener('change', (e) => {
     keys.controls = '';
     renderHead();
   }
+  if (e.target.dataset?.interval) applyInterval(e.target);
   if (e.target.id === 'autorestart') {
     const n = Number(e.target.value);
     post('/api/workers', n ? { action: 'autorestart', threshold: n } : { action: 'autorestart', off: true })
@@ -1983,6 +1999,32 @@ document.addEventListener('change', (e) => {
       .finally(reload);
   }
 });
+// Neuer Abstand für eine Rolle: speichern, dann die idle Worker ohne Claim neu starten (der /loop
+// eines laufenden Workers lässt sich nicht ändern); `workers restart` prüft Claim und Merge-Slot selbst
+async function applyInterval(sel) {
+  const role = sel.dataset.interval;
+  const value = sel.value;
+  sel.disabled = true;
+  try {
+    const r = await post('/api/workers', value ? { action: 'interval', ws: st.workspace, role, text: value }
+      : { action: 'interval', ws: st.workspace, role, off: true });
+    const ws = st.workers.filter((w) => w.role === role);
+    const idle = ws.filter((w) => w.status === 'idle' && !w.issues?.length);
+    const done = [];
+    for (const w of idle) {
+      try { await post('/api/workers', { action: 'restart', name: w.name }); done.push(w.name); } catch { /* übernimmt beim nächsten Neustart */ }
+    }
+    const rest = ws.length - done.length;
+    toast([r.output?.split('\n')[0] || 'gespeichert',
+      done.length ? `neu gestartet: ${done.join(', ')}` : '',
+      rest ? `${rest} beschäftigt, übernimmt das neue Intervall beim nächsten Neustart` : ''].filter(Boolean).join(' · '));
+  } catch (err) { toast(err.message, true); } finally {
+    sel.disabled = false;
+    keys.workers = '';
+    reload();
+  }
+}
+
 document.addEventListener('input', (e) => {
   if (e.target.id === 'i-text' && drawer?.id) drafts.set(drawer.id, e.target.value);
 });

@@ -7,7 +7,7 @@ import {
   planIssueAction, planRestarts, planRunnerAction, planWorkerAction, prSummary, publicConfig, readBody, repoOfIssue,
   RESTART_COOLDOWN_MS, safeEqual, signSession, today, verifySession, hashPassword, parsePasswordLine, verifyPassword,
   workerRe, wsOfIssue, parseHostsConf, mapRoot, shQuote, remoteCommand, mergeHostWorkers, parseMarkers, routeWorkerAction,
-  parsePrompt, parseDecision, decisionOf, collectServers, collectSystems, QUICK, waitsOf,
+  parsePrompt, parseDecision, decisionOf, collectServers, collectSystems, QUICK, waitsOf, validInterval, loopInterval,
 } from './inbox.mjs';
 import { readFileSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
@@ -896,11 +896,35 @@ test('mergeHostWorkers: Rechner an jedem Worker, Workspace aus der Rolle, ein Re
 test('parseMarkers: Drain global, je Rolle, je Rechner, Schwelle des Auto-Neustarts', () => {
   const m = parseMarkers({ 'beadskit.drain-fix': '1', 'beadskit.drain@mac': '1', 'beadskit.autorestart': '300000', schema_version: 1 },
     ['fix', 'verify'], ['mac', 'pc']);
-  assert.deepEqual(m, { drain: { all: false, roles: { fix: true, verify: false }, hosts: { mac: true, pc: false } }, threshold: 300000 });
+  assert.deepEqual(m, { drain: { all: false, roles: { fix: true, verify: false }, hosts: { mac: true, pc: false } }, threshold: 300000, intervals: {} });
   const all = parseMarkers({ 'beadskit.drain': '1', 'beadskit.autorestart': 'kaputt' }, ['fix'], []);
-  assert.deepEqual(all, { drain: { all: true, roles: { fix: true }, hosts: {} }, threshold: null });
+  assert.deepEqual(all, { drain: { all: true, roles: { fix: true }, hosts: {} }, threshold: null, intervals: {} });
+  // Abstand je Rolle: nur bekannte Rollen und gültige Werte
+  assert.deepEqual(parseMarkers({ 'beadskit.interval-fix': '2m', 'beadskit.interval-verify': "1m'; x", 'beadskit.interval-nope': '5m' },
+    ['fix', 'verify']).intervals, { fix: '2m' });
   // beads antwortet nicht: nichts markiert
   assert.deepEqual(parseMarkers(null, ['fix']).drain.roles, { fix: false });
+});
+
+test('interval: Abstand prüfen, Vorgabe aus dem Prompt, planWorkerAction und Route', () => {
+  for (const v of ['1m', '2m', '30m', '999m', '1h', '24h']) assert.equal(validInterval(v), true, v);
+  for (const v of ['', '0m', '1000m', '25h', '0h', '5s', '1d', '2m ', ' 2m', "2m'", 2, null, ['2m']]) assert.equal(validInterval(v), false, String(v));
+  assert.equal(loopInterval('/loop 30m /spot-club-search'), '30m');
+  assert.equal(loopInterval('/loop /spot-club-search'), null);
+  assert.equal(loopInterval('/spot-search'), null);
+  assert.equal(loopInterval(undefined), null);
+  const p = (body) => planWorkerAction(body, WS);
+  assert.deepEqual(p({ action: 'interval', role: 'fix', text: '2m' }), ['interval', 'fix', '2m']);
+  assert.deepEqual(p({ action: 'interval', role: 'fix', off: true }), ['interval', 'fix', '--off']);
+  assert.throws(() => p({ action: 'interval', role: 'fix', text: '--off' }), /Abstand/);
+  assert.throws(() => p({ action: 'interval', role: 'fix', text: '2m --dry-run' }), /Abstand/);
+  assert.throws(() => p({ action: 'interval', role: 'nope', text: '2m' }), /Rolle/);
+  // Markierung liegt in der gemeinsamen Datenbank: läuft auf diesem Rechner
+  assert.deepEqual(routeWorkerAction({ action: 'interval', role: 'fix' }, { hosts: [{ name: 'mac' }, { name: 'pc' }], self: 'pc' }), ['pc']);
+  // der Pfad der Dateien bleibt auf dem Server
+  const cfg = normalizeConfig({ root: '/r', slug: 's', interval: '/r/.git/s-workers-interval' });
+  assert.equal(cfg.interval, '/r/.git/s-workers-interval');
+  assert.equal('interval' in publicConfig(cfg), false);
 });
 
 test('planWorkerAction drain role host / routeWorkerAction: wo die Aktion läuft', () => {

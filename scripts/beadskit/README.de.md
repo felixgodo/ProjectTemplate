@@ -57,6 +57,7 @@ scripts/beadskit/workers drain && scripts/beadskit/workers ls   # warten bis idl
 scripts/beadskit/workers stop --all
 scripts/beadskit/workers restart fix-2                     # frischer Kontext, nur zwischen zwei Runden
 scripts/beadskit/workers autorestart --over 200k           # macht der Leitstand dann selbst
+scripts/beadskit/workers interval club-search 2m          # Abstand der /loop-Runden einer Rolle (--off: Vorgabe)
 scripts/beadskit/workers top                               # Live-Übersicht: Rechner (CPU, RAM, SSD …), Projekte, Worker
 scripts/beadskit/workers screen fix-2                       # Bildschirm des Terminals (z. B. eine Rückfrage)
 scripts/beadskit/workers press fix-2 2                     # Rückfrage mit Taste 2 beantworten (1–9, Escape, Enter)
@@ -110,7 +111,7 @@ PRs mit CI-Stand (aller Repos aus `BK_REPOS`) und die CI-Runner, wenn das Projek
 Er steuert Issues und Worker als Actor `user` und startet mit `autorestart` Worker mit großem
 Kontext selbst neu. Das Select **Modell** oben (neben „Neue auf“ bei zwei Rechnern, je Browser
 gespeichert) gibt „starten …“ und +1 ein `--model` mit; *Rollen-Vorgabe* nimmt die Vorgabe der Rolle. Im
-Start-Dialog hat jede Rolle ein eigenes Modell-Select (vorbelegt mit dem oberen Modell bzw. der Vorgabe). Tests: `node --test scripts/beadskit/leitstand/*.test.mjs`.
+Start-Dialog hat jede Rolle ein eigenes Modell-Select (vorbelegt mit dem oberen Modell bzw. der Vorgabe). Im Worker-Tab stellt das Select **alle 30m** je Rolle den Abstand der `/loop`-Runden ein (`workers interval`, Vorgabe aus `bk_prompt`); idle Worker ohne Claim startet der Leitstand dann gleich neu, beschäftigte übernehmen ihn beim nächsten Neustart. Tests: `node --test scripts/beadskit/leitstand/*.test.mjs`.
 
 Die Seite hat bis zu sieben Tabs (oben, auf dem iPhone unten; `#<slug>/<tab>`, Tasten 1–7): **Entscheiden**
 (Rückfragen und `human`), **Worker** (Kennzahlen, Steuerung, CI-Runner), **Board**, **PRs** und

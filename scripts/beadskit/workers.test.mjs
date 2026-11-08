@@ -210,6 +210,49 @@ test('start --ws clubs --dry-run plant die vier Club-Rollen mit ihren Prompts', 
   assert.doesNotMatch(busy.stdout, /club-settings-|fix-/);
 });
 
+test('interval: Abstand je Rolle setzen, auflisten, löschen; start, add und restart nehmen ihn', () => {
+  const { root, workers, marker } = testRepo();
+  clearMarkers(testRepo());
+  const file = marker.replace(/drain$/, 'interval-club-search');
+  rmSync(file, { force: true });
+  const set = workers(root, ['interval', 'club-search', '2m']);
+  assert.equal(set.status, 0, set.stderr);
+  assert.match(set.stdout, /club-search: alle 2m/);
+  assert.equal(readFileSync(file, 'utf8'), '2m');
+  const ls = workers(root, ['interval']);
+  assert.match(ls.stdout, /^club-search 2m \(Vorgabe 30m\)$/m);
+  assert.match(ls.stdout, /^club-add 10m$/m);
+  assert.match(ls.stdout, /^fix 10m$/m);
+
+  const r = workers(root, ['start', '--ws', 'clubs', 'club-search=1', 'club-add=0', 'club-settings=0', 'club-test=0', '--dry-run']);
+  assert.equal(r.status, 0, r.stderr);
+  assert.deepEqual(launches(r.stdout), ["iTerm-Tab club-search-1: claude -w club-search-1 -n club-search-1 '/loop 2m /spot-club-search'"]);
+  assert.match(workers(root, ['add', 'club-search', '--dry-run', '--bg']).stdout, /'\/loop 2m \/spot-club-search'/);
+  // andere Rollen behalten ihre Vorgabe
+  assert.match(workers(root, ['add', 'club-add', '--dry-run', '--bg']).stdout, /'\/loop 10m \/spot-club-add'/);
+  const rs = workers(root, ['restart', 'club-search-1', '--dry-run'],
+    [{ id: 'cs', pid: 1, kind: 'background', name: 'club-search-1', status: 'idle', cwd: join(realpathSync(root), '.claude/worktrees/club-search-1') }],
+    { FAKE_LIST: '[]' });
+  assert.equal(rs.status, 0, rs.stderr);
+  assert.match(rs.stdout, /\/loop 2m \/spot-club-search/);
+
+  // ungültige Werte und Rollen ohne festen Abstand: abgelehnt, Markierung unverändert
+  for (const bad of ['0m', '30', '25h', '5s', "2m' ; rm -rf /", '1000m']) {
+    assert.equal(workers(root, ['interval', 'club-search', bad]).status, 2, bad);
+  }
+  assert.equal(workers(root, ['interval', 'nope', '2m']).status, 2);
+  assert.equal(readFileSync(file, 'utf8'), '2m');
+  // eine kaputte Markierung (von Hand) fällt auf die Vorgabe zurück
+  writeFileSync(file, "1m'; x");
+  assert.match(workers(root, ['add', 'club-search', '--dry-run', '--bg']).stdout, /'\/loop 30m \/spot-club-search'/);
+
+  assert.equal(workers(root, ['interval', 'club-search', '--off']).status, 0);
+  assert.equal(existsSync(file), false);
+  assert.match(workers(root, ['add', 'club-search', '--dry-run', '--bg']).stdout, /'\/loop 30m \/spot-club-search'/);
+  const c = JSON.parse(workers(root, ['config']).stdout);
+  assert.equal(c.interval, marker.replace(/drain$/, 'interval'));
+});
+
 test('--model: Terminal und --bg starten mit dem Modell, ungültige Werte abgelehnt', () => {
   const { root, workers } = testRepo();
   clearMarkers(testRepo());
@@ -622,6 +665,20 @@ test('zwei Rechner: autorestart in bd kv, config mit Rechner-Angaben', () => {
   assert.deepEqual(kv(), {});
   const single = JSON.parse(workers(root, ['config']).stdout);
   assert.deepEqual([single.leader, single.markers, single.hostBase], [null, 'file', 0]);
+});
+
+test('zwei Rechner: interval in bd kv, gilt auf beiden Rechnern', () => {
+  const { root, workers, marker } = testRepo();
+  rmSync(kvFile, { force: true });
+  assert.equal(workers(root, ['interval', 'club-test', '1h'], [], pc()).status, 0);
+  assert.deepEqual(kv(), { 'beadskit.interval-club-test': '1h' });
+  assert.equal(existsSync(marker.replace(/drain$/, 'interval-club-test')), false);
+  assert.match(workers(root, ['add', 'club-test', '--dry-run', '--bg'], [], mac()).stdout, /'\/loop 1h \/spot-club-test'/);
+  // beads antwortet nicht: Vorgabe statt Abbruch beim Start, setzen scheitert
+  assert.match(workers(root, ['add', 'club-test', '--dry-run', '--bg'], [], mac({ FAKE_BDW_FAIL: '1' })).stdout, /'\/loop 15m \/spot-club-test'/);
+  assert.equal(workers(root, ['interval', 'club-test', '2m'], [], pc({ FAKE_BDW_FAIL: '1' })).status, 1);
+  assert.equal(workers(root, ['interval', 'club-test', '--off'], [], mac()).status, 0);
+  assert.deepEqual(kv(), {});
 });
 
 test('bdw: im Worktree immer das .beads/ des Haupt-Checkouts, Actor aus dem Worktree', () => {
