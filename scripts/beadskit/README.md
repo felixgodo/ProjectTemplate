@@ -60,6 +60,7 @@ scripts/beadskit/workers drain && scripts/beadskit/workers ls   # wait until idl
 scripts/beadskit/workers stop --all
 scripts/beadskit/workers restart fix-2                     # fresh context, only between two rounds
 scripts/beadskit/workers autorestart --over 200k           # the Leitstand then does this on its own
+scripts/beadskit/workers interval club-search 2m          # gap between /loop rounds of a role (--off: default)
 scripts/beadskit/workers top                               # live overview: machines (CPU, RAM, SSD …), projects, workers
 scripts/beadskit/workers screen fix-2                       # the terminal's screen (e.g. a prompt waiting for input)
 scripts/beadskit/workers press fix-2 2                     # answer a prompt with key 2 (1–9, Escape, Enter)
@@ -118,7 +119,7 @@ runners, if the project uses any.
 It controls issues and workers as actor `user` and uses `autorestart` to restart workers with a
 large context on its own. The header select **Model** (next to “Start on” with two machines, stored
 per browser) passes `--model` to “start …” and +1; *Role default* uses the role's default. In the start
-dialog every role has its own model select (prefilled with the header model or the role default). Tests: `node --test scripts/beadskit/leitstand/*.test.mjs`.
+dialog every role has its own model select (prefilled with the header model or the role default). In the worker tab the select **alle 30m** sets the gap between `/loop` rounds per role (`workers interval`, default from `bk_prompt`); the Leitstand restarts idle workers without a claim right away, busy ones pick it up on their next restart. Tests: `node --test scripts/beadskit/leitstand/*.test.mjs`.
 
 The page has up to seven tabs (at the top, at the bottom on the iPhone; `#<slug>/<tab>`, keys 1–7):
 **Entscheiden** (decide: prompts and `human`), **Worker** (metrics, controls, CI runners),

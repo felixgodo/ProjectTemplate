@@ -350,10 +350,24 @@ export function planCreate({ title, description, priority, modul, type, human, .
     `--labels=${labels.join(',')}`]];
 }
 
+/** Abstand der /loop-Runden wie in `workers interval`: 1–999 Minuten oder 1–24 Stunden. */
+export function validInterval(v) {
+  if (typeof v !== 'string') return false;
+  const m = /^([1-9]\d{0,2})m$/.exec(v) || /^([1-9]\d?)h$/.exec(v);
+  return !!m && (v.endsWith('m') || Number(m[1]) <= 24);
+}
+
+/** Abstand im Prompt "/loop <dauer> /…", null ohne festen Abstand (dann gibt es nichts einzustellen). */
+export function loopInterval(prompt) {
+  const m = /^\/loop (\d+[smhd]) \S/.exec(String(prompt ?? ''));
+  return m ? m[1] : null;
+}
+
 /**
  * Argumente für scripts/beadskit/workers. `ws` (Standard code) bestimmt, welche Rollen start, add
  * und drain annehmen. drain mit role 'all' = globaler Drain, role 'ws' = alle Rollen des Workspaces,
- * role 'host' = alle Worker des Rechners `host` (einer aus `hosts`). start und add nehmen ein
+ * role 'host' = alle Worker des Rechners `host` (einer aus `hosts`). interval setzt den Abstand der
+ * /loop-Runden einer Rolle (text, z. B. '2m'), mit off wieder die Vorgabe. start und add nehmen ein
  * `model` aus MODELS (--model), start dazu `models` je Rolle (--model rolle=id). Wo die Aktion läuft, sagt routeWorkerAction.
  */
 export function planWorkerAction({ action, role, name, force, off, counts, threshold, text, ws, host, model, models }, workspaces, hosts = []) {
@@ -405,6 +419,12 @@ export function planWorkerAction({ action, role, name, force, off, counts, thres
       if (!t) throw new Error('kein Text');
       if (t.length > 4000) throw new Error('Text zu lang (höchstens 4000 Zeichen)');
       return ['send', name, '--', t];
+    }
+    case 'interval': {
+      if (!roles.includes(role)) throw new Error('unbekannte Rolle');
+      if (off) return ['interval', role, '--off'];
+      if (!validInterval(text)) throw new Error('Abstand: 1m–999m oder 1h–24h');
+      return ['interval', role, text];
     }
     case 'autorestart': {
       if (off) return ['autorestart', '--off'];
@@ -944,7 +964,7 @@ export function mergeHostWorkers(perHost, workspaces) {
 
 /**
  * Markierungen aus `bd kv list` (zwei Rechner): beadskit.drain, .drain-<rolle>, .drain@<rechner>,
- * .autorestart (Schwelle in Tokens).
+ * .autorestart (Schwelle in Tokens), .interval-<rolle> (Abstand der /loop-Runden).
  */
 export function parseMarkers(kv, roles = [], hosts = []) {
   const o = kv && typeof kv === 'object' ? kv : {};
@@ -958,13 +978,14 @@ export function parseMarkers(kv, roles = [], hosts = []) {
       hosts: Object.fromEntries(hosts.map((h) => [h, has(`drain@${h}`)])),
     },
     threshold: Number.isInteger(n) && n > 0 ? n : null,
+    intervals: Object.fromEntries(roles.map((r) => [r, o[`beadskit.interval-${r}`]]).filter(([, v]) => validInterval(v))),
   };
 }
 
 /**
  * Auf welchen Rechnern eine Worker-Aktion läuft. start/add: der gewählte (Standard dieser),
- * stop --all: alle erreichbaren, stop/restart/send: der, auf dem der Worker läuft, drain und
- * autorestart: dieser (die Markierungen liegen in der gemeinsamen Datenbank). press wie send.
+ * stop --all: alle erreichbaren, stop/restart/send: der, auf dem der Worker läuft, drain,
+ * interval und autorestart: dieser (die Markierungen liegen in der gemeinsamen Datenbank). press wie send.
  */
 export function routeWorkerAction({ action, name, host }, { hosts = [], self = null, workers = [] } = {}) {
   if (!hosts.length) return [null];
@@ -1057,6 +1078,8 @@ export function normalizeConfig(cfg) {
     modules: words(cfg.modules),
     drain: typeof cfg.drain === 'string' ? cfg.drain : null,
     autorestart: typeof cfg.autorestart === 'string' ? cfg.autorestart : null,
+    // Dateien <interval>-<rolle> (ein Rechner), bei älteren workers ohne interval fehlt der Pfad
+    interval: typeof cfg.interval === 'string' ? cfg.interval : null,
     start: cfg.start && typeof cfg.start === 'object' ? cfg.start : {},
     prompts: cfg.prompts && typeof cfg.prompts === 'object' ? cfg.prompts : {},
     colors: cfg.colors && typeof cfg.colors === 'object' ? cfg.colors : {},
@@ -1073,7 +1096,7 @@ export function normalizeConfig(cfg) {
 
 /** Öffentlicher Teil einer Projekt-Config für die Seite (ohne lokale Pfade). */
 export function publicConfig(cfg) {
-  const { root, drain, autorestart, repos, markers, ...rest } = cfg;
+  const { root, drain, autorestart, interval, repos, markers, ...rest } = cfg;
   return { ...rest, repos: repos.map((r) => r.key) };
 }
 
@@ -1665,7 +1688,14 @@ function startServer(token, selfRoot) {
       const n = cfg.autorestart ? Number((await readFile(cfg.autorestart, 'utf8')).trim()) : NaN;
       if (Number.isInteger(n) && n > 0) threshold = n;
     } catch { /* aus */ }
-    return { drain: { all, roles, hosts: {} }, threshold };
+    const intervals = {};
+    for (const r of cfg.roles) {
+      try {
+        const v = cfg.interval ? (await readFile(`${cfg.interval}-${r}`, 'utf8')).trim() : '';
+        if (validInterval(v)) intervals[r] = v;
+      } catch { /* Vorgabe */ }
+    }
+    return { drain: { all, roles, hosts: {} }, threshold, intervals };
   }
 
   async function projectList() {
@@ -1746,7 +1776,7 @@ function startServer(token, selfRoot) {
     const ws = workspaces[wsName];
     const { bd } = tools(cfg);
     const conf = await hostsConf();
-    const [issues, slot, perHost, pr, { drain, threshold }] = await Promise.all([
+    const [issues, slot, perHost, pr, { drain, threshold, intervals }] = await Promise.all([
       bd(['list', '--all', '-n', '0']),
       bd(['merge-slot', 'check']),
       hostWorkers(p, conf),
@@ -1812,6 +1842,8 @@ function startServer(token, selfRoot) {
         host: workers.find((w) => w.name === slot.holder)?.host ?? null } : null,
       drain,
       autorestart: { threshold, recent: restartsOf(cfg.slug).recent.slice(0, 5) },
+      // Abstand der /loop-Runden je Rolle, nur gesetzte (Vorgabe steht in project.prompts)
+      intervals: intervals || {},
       models: MODELS,
       workers,
       // zwei Rechner: Name, erreichbar, Leitrechner, dieser; leer bei einem Rechner
