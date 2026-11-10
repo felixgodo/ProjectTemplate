@@ -183,7 +183,8 @@ switch the workflows: an older service starts runners without the label, and the
 - Token: fine-grained PAT for these repos with Administration (Read and write) and Actions (Read),
   entered with `runner-pool set-token`. It is stored only on the server.
 - If jobs hang in „Queued“, check `runner-pool status` and `runner-pool logs` first. The service also
-  serves runs that GitHub leaves on „pending“ although their jobs are queued; a run waiting longer than
+  serves runs that GitHub leaves on „pending“ although their jobs are queued, and runs the GitHub API
+  status filter misses (it also reads the latest runs without a filter); a run waiting longer than
   `STALE` (pool.conf, default 1800 s) is flagged in `status` („wartet seit …“, plus „Lauf pending“) and
   in the dashboard („lange wartend“), also when the pool is simply full. It is never cancelled
   automatically: if it still does not start, cancel it with `gh run cancel <run-id>`.
