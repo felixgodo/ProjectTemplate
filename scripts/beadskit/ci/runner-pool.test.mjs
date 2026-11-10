@@ -159,6 +159,26 @@ test('Runde: Lauf auf pending mit wartenden Jobs bekommt einen Runner und gilt n
     [[40, 1, 'pending', true], [41, 1, 'queued', false]]);
 });
 
+test('Runde: Lauf, den der Statusfilter von GitHub nicht liefert, kommt über die Liste ohne Filter', () => {
+  // Attrappe ignoriert die Query: jede Abfrage liefert dieselbe Liste; abgeschlossene Läufe fallen weg
+  const r = round({
+    'repos_o_a_actions_runs': { workflow_runs: [
+      { id: 50, status: 'queued', head_branch: 'feat/z', display_title: 'Feat Z', pull_requests: [{ number: 7 }] },
+      { id: 51, status: 'completed', head_branch: 'main', display_title: 'Alt', pull_requests: [] },
+    ] },
+    'repos_o_a_actions_runs_50_jobs': { jobs: [
+      { status: 'queued', name: 'Module', labels: ['self-hosted', 'a', 'run-50'], created_at: '2026-11-10T00:14:01Z' },
+    ] },
+    'repos_o_a_actions_runners': { runners: [] },
+    'repos_o_a_actions_runners_generate-jitconfig': { encoded_jit_config: 'JITCFG' },
+  }, 'REPOS="o/a:a"\nSLOTS=2\n');
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.log, /actions\/runs\?per_page=30$/m);
+  assert.doesNotMatch(r.log, /actions\/runs\/51\/jobs/);
+  assert.equal(r.log.split('\n').filter((l) => l.startsWith('docker run')).length, 1);
+  assert.deepEqual(r.state.queue.map((q) => [q.run, q.pr, q.jobs]), [[50, 7, 1]]);
+});
+
 test('Runde: ungültiger REPOS-Eintrag bricht ab', () => {
   const dir = mkdtempSync(join(tmpdir(), 'runner-pool-'));
   writeFileSync(join(dir, 'pool.conf'), 'REPOS="o/a:A;rm"\n');

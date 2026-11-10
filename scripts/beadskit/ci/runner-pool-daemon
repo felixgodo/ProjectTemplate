@@ -204,13 +204,17 @@ api() {
 # eines Repos, je ein JSON-Objekt pro Zeile: {kind: queued|running|run|ok, …}. run: ein offener Lauf,
 # ok: die Läufe des Repos waren lesbar (nur dann räumt prune_prio auf). pending: GitHub lässt einen
 # Lauf manchmal auf pending stehen, obwohl seine Jobs queued sind; ohne diese Abfrage bekämen sie nie
-# einen Runner und der Lauf blockierte seine Concurrency-Gruppe. Ein Lauf, der zwischen den Abfragen
-# den Status wechselt, zählt nur einmal (sort -u nach der ID).
+# einen Runner und der Lauf blockierte seine Concurrency-Gruppe. Ohne Filter: der Statusfilter von
+# GitHub verliert manchmal einen Lauf (status=queued meldet total_count 0, die Liste zeigt ihn als
+# queued); deshalb zusätzlich die letzten Läufe ohne Filter, davon alle nicht abgeschlossenen. Ein
+# Lauf, der zwischen den Abfragen den Status wechselt oder mehrfach kommt, zählt nur einmal (sort -u
+# nach der ID).
 repo_jobs() {
   local repo=$1 label=$2 id rstatus runs
-  runs=$(for status in queued in_progress pending; do
-    api "repos/$repo/actions/runs?status=$status&per_page=30" |
-      jq -r '.workflow_runs[] | [.id, (.status // ""), (.pull_requests[0].number // ""), (.html_url // ""), .head_branch, .display_title]
+  runs=$(for status in queued in_progress pending ''; do
+    api "repos/$repo/actions/runs?${status:+status=$status&}per_page=30" |
+      jq -r '.workflow_runs[] | select(.status != "completed")
+        | [.id, (.status // ""), (.pull_requests[0].number // ""), (.html_url // ""), .head_branch, .display_title]
         | map(tostring | gsub("[\u001f\n]"; " ")) | join("\u001f")' || exit 1
   done) || return 1
   runs=$(sort -u -t $'\x1f' -k1,1 <<<"$runs")
