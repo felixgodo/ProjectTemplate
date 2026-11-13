@@ -86,6 +86,15 @@ Ein einzelner Befehl, damit die Sandbox ihn ohne Rückfrage erlaubt. Die Ausgabe
   Aufhören weder einen Claim noch den Merge-Slot.
 - Mitten in der Arbeit nicht nach der Markierung schauen, nur an den genannten Stellen.
 
+## Leerlauf
+
+Nur `DRAIN` beendet den `/loop`. Leere Runden sind kein Grund dafür, auch viele hintereinander
+nicht: Neue Arbeit kommt jederzeit von anderen Workern (Such-Worker, Verify, Merge) oder vom User.
+Ein Worker, der seinen Loop löscht (`CronDelete`, „Loop gestoppt“), verpasst sie, bis jemand ihn
+von Hand neu startet. Eine leere Runde endet mit einer Zeile wie „nichts zu tun“, ohne Frage an den
+User. Liefert der Claim jede Runde dasselbe Issue, das der Worker nicht bearbeiten darf, liegt ein
+falsches Label vor: Label korrigieren oder `human`-Issue anlegen, den Loop aber weiterlaufen lassen.
+
 ## Harte Grenzen
 - Kein Deploy, kein Neustart, keine Änderung auf Servern. Server nur lesend.
 - Nie direkt nach `{{BASE}}` pushen, nie fremde Branches force-pushen. Nur der Verify-Worker
