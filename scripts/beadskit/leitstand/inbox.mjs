@@ -112,7 +112,8 @@ const cssColor = (c) => (typeof c === 'string' && /^(#[0-9a-f]{3,8}|rgba?\([0-9 
  * die Seite außerhalb des Boards. Die erste Phase ist die, die Worker claimen: offen = „Bereit“,
  * in Arbeit = Spalte der Phase. moveTargets: Ziele beim Verschieben (die erste Phase fehlt
  * absichtlich, claimen nur Worker). split: human-Issues mit diesem Label bekommen eine eigene
- * Spalte (z. B. „zum Aktivieren“).
+ * Spalte (z. B. „zum Aktivieren“). lanes: offene Issues mit diesem Label bekommen eine eigene
+ * Board-Spalte vor „Bereit“, unabhängig von Phase und Status (z. B. Such-Aufträge).
  */
 export function buildWorkspaces(cfg, ext = {}) {
   const out = {};
@@ -124,15 +125,20 @@ export function buildWorkspaces(cfg, ext = {}) {
       p.title || (code && CODE_COLS[p.key]?.[0]) || (i === 0 ? 'In Arbeit' : cap(p.key))]));
     const uiCol = (k) => (ui.cols && typeof ui.cols[k] === 'object' && ui.cols[k]) || {};
     const col = (k, title, color, hint) => [k, str(uiCol(k).title, title), cssColor(uiCol(k).color) || color, str(uiCol(k).hint, hint)];
+    const split = (Array.isArray(ui.split) ? ui.split : [])
+      .filter((s) => s && KEY_RE.test(s.key) && typeof s.label === 'string' && s.label && !phases.includes(s.key))
+      .map((s) => ({ key: s.key, label: s.label, title: str(s.title, s.key) }));
+    const reserved = new Set([...phases, ...split.map((s) => s.key), 'ready', 'done', 'human', 'deferred']);
+    const lanes = (Array.isArray(ui.lanes) ? ui.lanes : [])
+      .filter((s) => s && KEY_RE.test(s.key) && typeof s.label === 'string' && s.label && !reserved.has(s.key) && reserved.add(s.key))
+      .map((s) => ({ key: s.key, label: s.label, title: str(s.title, cap(s.key)), color: cssColor(s.color) || 'var(--muted)', hint: str(s.hint, `Label ${s.label}`) }));
     const cols = [
+      ...lanes.map((l) => [l.key, l.title, l.color, l.hint]),
       col('ready', 'Bereit', 'var(--ready)', code ? CODE_COLS.ready[2] : 'Wartet auf einen Worker'),
       ...phases.map((p, i) => col(p, titleOf[p], (code && CODE_COLS[p]?.[1]) || PHASE_PALETTE[i % PHASE_PALETTE.length],
         (code && CODE_COLS[p]?.[2]) || (i === 0 ? 'Geclaimt von einem Worker' : ''))),
       col('done', 'Erledigt', 'var(--done)', 'Geschlossen in den letzten 24 h'),
     ];
-    const split = (Array.isArray(ui.split) ? ui.split : [])
-      .filter((s) => s && KEY_RE.test(s.key) && typeof s.label === 'string' && s.label && !phases.includes(s.key))
-      .map((s) => ({ key: s.key, label: s.label, title: str(s.title, s.key) }));
     const roleLabels = Object.fromEntries(w.roles.map((r) => [r,
       str(ui.roleLabels?.[r], (code && CODE_ROLE_LABELS[r]) || cap(r.replace(/-/g, ' ')))]));
     const colors = Object.fromEntries(w.roles.map((r) => [r,
@@ -157,9 +163,10 @@ export function buildWorkspaces(cfg, ext = {}) {
       moveTargets: ['ready', ...phases.slice(1), 'human', 'deferred', 'done'],
       cols,
       split,
+      lanes: lanes.map(({ key, label }) => ({ key, label })),
       group,
       kpis: Array.isArray(ui.kpis) ? ui.kpis : [
-        ['human', 'wartet auf dich'], ...split.map((s) => [s.key, s.title]), ['open', 'bereit'],
+        ['human', 'wartet auf dich'], ...split.map((s) => [s.key, s.title]), ...lanes.map((l) => [l.key, l.title]), ['open', 'bereit'],
         ['released', `bereit: ${w.phases[0].title || cap(phases[0])}`],
         ...phases.map((p, i) => [p, i === 0 ? 'in Arbeit' : titleOf[p]]),
         ...(code ? [['mergedToday', 'heute gemergt']] : []),
@@ -294,15 +301,17 @@ export function planIssueAction({ id, action, value, to, text }, current = {}, w
         if (!labels.includes('human')) update.push('--add-label', 'human');
         update.push(...note('braucht Entscheidung'));
       } else {
-        const phase = to === 'ready' ? ws.readyPhase : to;
+        // Issues einer lane (z. B. Such-Aufträge) haben keine Phase: Freigeben nimmt nur human weg
+        const lane = to === 'ready' && (ws.lanes || []).some((l) => labels.includes(l.label));
+        const phase = to === 'ready' ? (lane ? null : ws.readyPhase) : to;
         if (labels.includes('human')) update.push('--remove-label', 'human');
         // split-Labels (z. B. aktivieren) gelten nur zusammen mit human
         for (const s of ws.split) if (labels.includes(s.label)) update.push('--remove-label', s.label);
         for (const l of labels) {
           if (l.startsWith('phase:') && l !== `phase:${phase}`) update.push('--remove-label', l);
         }
-        if (!labels.includes(`phase:${phase}`)) update.push('--add-label', `phase:${phase}`);
-        update.push(...note(`verschoben nach phase:${phase}`));
+        if (phase && !labels.includes(`phase:${phase}`)) update.push('--add-label', `phase:${phase}`);
+        update.push(...note(phase ? `verschoben nach phase:${phase}` : 'freigegeben'));
       }
       steps.push(update);
       return steps;
@@ -583,12 +592,13 @@ export function isBoardIssue(raw) {
 
 /**
  * Ordnet die Issues eines Workspaces den Spalten zu. human hat Vorrang vor der Phase; human mit
- * einem split-Label landet in dessen Spalte. Spätere Phasen gehen nach Label (die letzte zuerst),
+ * einem split-Label landet in dessen Spalte, danach ein Issue mit lane-Label in dessen. Spätere Phasen gehen nach Label (die letzte zuerst),
  * die erste nach Status: offen = ready, in Arbeit = Spalte der Phase.
  */
 export function groupIssues(issues, ws, workspaces, now = Date.now()) {
   const later = ws.phases.slice(1).reverse();
-  const cols = Object.fromEntries(['human', ...ws.split.map((s) => s.key), 'ready', ...ws.phases, 'done', 'deferred']
+  const lanes = ws.lanes || [];
+  const cols = Object.fromEntries(['human', ...ws.split.map((s) => s.key), ...lanes.map((l) => l.key), 'ready', ...ws.phases, 'done', 'deferred']
     .map((k) => [k, []]));
   for (const raw of Array.isArray(issues) ? issues : []) {
     if (!isBoardIssue(raw) || wsOfIssue(raw, workspaces) !== ws.name) continue;
@@ -602,6 +612,7 @@ export function groupIssues(issues, ws, workspaces, now = Date.now()) {
       if (raw.closed_at && now - Date.parse(raw.closed_at) <= DONE_WINDOW_MS) cols.done.push(it);
     } else if (raw.status === 'deferred') cols.deferred.push(it);
     else if (labels.includes('human')) cols[ws.split.find((s) => labels.includes(s.label))?.key ?? 'human'].push(it);
+    else if (lanes.some((l) => labels.includes(l.label))) cols[lanes.find((l) => labels.includes(l.label)).key].push(it);
     else {
       const p = later.find((x) => labels.includes(`phase:${x}`));
       if (p) cols[p].push(it);
@@ -652,7 +663,7 @@ export function metrics(cols, ws, merged = [], now = Date.now()) {
     done24h: n('done'),
     mergedToday: merged.filter((p) => p.mergedAt && today(new Date(p.mergedAt)) === day).length,
     leadMs: lead.length ? Math.round(lead.reduce((a, b) => a + b, 0) / lead.length) : null,
-    stale: ws.phases.flatMap((k) => cols[k]).filter((i) => i.stale).length,
+    stale: [...ws.phases, ...(ws.lanes || []).map((l) => l.key)].flatMap((k) => cols[k]).filter((i) => i.stale).length,
   };
 }
 

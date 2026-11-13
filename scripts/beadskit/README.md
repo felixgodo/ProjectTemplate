@@ -243,6 +243,9 @@ export default {
       colors: { 'club-add': '#e6781e' },                       // CSS color for the page
       cols: { settings: { title: 'Settings', color: '#1ea0aa', hint: 'SiteSetting einrichten' } },
       split: [{ key: 'activate', label: 'aktivieren', title: 'zum Aktivieren' }],  // human + label → own column
+      // open issues with this label get their own board column before „Bereit“, whatever phase or status (from 1.15.0);
+      // releasing them (→ Bereit) only removes human and sets no phase
+      lanes: [{ key: 'suche', label: 'such-auftrag', title: 'Suche', color: '#965ad2', hint: 'Such-Aufträge' }],
       group: { prefix: 'stadt:', all: 'alle Städte' },         // filter and card tag instead of modul:
       create: { type: 'task', title: 'Neuer Club', fields: [{ name: 'stadt', label: 'Stadt', prefix: 'stadt:' }] },
       humanHint: 'HTML-Hinweis über „Wartet auf dich“', release: 'Freigeben', prs: false,
