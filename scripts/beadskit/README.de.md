@@ -233,6 +233,9 @@ export default {
       colors: { 'club-add': '#e6781e' },                       // CSS-Farbe für die Seite
       cols: { settings: { title: 'Settings', color: '#1ea0aa', hint: 'SiteSetting einrichten' } },
       split: [{ key: 'activate', label: 'aktivieren', title: 'zum Aktivieren' }],  // human + Label → eigene Spalte
+      // offene Issues mit diesem Label bekommen eine eigene Board-Spalte vor „Bereit“, egal welche Phase oder welcher
+      // Status (ab 1.15.0); Freigeben (→ Bereit) nimmt nur human weg und setzt keine Phase
+      lanes: [{ key: 'suche', label: 'such-auftrag', title: 'Suche', color: '#965ad2', hint: 'Such-Aufträge' }],
       group: { prefix: 'stadt:', all: 'alle Städte' },         // Filter und Karten-Tag statt modul:
       create: { type: 'task', title: 'Neuer Club', fields: [{ name: 'stadt', label: 'Stadt', prefix: 'stadt:' }] },
       humanHint: 'HTML-Hinweis über „Wartet auf dich“', release: 'Freigeben', prs: false,

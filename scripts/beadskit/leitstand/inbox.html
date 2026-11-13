@@ -1548,6 +1548,7 @@ async function openIssue(id, focusClose = false) {
   // Workspace des Issues, nicht der Ansicht: ein Link kann in einen anderen Workspace führen
   const W = st.workspaces[it.ws] || meta();
   const readyPhase = W.readyPhase;
+  const lane = (W.lanes || []).find((l) => labels.includes(l.label));
   const colTitle = (k) => W.cols.find(([c]) => c === k)?.[1] || k;
   const moveBtn = (to, label) => `<button class="small" data-move="${to}">${esc(label)}</button>`;
   // bd show liefert die verknüpften Issues mit id und dependency_type, bd list nur Kanten
@@ -1582,7 +1583,8 @@ async function openIssue(id, focusClose = false) {
       <textarea id="i-text" placeholder="Notiz oder Begründung (beim Schließen Pflicht)">${esc(drafts.get(it.id) || '')}</textarea>
       <div class="moves">
         ${closed ? '' : xActions(it).map((a) => xButton(a, 'small')).join('')}
-        ${!labels.includes(`phase:${readyPhase}`) || labels.includes('human') || it.status !== 'open' ? moveBtn('ready', closed ? 'Wieder öffnen → Bereit' : `→ ${colTitle('ready')} (phase:${readyPhase})`) : ''}
+        ${lane ? (labels.includes('human') || it.status === 'closed' || it.status === 'deferred' ? moveBtn('ready', closed ? `Wieder öffnen → ${colTitle(lane.key)}` : `→ ${colTitle(lane.key)}`) : '')
+          : !labels.includes(`phase:${readyPhase}`) || labels.includes('human') || it.status !== 'open' ? moveBtn('ready', closed ? 'Wieder öffnen → Bereit' : `→ ${colTitle('ready')} (phase:${readyPhase})`) : ''}
         ${W.phases.slice(1).map((ph) => (!labels.includes(`phase:${ph}`) || closed ? moveBtn(ph, `→ ${colTitle(ph)}`) : '')).join('')}
         ${!labels.includes('human') ? moveBtn('human', '→ Wartet auf mich') : ''}
         ${it.status !== 'deferred' && !closed ? moveBtn('deferred', 'Zurückstellen') : ''}

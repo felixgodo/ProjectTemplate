@@ -32,6 +32,8 @@ const EXT = normalizeExt({
   workspaces: {
     clubs: {
       split: [{ key: 'activate', label: 'aktivieren', title: 'zum Aktivieren' }],
+      lanes: [{ key: 'suche', label: 'such-auftrag', title: 'Suche', color: '#965ad2', hint: 'Such-Aufträge' },
+        { key: 'ready', label: 'x' }, { key: 'suche', label: 'doppelt' }, { key: 'bad;', label: 'y' }],
       group: { prefix: 'stadt:', all: 'alle Städte' },
       create: { type: 'task', fields: [{ name: 'stadt', label: 'Stadt', prefix: 'stadt:' }] },
       roleLabels: { 'club-add': 'Anlegen' },
@@ -686,8 +688,8 @@ test('buildWorkspaces: Spalten, Ziele, Kennzahlen und Texte aus Config und Proje
   assert.equal(CODE.group.prefix, 'modul:');
   assert.ok(CODE.kpis.some(([k]) => k === 'mergedToday'));
   assert.deepEqual(CODE.kpis.slice(1, 3), [['open', 'bereit'], ['released', 'bereit: Fix']]);
-  assert.deepEqual(CLUBS.cols.map(([k, t]) => [k, t]), [['ready', 'Bereit'], ['place', 'Anlegen'], ['settings', 'Settings'], ['test', 'Test'], ['done', 'Erledigt']]);
-  assert.deepEqual(CLUBS.cols[2].slice(2), ['#1ea0aa', 'SiteSetting einrichten']);
+  assert.deepEqual(CLUBS.cols.map(([k, t]) => [k, t]), [['suche', 'Suche'], ['ready', 'Bereit'], ['place', 'Anlegen'], ['settings', 'Settings'], ['test', 'Test'], ['done', 'Erledigt']]);
+  assert.deepEqual(CLUBS.cols[3].slice(2), ['#1ea0aa', 'SiteSetting einrichten']);
   assert.deepEqual(CLUBS.moveTargets, ['ready', 'settings', 'test', 'human', 'deferred', 'done']);
   assert.equal(CLUBS.colors['club-add'], 'rgb(230 120 30)');
   assert.equal(CLUBS.colors['club-test'], 'var(--muted)');
@@ -695,8 +697,8 @@ test('buildWorkspaces: Spalten, Ziele, Kennzahlen und Texte aus Config und Proje
   assert.equal(CLUBS.roleLabels['club-search'], 'Club search');
   assert.equal(CLUBS.prs, false);
   assert.deepEqual(CLUBS.split, [{ key: 'activate', label: 'aktivieren', title: 'zum Aktivieren' }]);
-  assert.deepEqual(CLUBS.kpis.slice(0, 3).map(([k]) => k), ['human', 'activate', 'open']);
-  assert.deepEqual(CLUBS.kpis[3], ['released', 'bereit: Anlegen']);
+  assert.deepEqual(CLUBS.kpis.slice(0, 4).map(([k]) => k), ['human', 'activate', 'suche', 'open']);
+  assert.deepEqual(CLUBS.kpis[4], ['released', 'bereit: Anlegen']);
   assert.deepEqual(CLUBS.defaults, { 'club-search': 1, 'club-add': 1, 'club-settings': 2, 'club-test': 1 });
   // CSS aus der Projektdatei nur, wenn es eine Farbe ist
   const evil = buildWorkspaces(CFG, normalizeExt({ workspaces: { code: { colors: { fix: 'red;}</style><script>' }, cols: { ready: { color: 'url(x)' } } } } }));
@@ -717,6 +719,9 @@ test('groupIssues: code ohne ws:clubs-Issues, clubs mit eigenen Spalten und spli
     { id: 'k-7', status: 'closed', labels: ['ws:clubs'], priority: 2, closed_at: '2026-10-16T10:00:00Z' },
     { id: 'k-8', status: 'deferred', labels: ['ws:clubs', 'phase:place'], priority: 2 },
     { id: 'k-9', issue_type: 'epic', status: 'open', labels: ['ws:clubs'], priority: 2 },
+    { id: 's-1', status: 'in_progress', labels: ['ws:clubs', 'such-auftrag'], priority: 0 },
+    { id: 's-2', status: 'open', labels: ['ws:clubs', 'such-auftrag', 'phase:place'], priority: 1 },
+    { id: 's-3', status: 'open', labels: ['ws:clubs', 'such-auftrag', 'human'], priority: 1 },
   ];
   const ids = (cols) => Object.fromEntries(Object.entries(cols).map(([k, v]) => [k, v.map((i) => i.id)]));
   assert.deepEqual(ids(groupIssues(issues, CODE, WS, NOW)), {
@@ -724,11 +729,12 @@ test('groupIssues: code ohne ws:clubs-Issues, clubs mit eigenen Spalten und spli
   });
   const clubs = groupIssues(issues, CLUBS, WS, NOW);
   assert.deepEqual(ids(clubs), {
-    human: ['k-5'], activate: ['k-6'], ready: ['k-1'], place: ['k-2'], settings: ['k-3'], test: ['k-4'],
+    human: ['k-5', 's-3'], activate: ['k-6'], suche: ['s-1', 's-2'], ready: ['k-1'], place: ['k-2'], settings: ['k-3'], test: ['k-4'],
     done: ['k-7'], deferred: ['k-8'],
   });
   const m = metrics(clubs, CLUBS, [], NOW);
-  assert.equal(m.human, 1);
+  assert.equal(m.human, 2);
+  assert.equal(m.suche, 2);
   assert.equal(m.activate, 1);
   assert.equal(m.place, 1);
   assert.equal(m.released, 1);
@@ -742,6 +748,29 @@ test('groupIssues: code ohne ws:clubs-Issues, clubs mit eigenen Spalten und spli
     for (const [k] of def.cols) assert.ok(Array.isArray(cols[k]), `${def.name}.${k}`);
     for (const s of def.split) assert.ok(Array.isArray(cols[s.key]), `${def.name}.${s.key}`);
   }
+});
+
+test('buildWorkspaces: lanes als eigene Board-Spalte vor Bereit, ungültige und doppelte ignoriert', () => {
+  assert.deepEqual(CLUBS.lanes, [{ key: 'suche', label: 'such-auftrag' }]);
+  assert.deepEqual(CLUBS.cols[0], ['suche', 'Suche', '#965ad2', 'Such-Aufträge']);
+  assert.equal(CLUBS.cols[1][0], 'ready');
+  assert.deepEqual(CLUBS.kpis.slice(0, 4).map(([k]) => k), ['human', 'activate', 'suche', 'open']);
+  assert.ok(!CLUBS.moveTargets.includes('suche'));
+  assert.deepEqual(CODE.lanes, []);
+  const plain = buildWorkspaces(CFG, normalizeExt({ workspaces: { clubs: { lanes: [{ key: 'auftrag', label: 'a', color: 'red;}' }] } } }));
+  assert.deepEqual(plain.clubs.cols[0], ['auftrag', 'Auftrag', 'var(--muted)', 'Label a']);
+});
+
+test('planIssueAction: Freigeben eines lane-Issues setzt keine Phase', () => {
+  const cur = { labels: ['ws:clubs', 'such-auftrag', 'human', 'phase:place'], status: 'open' };
+  assert.deepEqual(planIssueAction({ id: 'spot-1', action: 'move', to: 'ready' }, cur, CLUBS, D), [
+    ['update', 'spot-1', '--remove-label', 'human', '--remove-label', 'phase:place',
+      '--append-notes', `User-Entscheidung ${D}: freigegeben`],
+  ]);
+  // in eine spätere Phase verschieben geht weiter
+  assert.deepEqual(planIssueAction({ id: 'spot-1', action: 'move', to: 'settings' }, { labels: ['ws:clubs', 'such-auftrag'] }, CLUBS, D), [
+    ['update', 'spot-1', '--add-label', 'phase:settings', '--append-notes', `User-Entscheidung ${D}: verschoben nach phase:settings`],
+  ]);
 });
 
 test('planIssueAction: in clubs ist Bereit phase:place, verschieben entfernt split-Labels', () => {
